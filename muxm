@@ -42,9 +42,13 @@ EXIT_CODE=1
 PRINT_EFFCONF=0
 CONFIG_WRITE_ROTATE=0
 CONFIG_WRITE_PATH=""
+PROFILE_NAME=""
 
 # Metadata cache for performance optimization
 METADATA_CACHE=""
+
+# JSON report accumulator (for dv-archival reporting)
+declare -a REPORT_ENTRIES=()
 
 # ===== Section 4: Opinionated defaults ========================================================
 # ---- Video encode (x265)
@@ -123,6 +127,31 @@ declare -i SKIP_SUBS=0
 
 # ---- Overrides
 AUDIO_TRACK_OVERRIDE=""
+
+# ---- Profile-introduced variables (safe defaults preserve current behavior)
+# Video codec: libx265 (default) or libx264 (universal)
+VIDEO_CODEC="libx265"
+# Skip encode if source already matches profile requirements
+declare -i VIDEO_COPY_IF_COMPLIANT=0
+# Tone-map HDR→SDR (universal profile)
+declare -i TONEMAP_HDR_TO_SDR=0
+TONEMAP_FILTER='zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p'
+# Force all audio to a specific codec (e.g., "aac" for universal; "" = auto)
+AUDIO_FORCE_CODEC=""
+# Allow lossless audio codecs (TrueHD, DTS-HD MA, FLAC) to pass through untouched
+declare -i AUDIO_LOSSLESS_PASSTHROUGH=0
+# Burn forced subtitles into the video stream
+declare -i SUB_BURN_FORCED=0
+# Export non-forced subtitles as external .srt files alongside output
+declare -i SUB_EXPORT_EXTERNAL=0
+# Keep chapter markers in output
+declare -i KEEP_CHAPTERS=1
+# Strip non-essential metadata from output
+declare -i STRIP_METADATA=0
+# Skip processing entirely if source already matches profile (dv-archival, atv-directplay-hq)
+declare -i SKIP_IF_IDEAL=0
+# Generate JSON report alongside output (dv-archival)
+declare -i REPORT_JSON=0
 
 # ===== Section 5: Basic helpers ===============================================================
 say()  { printf "%s\n" "$@" >&2; }
@@ -227,6 +256,174 @@ _muxm_try_source /etc/.muxmrc
 _muxm_try_source "$HOME/.muxmrc"
 _muxm_try_source "./.muxmrc"
 
+# ===== Section 6b: Profile pre-scan & application ==============================================
+# Two-pass CLI: first extract --profile, apply it, then let full CLI parse override.
+
+# Pre-scan: walk args looking only for --profile <name>
+_prescan_args=("$@")
+_filtered_args=()
+_i=0
+while (( _i < ${#_prescan_args[@]} )); do
+  if [[ "${_prescan_args[$_i]}" == "--profile" ]]; then
+    if (( _i + 1 < ${#_prescan_args[@]} )); then
+      PROFILE_NAME="${_prescan_args[$((_i+1))]}"
+      _i=$((_i + 2))
+    else
+      _i=$((_i + 1))
+    fi
+  else
+    _filtered_args+=("${_prescan_args[$_i]}")
+    _i=$((_i + 1))
+  fi
+done
+# Replace positional parameters with filtered args (--profile consumed)
+set -- "${_filtered_args[@]}"
+unset _prescan_args _filtered_args _i
+
+# ---- Profile application functions (pure assignment, no side effects) ----
+
+apply_profile_dv_archival() {
+  # Goal: Preserve DV + HDR10 metadata, lossless audio, lossless remux only.
+  DISABLE_DV=0
+  ALLOW_DV_FALLBACK=1
+  DV_CONVERT_TO_P81_IF_FAIL=1
+  # Container: auto (keep source extension; default to mkv for broad codec support)
+  OUTPUT_EXT="mkv"
+  # Video: copy, don't re-encode
+  VIDEO_COPY_IF_COMPLIANT=1
+  VIDEO_CODEC="libx265"
+  # Audio: lossless passthrough, no stereo fallback by default
+  AUDIO_LOSSLESS_PASSTHROUGH=1
+  ADD_STEREO_IF_MULTICH=0
+  # Subs: keep all; no burn
+  SUB_INCLUDE_FORCED=1
+  SUB_INCLUDE_FULL=1
+  SUB_INCLUDE_SDH=1
+  SUB_BURN_FORCED=0
+  SUB_EXPORT_EXTERNAL=0
+  # Chapters/metadata: keep
+  KEEP_CHAPTERS=1
+  STRIP_METADATA=0
+  # Skip-if-ideal: on
+  SKIP_IF_IDEAL=1
+  # Reporting: JSON
+  REPORT_JSON=1
+}
+
+apply_profile_hdr10_hq() {
+  # Goal: Max HDR10 quality, strip DV, preserve lossless audio + stereo fallback.
+  DISABLE_DV=1
+  ALLOW_DV_FALLBACK=0
+  DV_CONVERT_TO_P81_IF_FAIL=0
+  # Container: mkv
+  OUTPUT_EXT="mkv"
+  # Video: HEVC re-encode with high-quality HDR10 params
+  VIDEO_CODEC="libx265"
+  VIDEO_COPY_IF_COMPLIANT=0
+  CRF_VALUE=17
+  PRESET_VALUE="slow"
+  X265_PARAMS_BASE='profile=main10:repeat-headers=1:hdr-opt=1:hdr10=1:hdr10-opt=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited:aq-mode=3:aq-strength=1.3:psy-rd=2.0:psy-rdoq=1.0:rc-lookahead=60'
+  HDR_TARGET_PIXFMT="yuv420p10le"
+  FORCE_CHROMA_420=1
+  # Audio: lossless passthrough + stereo fallback
+  AUDIO_LOSSLESS_PASSTHROUGH=1
+  ADD_STEREO_IF_MULTICH=1
+  STEREO_BITRATE="256k"
+  # Subs: keep all; no burn
+  SUB_INCLUDE_FORCED=1
+  SUB_INCLUDE_FULL=1
+  SUB_INCLUDE_SDH=1
+  SUB_BURN_FORCED=0
+  # Chapters/metadata: keep
+  KEEP_CHAPTERS=1
+  STRIP_METADATA=0
+}
+
+apply_profile_atv_directplay_hq() {
+  # Goal: Conform to Apple TV/Plex Direct Play constraints while keeping high quality.
+  DISABLE_DV=0
+  ALLOW_DV_FALLBACK=1
+  DV_CONVERT_TO_P81_IF_FAIL=1
+  # Container: mp4 for ATV Direct Play
+  OUTPUT_EXT="mp4"
+  # Video: prefer copy if compliant; else HEVC Main10
+  VIDEO_CODEC="libx265"
+  VIDEO_COPY_IF_COMPLIANT=1
+  CRF_VALUE=17
+  PRESET_VALUE="slow"
+  X265_PARAMS_BASE='profile=main10:repeat-headers=1:hdr-opt=1:aq-mode=3:aq-strength=1.3:psy-rd=2.0:psy-rdoq=1.0:rc-lookahead=60'
+  HDR_TARGET_PIXFMT="yuv420p10le"
+  FORCE_CHROMA_420=1
+  # Audio: E-AC-3 for surround (ATV can't Direct Play TrueHD), AAC stereo fallback
+  AUDIO_LOSSLESS_PASSTHROUGH=0
+  ADD_STEREO_IF_MULTICH=1
+  STEREO_BITRATE="256k"
+  EAC3_BITRATE_5_1="640k"
+  EAC3_BITRATE_7_1="768k"
+  # Subs: burn forced (or mov_text); keep others as mov_text
+  SUB_INCLUDE_FORCED=1
+  SUB_INCLUDE_FULL=1
+  SUB_INCLUDE_SDH=1
+  SUB_BURN_FORCED=1
+  SUB_EXPORT_EXTERNAL=0
+  # Chapters/metadata: keep
+  KEEP_CHAPTERS=1
+  STRIP_METADATA=0
+  # Skip-if-ideal: on
+  SKIP_IF_IDEAL=1
+}
+
+apply_profile_universal() {
+  # Goal: Compatibility over fidelity. SDR H.264, AAC stereo, burn forced subs.
+  DISABLE_DV=1
+  ALLOW_DV_FALLBACK=0
+  DV_CONVERT_TO_P81_IF_FAIL=0
+  # Container: mp4
+  OUTPUT_EXT="mp4"
+  # Video: H.264 SDR, tone-map HDR if present
+  VIDEO_CODEC="libx264"
+  VIDEO_COPY_IF_COMPLIANT=0
+  TONEMAP_HDR_TO_SDR=1
+  CRF_VALUE=18
+  PRESET_VALUE="slow"
+  FORCE_CHROMA_420=1
+  # Audio: AAC stereo forced; optional AC3 5.1
+  AUDIO_FORCE_CODEC="aac"
+  AUDIO_LOSSLESS_PASSTHROUGH=0
+  ADD_STEREO_IF_MULTICH=0
+  MAX_AUDIO_CHANNELS=2
+  STEREO_BITRATE="256k"
+  # Subs: burn forced; export others as external SRT
+  SUB_INCLUDE_FORCED=1
+  SUB_INCLUDE_FULL=1
+  SUB_INCLUDE_SDH=0
+  SUB_BURN_FORCED=1
+  SUB_EXPORT_EXTERNAL=1
+  # Chapters/metadata: strip
+  KEEP_CHAPTERS=0
+  STRIP_METADATA=1
+}
+
+# Dispatcher
+apply_profile() {
+  [[ -z "${PROFILE_NAME:-}" ]] && return 0
+  case "$PROFILE_NAME" in
+    dv-archival)         apply_profile_dv_archival ;;
+    hdr10-hq)            apply_profile_hdr10_hq ;;
+    atv-directplay-hq)   apply_profile_atv_directplay_hq ;;
+    universal)           apply_profile_universal ;;
+    *)
+      printf "❌ ERROR: Unknown profile: %s\n" "$PROFILE_NAME" >&2
+      printf "   Valid profiles: dv-archival, hdr10-hq, atv-directplay-hq, universal\n" >&2
+      exit 11
+      ;;
+  esac
+  note "Applied profile: $PROFILE_NAME"
+}
+
+# Apply profile now (after config files, before CLI flags)
+apply_profile
+
 # ===== Section 7: CLI ==========================================================================
 USAGE_SHORT="Usage: ${CLI_NAME} [options] <source> [target.${OUTPUT_EXT}]"
 print_usage(){
@@ -235,6 +432,11 @@ ${APP_NAME} v${VERSION} — ${CLI_NAME}
 
 $USAGE_SHORT
 
+Profile (format presets):
+  --profile NAME              Apply a named format profile. Overrides config-file
+                              defaults; CLI flags still override the profile.
+                              Valid: dv-archival, hdr10-hq, atv-directplay-hq, universal
+
 Core options:
   -h, --help                  Show help
   -V, --version               Show version
@@ -242,6 +444,8 @@ Core options:
   -k, --keep-temp             Keep workdir on failure (default behavior keeps on failure anyway)
   --dry-run                   Print actions and create stub artifacts (no real encode)
   --checksum                  Write sha256 checksum for final output
+  --skip-if-ideal             Skip processing if source already matches profile
+  --report-json               Generate JSON report alongside output
 
 Video:
   --crf N                     Set CRF (default: ${CRF_VALUE})
@@ -252,12 +456,17 @@ Video:
   --threads N                 ffmpeg threads
   --no-dv                     Disable Dolby Vision extraction/injection
   --no-allow-dv-fallback      If DV handling fails, hard fail (default is fallback to non-DV)
+  --video-codec libx265|libx264  Video encoder (default: libx265)
+  --video-copy-if-compliant   Copy video if source already matches target
+  --tonemap                   Tone-map HDR to SDR (used by universal profile)
 
 Audio:
   --audio-track N             Force select audio track (0-based, relative to audio streams)
   --audio-lang-pref "eng,..." Language preference order (default: ${AUDIO_LANG_PREF})
   --stereo-bitrate 192k       Stereo AC3 bitrate (default: ${STEREO_BITRATE})
   --no-stereo-fallback        Do not add stereo track when primary is multichannel
+  --audio-force-codec CODEC   Force all audio to CODEC (e.g., aac)
+  --audio-lossless-passthrough Allow lossless codecs (TrueHD, DTS-HD MA, FLAC) to copy through
 
 Subtitles:
   --no-subtitles              Do not include subtitles
@@ -265,9 +474,14 @@ Subtitles:
   --no-ocr                    Disable OCR (PGS will be dropped)
   --ocr-tool TOOL             OCR tool (default: ${SUB_OCR_TOOL})
   --ocr-lang LANG             OCR language (default: ${SUB_OCR_LANG})
+  --sub-burn-forced           Burn forced subtitles into video
+  --sub-export-external       Export subtitles as external .srt files
 
 Output:
-  --output-ext mp4|m4v|mov    Output container family extension (default: ${OUTPUT_EXT})
+  --output-ext mp4|m4v|mov|mkv  Output container extension (default: ${OUTPUT_EXT})
+  --keep-chapters             Keep chapter markers (default: on)
+  --no-keep-chapters          Strip chapter markers
+  --strip-metadata            Strip non-essential metadata
 
 Quick tests:
   --skip-video                Skip video pipeline
@@ -321,12 +535,20 @@ while [[ $# -gt 0 ]]; do
     --no-allow-dv-fallback) ALLOW_DV_FALLBACK=0; shift ;;
     --dv-convert-p81) DV_CONVERT_TO_P81_IF_FAIL=1; shift ;;
     --no-dv-convert-p81) DV_CONVERT_TO_P81_IF_FAIL=0; shift ;;
+    --video-codec) VIDEO_CODEC="${2:-}"; shift 2 ;;
+    --video-copy-if-compliant) VIDEO_COPY_IF_COMPLIANT=1; shift ;;
+    --no-video-copy-if-compliant) VIDEO_COPY_IF_COMPLIANT=0; shift ;;
+    --tonemap) TONEMAP_HDR_TO_SDR=1; shift ;;
+    --no-tonemap) TONEMAP_HDR_TO_SDR=0; shift ;;
 
     --audio-track) AUDIO_TRACK_OVERRIDE="${2:-}"; shift 2 ;;
     --audio-lang-pref) AUDIO_LANG_PREF="${2:-}"; shift 2 ;;
     --stereo-bitrate) STEREO_BITRATE="${2:-}"; shift 2 ;;
     --stereo-fallback) ADD_STEREO_IF_MULTICH=1; shift ;;
     --no-stereo-fallback) ADD_STEREO_IF_MULTICH=0; shift ;;
+    --audio-force-codec) AUDIO_FORCE_CODEC="${2:-}"; shift 2 ;;
+    --audio-lossless-passthrough) AUDIO_LOSSLESS_PASSTHROUGH=1; shift ;;
+    --no-audio-lossless-passthrough) AUDIO_LOSSLESS_PASSTHROUGH=0; shift ;;
 
     --no-subtitles) SUB_INCLUDE_FORCED=0; SUB_INCLUDE_FULL=0; SUB_INCLUDE_SDH=0; shift ;;
     --sub-lang-pref) SUB_LANG_PREF="${2:-}"; shift 2 ;;
@@ -334,12 +556,27 @@ while [[ $# -gt 0 ]]; do
     --ocr-lang) SUB_OCR_LANG="${2:-}"; shift 2 ;;
     --no-ocr) SUB_ENABLE_OCR=0; shift ;;
     --ocr-tool) SUB_OCR_TOOL="${2:-}"; shift 2 ;;
+    --sub-burn-forced) SUB_BURN_FORCED=1; shift ;;
+    --no-sub-burn-forced) SUB_BURN_FORCED=0; shift ;;
+    --sub-export-external) SUB_EXPORT_EXTERNAL=1; shift ;;
+    --no-sub-export-external) SUB_EXPORT_EXTERNAL=0; shift ;;
 
     --skip-video) SKIP_VIDEO=1; shift ;;
     --skip-audio) SKIP_AUDIO=1; shift ;;
     --skip-subs)  SKIP_SUBS=1;  shift ;;
 
     --output-ext) OUTPUT_EXT="${2:-}"; shift 2 ;;
+    --keep-chapters) KEEP_CHAPTERS=1; shift ;;
+    --no-keep-chapters) KEEP_CHAPTERS=0; shift ;;
+    --strip-metadata) STRIP_METADATA=1; shift ;;
+    --no-strip-metadata) STRIP_METADATA=0; shift ;;
+    --skip-if-ideal) SKIP_IF_IDEAL=1; shift ;;
+    --no-skip-if-ideal) SKIP_IF_IDEAL=0; shift ;;
+    --report-json) REPORT_JSON=1; shift ;;
+    --no-report-json) REPORT_JSON=0; shift ;;
+
+    # --profile was consumed by pre-scan; handle straggler gracefully
+    --profile) shift 2 ;;
 
     --) shift; break ;;
     -*) die 11 "Unknown option: $1. $USAGE_SHORT" ;;
@@ -349,42 +586,103 @@ done
 
 if (( PRINT_EFFCONF )); then
   cat <<EOF
-Effective config (post config-files + CLI):
-  CRF_VALUE=$CRF_VALUE
-  PRESET_VALUE=$PRESET_VALUE
-  X265_PARAMS_BASE=$X265_PARAMS_BASE
-  LEVEL_VALUE=$LEVEL_VALUE
-  CONSERVATIVE_VBV=$CONSERVATIVE_VBV
-  FORCE_CHROMA_420=$FORCE_CHROMA_420
-  SDR_USE_10BIT_IF_SRC_10BIT=$SDR_USE_10BIT_IF_SRC_10BIT
-  HDR_TARGET_PIXFMT=$HDR_TARGET_PIXFMT
-  DISABLE_DV=$DISABLE_DV
-  ALLOW_DV_FALLBACK=$ALLOW_DV_FALLBACK
-  DV_CONVERT_TO_P81_IF_FAIL=$DV_CONVERT_TO_P81_IF_FAIL
-  AUDIO_LANG_PREF=$AUDIO_LANG_PREF
-  AUDIO_TRACK_OVERRIDE=${AUDIO_TRACK_OVERRIDE:-}
-  ADD_STEREO_IF_MULTICH=$ADD_STEREO_IF_MULTICH
-  STEREO_BITRATE=$STEREO_BITRATE
-  SUB_LANG_PREF=$SUB_LANG_PREF
-  SUB_INCLUDE_FORCED=$SUB_INCLUDE_FORCED
-  SUB_INCLUDE_FULL=$SUB_INCLUDE_FULL
-  SUB_INCLUDE_SDH=$SUB_INCLUDE_SDH
-  SUB_ENABLE_OCR=$SUB_ENABLE_OCR
-  SUB_OCR_TOOL=$SUB_OCR_TOOL
-  SUB_OCR_LANG=$SUB_OCR_LANG
-  OUTPUT_EXT=$OUTPUT_EXT
-  DRY_RUN=$DRY_RUN
-  CHECKSUM=$CHECKSUM
-  KEEP_TEMP=$KEEP_TEMP
-  KEEP_TEMP_ALWAYS=$KEEP_TEMP_ALWAYS
+Effective config (post config-files + profile + CLI):
+
+  [Profile]
+  PROFILE_NAME              = ${PROFILE_NAME:-<none>}
+
+  [Video — Encode]
+  VIDEO_CODEC               = $VIDEO_CODEC
+  CRF_VALUE                 = $CRF_VALUE
+  PRESET_VALUE              = $PRESET_VALUE
+  X265_PARAMS_BASE          = $X265_PARAMS_BASE
+  LEVEL_VALUE               = ${LEVEL_VALUE:-<auto>}
+  CONSERVATIVE_VBV          = $CONSERVATIVE_VBV
+  THREADS                   = ${THREADS:-<auto>}
+
+  [Video — Pixel Format / Color]
+  FORCE_CHROMA_420          = $FORCE_CHROMA_420
+  SDR_USE_10BIT_IF_SRC_10BIT = $SDR_USE_10BIT_IF_SRC_10BIT
+  HDR_TARGET_PIXFMT         = $HDR_TARGET_PIXFMT
+
+  [Video — Copy / Tonemap]
+  VIDEO_COPY_IF_COMPLIANT   = $VIDEO_COPY_IF_COMPLIANT
+  TONEMAP_HDR_TO_SDR        = $TONEMAP_HDR_TO_SDR
+  TONEMAP_FILTER            = $TONEMAP_FILTER
+
+  [Dolby Vision]
+  DISABLE_DV                = $DISABLE_DV
+  ALLOW_DV_FALLBACK         = $ALLOW_DV_FALLBACK
+  DV_CONVERT_TO_P81_IF_FAIL = $DV_CONVERT_TO_P81_IF_FAIL
+
+  [Audio — Selection]
+  AUDIO_LANG_PREF           = $AUDIO_LANG_PREF
+  AUDIO_TRACK_OVERRIDE      = ${AUDIO_TRACK_OVERRIDE:-<none>}
+
+  [Audio — Transcode / Policy]
+  ADD_STEREO_IF_MULTICH     = $ADD_STEREO_IF_MULTICH
+  STEREO_BITRATE            = $STEREO_BITRATE
+  EAC3_BITRATE_5_1          = $EAC3_BITRATE_5_1
+  EAC3_BITRATE_7_1          = $EAC3_BITRATE_7_1
+  MAX_AUDIO_CHANNELS        = $MAX_AUDIO_CHANNELS
+  AUDIO_FORCE_CODEC         = ${AUDIO_FORCE_CODEC:-<auto>}
+  AUDIO_LOSSLESS_PASSTHROUGH = $AUDIO_LOSSLESS_PASSTHROUGH
+
+  [Subtitles]
+  SUB_LANG_PREF             = $SUB_LANG_PREF
+  SUB_INCLUDE_FORCED        = $SUB_INCLUDE_FORCED
+  SUB_INCLUDE_FULL          = $SUB_INCLUDE_FULL
+  SUB_INCLUDE_SDH           = $SUB_INCLUDE_SDH
+  SUB_MAX_TRACKS            = $SUB_MAX_TRACKS
+  SUB_BURN_FORCED           = $SUB_BURN_FORCED
+  SUB_EXPORT_EXTERNAL       = $SUB_EXPORT_EXTERNAL
+  SUB_ENABLE_OCR            = $SUB_ENABLE_OCR
+  SUB_OCR_TOOL              = $SUB_OCR_TOOL
+  SUB_OCR_LANG              = $SUB_OCR_LANG
+
+  [Output / Muxing]
+  OUTPUT_EXT                = $OUTPUT_EXT
+  KEEP_CHAPTERS             = $KEEP_CHAPTERS
+  STRIP_METADATA            = $STRIP_METADATA
+
+  [Pipeline Control]
+  SKIP_IF_IDEAL             = $SKIP_IF_IDEAL
+  REPORT_JSON               = $REPORT_JSON
+  DRY_RUN                   = $DRY_RUN
+  CHECKSUM                  = $CHECKSUM
+  KEEP_TEMP                 = $KEEP_TEMP
+  KEEP_TEMP_ALWAYS          = $KEEP_TEMP_ALWAYS
 EOF
   exit 0
+fi
+
+# ===== Section 7b: Profile + flag conflict warnings ============================================
+if [[ -n "${PROFILE_NAME:-}" ]]; then
+  case "$PROFILE_NAME" in
+    dv-archival)
+      (( DISABLE_DV )) && warn "Profile 'dv-archival' with --no-dv: DV archival without DV is pointless."
+      ;;
+    hdr10-hq)
+      (( ! DISABLE_DV )) && warn "Profile 'hdr10-hq' expects DV to be stripped; ensure --no-dv or profile default is active."
+      ;;
+    universal)
+      [[ "$OUTPUT_EXT" == "mkv" ]] && warn "Profile 'universal' with mkv: unusual combination (mp4 recommended for max compat)."
+      ;;
+  esac
 fi
 
 # ===== Section 8: Required tools ===============================================================
 need ffmpeg
 need ffprobe
-need dovi_tool
+if (( ! DISABLE_DV )); then
+  if ! command -v dovi_tool >/dev/null 2>&1; then
+    warn "dovi_tool not found — Dolby Vision handling will be disabled."
+    DISABLE_DV=1
+  fi
+else
+  # DV explicitly disabled, dovi_tool not needed
+  :
+fi
 
 if (( SUB_ENABLE_OCR )); then
   if ! command -v "$SUB_OCR_TOOL" >/dev/null 2>&1; then
@@ -401,8 +699,8 @@ OUT="${POSITIONALS[1]:-}"
 
 # Validate output extension (security: prevent command injection)
 case "$OUTPUT_EXT" in
-  mp4|m4v|mov) ;;
-  *) die 11 "Invalid OUTPUT_EXT: must be mp4, m4v, or mov (got: $OUTPUT_EXT)" ;;
+  mp4|m4v|mov|mkv) ;;
+  *) die 11 "Invalid OUTPUT_EXT: must be mp4, m4v, mov, or mkv (got: $OUTPUT_EXT)" ;;
 esac
 
 # Resolve and validate source file
@@ -452,6 +750,7 @@ MUX_FORMAT="mp4"
 case "$OUTPUT_EXT" in
   mp4|m4v) MUX_FORMAT="mp4" ;;
   mov)     MUX_FORMAT="mov" ;;
+  mkv)     MUX_FORMAT="matroska" ;;
 esac
 
 # ===== Section 10: Build ffmpeg/ffprobe flags ==================================================
@@ -531,7 +830,7 @@ on_exit() {
     [[ -f "$TMP_OUT" ]] && rm -f "$TMP_OUT"
 
     if [[ -n "$WORKDIR" && -d "$WORKDIR" && "${DEBUG:-0}" != "1" && $KEEP_TEMP -eq 0 && $KEEP_TEMP_ALWAYS -eq 0 ]]; then
-      note "Keeping failure artifacts at: $WORKDIR (use -k to suppress this, or -K to always keep)"
+      rm -rf "$WORKDIR"
     else
       note "Keeping failure artifacts at: $WORKDIR"
     fi
@@ -558,6 +857,121 @@ cache_stream_metadata() {
   METADATA_CACHE="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -of json "$SRC_ABS" 2>/dev/null)" || {
     die 12 "Failed to probe source file metadata - file may be corrupt"
   }
+}
+
+# ===== Section 15b: Report helpers & skip-if-ideal =============================================
+
+# Add an entry to the JSON report accumulator
+report_add() {
+  local key="$1" val="$2"
+  REPORT_ENTRIES+=("\"${key}\": \"${val}\"")
+}
+
+# Write JSON report alongside output
+write_json_report() {
+  (( REPORT_JSON )) || return 0
+  local report_path="${OUT%.${OUTPUT_EXT}}.report.json"
+  {
+    printf '{\n'
+    printf '  "tool": "%s",\n' "$APP_NAME v$VERSION"
+    printf '  "profile": "%s",\n' "${PROFILE_NAME:-<none>}"
+    printf '  "source": "%s",\n' "$SRC_ABS"
+    printf '  "output": "%s",\n' "$OUT"
+    printf '  "timestamp": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local i last=$(( ${#REPORT_ENTRIES[@]} - 1 ))
+    for (( i=0; i<${#REPORT_ENTRIES[@]}; i++ )); do
+      if (( i < last )); then
+        printf '  %s,\n' "${REPORT_ENTRIES[$i]}"
+      else
+        printf '  %s\n' "${REPORT_ENTRIES[$i]}"
+      fi
+    done
+    printf '}\n'
+  } > "$report_path" 2>/dev/null || warn "Failed to write JSON report to $report_path"
+  note "JSON report written → $report_path"
+}
+
+# Check if source already matches profile requirements (skip-if-ideal)
+check_skip_if_ideal() {
+  (( SKIP_IF_IDEAL )) || return 1  # return 1 = don't skip
+
+  local src_codec src_pix src_ext ideal=1
+
+  src_codec="$(_probe_field codec_name "$SRC_ABS" | tr '[:upper:]' '[:lower:]')"
+  src_pix="$(_probe_field pix_fmt "$SRC_ABS" | tr '[:upper:]' '[:lower:]')"
+  src_ext="${SRC_ABS##*.}"
+  src_ext="$(printf '%s' "$src_ext" | tr '[:upper:]' '[:lower:]')"
+
+  local reason=""
+
+  # Check video codec
+  if [[ "$VIDEO_CODEC" == "libx265" && "$src_codec" != "hevc" ]]; then
+    ideal=0; reason="video codec is $src_codec (need hevc)"
+  elif [[ "$VIDEO_CODEC" == "libx264" && "$src_codec" != "h264" ]]; then
+    ideal=0; reason="video codec is $src_codec (need h264)"
+  fi
+
+  # Check container
+  if (( ideal )); then
+    case "$OUTPUT_EXT" in
+      mp4|m4v)
+        if [[ "$src_ext" != "mp4" && "$src_ext" != "m4v" ]]; then
+          ideal=0; reason="container is .$src_ext (need .mp4/.m4v)"
+        fi
+        ;;
+      mkv)
+        if [[ "$src_ext" != "mkv" ]]; then
+          ideal=0; reason="container is .$src_ext (need .mkv)"
+        fi
+        ;;
+    esac
+  fi
+
+  # Check pixel format for HDR profiles
+  if (( ideal )) && [[ "$VIDEO_CODEC" == "libx265" ]]; then
+    if [[ "$src_pix" != *"p10"* && "$HDR_TARGET_PIXFMT" == "yuv420p10le" ]]; then
+      # Only flag this if source should be 10-bit but isn't
+      :
+    fi
+  fi
+
+  # Check audio: if lossless passthrough is off, check audio codecs are Direct Play compatible
+  if (( ideal )) && (( ! AUDIO_LOSSLESS_PASSTHROUGH )); then
+    local n_audio a_codec
+    n_audio="$(_audio_stream_count)"
+    if (( n_audio > 0 )); then
+      a_codec="$(_audio_codec 0)"
+      if [[ -n "${AUDIO_FORCE_CODEC:-}" && "$a_codec" != "$AUDIO_FORCE_CODEC" ]]; then
+        ideal=0; reason="audio codec is $a_codec (need $AUDIO_FORCE_CODEC)"
+      elif ! audio_is_direct_play_copyable "$a_codec"; then
+        ideal=0; reason="audio codec $a_codec not Direct Play compatible"
+      fi
+    fi
+  fi
+
+  # Check DV compliance for atv-directplay-hq
+  if (( ideal )) && [[ "${PROFILE_NAME:-}" == "atv-directplay-hq" ]]; then
+    if detect_dv; then
+      # DV present — check if it's Profile 8.1 (acceptable) or something else
+      local dv_info
+      dv_info="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -select_streams v:0 "$SRC_ABS" 2>&1)"
+      if ! printf '%s\n' "$dv_info" | grep -qiE 'dv_profile.*8'; then
+        ideal=0; reason="DV present but not Profile 8 (needs conversion)"
+      fi
+    fi
+  fi
+
+  if (( ideal )); then
+    note "✅ Source already matches profile '${PROFILE_NAME:-}' requirements — skipping processing."
+    report_add "skip_if_ideal" "true"
+    report_add "skip_reason" "source already compliant"
+    return 0  # 0 = skip
+  else
+    note "Source does not match ideal: $reason"
+    report_add "skip_if_ideal" "false"
+    report_add "skip_reason" "$reason"
+    return 1  # 1 = don't skip
+  fi
 }
 
 # Generic probe helper - reduces code duplication
@@ -606,12 +1020,20 @@ decide_color_and_pixfmt() {
   fi
 
   # Color Space Decision Tree:
-  # ┌─ HLG (arib-std-b67) → HDR profile, bt2020
+  # ┌─ TONEMAP_HDR_TO_SDR=1 → Force SDR output (tone-map in video pipeline)
+  # ├─ HLG (arib-std-b67) → HDR profile, bt2020
   # ├─ HDR10 (bt2020/smpte2084) → HDR10 profile, bt2020
   # └─ SDR (other) → SDR profile, 10-bit if source is 10-bit
   
   local tgt_pix="yuv420p" profile="SDR"
-  if [[ "$trc" == "arib-std-b67" || "$trc" == "hlg" ]]; then
+
+  if (( TONEMAP_HDR_TO_SDR )) && [[ "$prim" == "bt2020" || "$cspace" == "bt2020nc" || "$trc" == "smpte2084" || "$trc" == "arib-std-b67" || "$trc" == "hlg" ]]; then
+    # Source is HDR but we want SDR output (tone-mapping)
+    profile="SDR-TONEMAP"
+    tgt_pix="yuv420p"
+    COLOR_ARGS=(-color_primaries bt709 -color_trc bt709 -colorspace bt709)
+    note "HDR source detected — will tone-map to SDR (profile: universal)"
+  elif [[ "$trc" == "arib-std-b67" || "$trc" == "hlg" ]]; then
     profile="HLG"
     tgt_pix="$HDR_TARGET_PIXFMT"
     COLOR_ARGS=(-color_primaries bt2020 -color_trc arib-std-b67 -colorspace bt2020nc)
@@ -708,7 +1130,68 @@ AAC_STEREO=""
 declare -i HAS_AUDIO=0
 
 # ===== Section 20: Video pipeline ==============================================================
+
+# Check if source video is compliant for copy (no re-encode needed)
+_video_is_copy_compliant() {
+  local src_codec src_pix
+  src_codec="$(_probe_field codec_name "$SRC_ABS" | tr '[:upper:]' '[:lower:]')"
+  src_pix="$(_probe_field pix_fmt "$SRC_ABS" | tr '[:upper:]' '[:lower:]')"
+
+  # Check codec match
+  if [[ "$VIDEO_CODEC" == "libx265" && "$src_codec" != "hevc" ]]; then
+    return 1
+  fi
+  if [[ "$VIDEO_CODEC" == "libx264" && "$src_codec" != "h264" ]]; then
+    return 1
+  fi
+
+  # Check pixel format (10-bit for HDR)
+  if [[ "$TARGET_PIXFMT" == "yuv420p10le" && "$src_pix" != *"p10"* ]]; then
+    return 1
+  fi
+
+  # If tone-mapping is requested, can't copy
+  if (( TONEMAP_HDR_TO_SDR )) && [[ "$PROFILE_DESC" == "SDR-TONEMAP" ]]; then
+    return 1
+  fi
+
+  return 0
+}
+
 run_video_pipeline() {
+  # Check copy-if-compliant first
+  if (( VIDEO_COPY_IF_COMPLIANT )); then
+    if _video_is_copy_compliant; then
+      note "→ Source video is compliant for target profile — copying without re-encode."
+      report_add "video_action" "copy (compliant)"
+
+      if (( DRY_RUN )); then
+        : > "$V_MIXED" 2>/dev/null || true
+        mark_done "Video stream copy (compliant, dry-run)"
+        return 0
+      fi
+
+      # Extract video stream as-is
+      if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c:v copy \
+        -an -sn -dn -f hevc "$V_MIXED" 2>"$WORKDIR/copy.err"; then
+        warn "Video copy failed — falling back to re-encode. See: $WORKDIR/copy.err"
+        # Fall through to encode path
+      else
+        mark_done "Video stream copy (compliant)"
+        # Still attempt DV handling on the copied stream
+        if (( IS_DV && ! DISABLE_DV )); then
+          # Already has DV in the copied stream, no RPU injection needed
+          note "DV metadata preserved in copied video stream."
+          mark_done "DV preserved (copy)"
+        fi
+        return 0
+      fi
+    else
+      note "Source video not compliant for copy — will re-encode."
+      report_add "video_action" "re-encode (not compliant)"
+    fi
+  fi
+
   note "→ Preparing raw video elementary stream…"
   
   if (( DRY_RUN )); then
@@ -716,7 +1199,6 @@ run_video_pipeline() {
     mark_done "Demux raw ES → video_src.es (dry-run)"
   else
     # Extract HEVC elementary stream for DV RPU extraction
-    # Use -c copy; if it fails we still proceed (DV path will fallback)
     if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c copy -f hevc "$V_SRC_ES" 2>"$WORKDIR/demux.err"; then
       local codec
       codec="$(_probe_field codec_name "$SRC_ABS")"
@@ -727,24 +1209,70 @@ run_video_pipeline() {
     mark_done "Demux raw ES → video_src.es"
   fi
 
-  note "→ Encoding base video (${PROFILE_DESC}, ${TARGET_PIXFMT}, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
-  
+  # Build encode command based on VIDEO_CODEC and PROFILE_DESC
+  local -a vf_filters=()
+  local -a encode_args=()
+  local thread_args=()
+  [[ -n "${THREADS:-}" ]] && thread_args=(-threads "$THREADS")
+
+  # Tone-mapping filter (universal profile: HDR→SDR)
+  if [[ "$PROFILE_DESC" == "SDR-TONEMAP" ]]; then
+    vf_filters+=("$TONEMAP_FILTER")
+    note "→ Tone-mapping HDR→SDR via: ${TONEMAP_FILTER}"
+    report_add "tonemap" "enabled (hable)"
+  fi
+
+  # Forced subtitle burn-in filter (added here if SUB_BURN_FORCED and we have a forced SRT)
+  # Note: SRT_FORCED_BURN_PATH is set by subtitle plan if burn is requested
+  if (( SUB_BURN_FORCED )) && [[ -n "${SRT_FORCED_BURN_PATH:-}" && -s "${SRT_FORCED_BURN_PATH:-}" ]]; then
+    # Escape special characters in the path for the subtitles filter
+    local escaped_path
+    escaped_path="$(printf '%s' "$SRT_FORCED_BURN_PATH" | sed "s/'/\\\\'/g; s/:/\\\\:/g; s/\[/\\\\[/g; s/\]/\\\\]/g")"
+    vf_filters+=("subtitles='${escaped_path}'")
+    note "→ Burning forced subtitles into video stream"
+    report_add "sub_burn_forced" "true"
+  fi
+
+  # Build -vf string
+  local vf_str=""
+  if [[ ${#vf_filters[@]} -gt 0 ]]; then
+    vf_str="$(IFS=','; echo "${vf_filters[*]}")"
+  fi
+
+  if [[ "$VIDEO_CODEC" == "libx264" ]]; then
+    # H.264 encode (universal profile)
+    note "→ Encoding video (H.264/SDR, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
+    encode_args=(
+      -c:v libx264
+      -preset "$PRESET_VALUE"
+      -crf "$CRF_VALUE"
+      -pix_fmt yuv420p
+      "${COLOR_ARGS[@]}"
+    )
+    report_add "video_codec" "h264"
+  else
+    # HEVC encode (default, hdr10-hq, atv-directplay-hq)
+    note "→ Encoding video (${PROFILE_DESC}, ${TARGET_PIXFMT}, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
+    encode_args=(
+      -c:v libx265
+      -preset "$PRESET_VALUE"
+      -crf "$CRF_VALUE"
+      -pix_fmt "$TARGET_PIXFMT"
+      "${COLOR_ARGS[@]}"
+      -x265-params "$X265_PARAMS"
+    )
+    report_add "video_codec" "hevc"
+  fi
+
   if (( DRY_RUN )); then
     : > "$V_BASE" 2>/dev/null || true
     mark_done "Encode base video (dry-run)"
   else
-    local thread_args=()
-    [[ -n "${THREADS:-}" ]] && thread_args=(-threads "$THREADS")
+    local -a ff_cmd=("${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0)
+    [[ -n "$vf_str" ]] && ff_cmd+=(-vf "$vf_str")
+    ff_cmd+=("${encode_args[@]}" "${thread_args[@]}" -an -sn -dn -f hevc "$V_BASE")
 
-    # Encode base HEVC video with color space preservation
-    if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 \
-      -pix_fmt "$TARGET_PIXFMT" \
-      "${COLOR_ARGS[@]}" \
-      -c:v libx265 -preset "$PRESET_VALUE" -crf "$CRF_VALUE" \
-      "${thread_args[@]}" \
-      -x265-params "$X265_PARAMS" \
-      -an -sn -dn \
-      -f hevc "$V_BASE" 2>"$WORKDIR/encode.err"; then
+    if ! ffmpeg "${ff_cmd[@]}" 2>"$WORKDIR/encode.err"; then
       die 40 "Base video encode failed. See: $WORKDIR/encode.err"
     fi
 
@@ -768,8 +1296,8 @@ run_video_pipeline() {
     return 0
   fi
 
-  # Default: no DV, or DV disabled → use base
-  if (( IS_DV == 0 || DISABLE_DV == 1 )); then
+  # Default: no DV, or DV disabled, or H.264 (no DV possible) → use base
+  if (( IS_DV == 0 || DISABLE_DV == 1 )) || [[ "$VIDEO_CODEC" == "libx264" ]]; then
     cp -f "$V_BASE" "$V_MIXED"
     mark_done "Use base video (non-DV)"
     return 0
@@ -798,7 +1326,6 @@ run_video_pipeline() {
     if dovi_tool convert --rpu-in "$RPU_P7" --rpu-out "$RPU_P81" >/dev/null 2>&1; then
       note "DV profile converted (P7 → P8.1)"
     else
-      # Conversion failed, use original RPU
       cp -f "$RPU_P7" "$RPU_P81" 2>/dev/null || true
     fi
   else
@@ -890,7 +1417,7 @@ _audio_codec_rank(){
     item="$(printf '%s' "$item" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
     [[ -z "$item" ]] && continue
     if [[ "$item" == "$codec" ]]; then echo "$i"; return 0; fi
-    (( i++, 1 ))
+    ((i++))
   done
   echo "99"
 }
@@ -968,6 +1495,33 @@ audio_is_direct_play_copyable(){
   esac
 }
 
+# Check if audio codec is lossless (for AUDIO_LOSSLESS_PASSTHROUGH)
+audio_is_lossless(){
+  local codec="$1"
+  case "$codec" in
+    truehd|dts|dca|flac|alac|pcm_s16le|pcm_s24le|pcm_s32le) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Check if lossless codec can be muxed into the target container
+audio_lossless_muxable(){
+  local codec="$1"
+  case "$MUX_FORMAT" in
+    matroska)
+      # MKV supports everything
+      return 0 ;;
+    mp4|mov)
+      # MP4/MOV support ALAC and FLAC but NOT TrueHD or DTS-HD
+      case "$codec" in
+        alac|flac) return 0 ;;
+        *) return 1 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
 # Determine target codec for audio transcode based on channel count
 audio_target_codec_for_transcode(){
   local ch="$1"
@@ -1022,47 +1576,101 @@ run_audio_pipeline(){
   done
 
   note "[Audio Select] Using track #$idx: $codec ${ch}ch [$lang]${title:+ — $title}${br:+, $((br/1000))kbps}"
+  report_add "audio_source" "track #$idx: $codec ${ch}ch [$lang]"
 
   A_PRIMARY="$WORKDIR/audio_primary.${codec}"
   AAC_STEREO="$WORKDIR/audio_stereo.ac3"
   HAS_AUDIO=1
+
+  # Enforce MAX_AUDIO_CHANNELS
+  local effective_ch="$ch"
+  if (( ch > MAX_AUDIO_CHANNELS )); then
+    note "Capping audio channels from $ch to $MAX_AUDIO_CHANNELS (MAX_AUDIO_CHANNELS)"
+    effective_ch="$MAX_AUDIO_CHANNELS"
+  fi
 
   note "→ Preparing primary audio → $A_PRIMARY"
 
   if (( DRY_RUN )); then
     : > "$A_PRIMARY" 2>/dev/null || true
     mark_done "Primary audio prepared (dry-run)"
-    if (( ADD_STEREO_IF_MULTICH )) && (( ch > 2 )); then
+    if (( ADD_STEREO_IF_MULTICH )) && (( effective_ch > 2 )); then
       : > "$AAC_STEREO" 2>/dev/null || true
       mark_done "Stereo fallback prepared (dry-run)"
     fi
     return 0
   fi
 
-  # Copy or transcode primary audio
-  if audio_is_direct_play_copyable "$codec"; then
+  # Decision tree for audio handling:
+  # 1. AUDIO_FORCE_CODEC set → always transcode to that codec
+  # 2. AUDIO_LOSSLESS_PASSTHROUGH=1 and codec is lossless and container supports it → copy
+  # 3. Direct-play-copyable codec → copy
+  # 4. Otherwise → transcode
+
+  local do_copy=0 tgt_codec="" tgt_br=""
+
+  if [[ -n "${AUDIO_FORCE_CODEC:-}" ]]; then
+    # Force codec: always transcode to target
+    tgt_codec="$AUDIO_FORCE_CODEC"
+    if [[ "$tgt_codec" == "$codec" ]] && (( effective_ch == ch )); then
+      do_copy=1
+      note "Audio already matches forced codec ($tgt_codec). Copying."
+      report_add "audio_action" "copy (already $tgt_codec)"
+    else
+      tgt_br="$(audio_target_bitrate "$effective_ch")"
+      if [[ "$tgt_codec" == "aac" ]]; then
+        tgt_br="256k"
+      fi
+      note "Force transcoding audio: $codec → $tgt_codec (${effective_ch}ch, ${tgt_br})"
+      report_add "audio_action" "transcode to $tgt_codec"
+    fi
+  elif (( AUDIO_LOSSLESS_PASSTHROUGH )) && audio_is_lossless "$codec"; then
+    if audio_lossless_muxable "$codec"; then
+      do_copy=1
+      note "Lossless audio passthrough ($codec). Copying without conversion."
+      report_add "audio_action" "lossless passthrough ($codec)"
+    else
+      # Lossless but can't mux into target container — transcode to best compatible
+      tgt_codec="$(audio_target_codec_for_transcode "$effective_ch")"
+      tgt_br="$(audio_target_bitrate "$effective_ch")"
+      note "Lossless $codec can't mux into $MUX_FORMAT — transcoding to $tgt_codec."
+      report_add "audio_action" "transcode (lossless $codec incompatible with $MUX_FORMAT)"
+    fi
+  elif audio_is_direct_play_copyable "$codec" && (( effective_ch == ch )); then
+    do_copy=1
     note "Direct Play audio codec detected ($codec). Copying without conversion."
+    report_add "audio_action" "copy ($codec direct-play compatible)"
+  else
+    tgt_codec="$(audio_target_codec_for_transcode "$effective_ch")"
+    tgt_br="$(audio_target_bitrate "$effective_ch")"
+    note "Transcoding audio: $codec → $tgt_codec (channels=${effective_ch}ch, bitrate=$tgt_br)"
+    report_add "audio_action" "transcode $codec → $tgt_codec"
+  fi
+
+  if (( do_copy )); then
     if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" -c copy "$A_PRIMARY" 2>"$WORKDIR/audio_primary.err"; then
       die 43 "Audio copy failed. See: $WORKDIR/audio_primary.err"
     fi
   else
-    local tgt_codec tgt_br
-    tgt_codec="$(audio_target_codec_for_transcode "$ch")"
-    tgt_br="$(audio_target_bitrate "$ch")"
-    note "Transcoding audio: $codec → $tgt_codec (channels=${ch}ch, bitrate=$tgt_br)"
     A_PRIMARY="$WORKDIR/audio_primary.${tgt_codec}"
+    local -a transcode_args=("${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map "0:a:$idx")
 
     if [[ "$tgt_codec" == "eac3" ]]; then
-      if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
-        -c:a eac3 -b:a "$tgt_br" -ac "${ch}" "$A_PRIMARY" 2>"$WORKDIR/audio_primary.err"; then
-        die 43 "E-AC3 audio transcode failed. See: $WORKDIR/audio_primary.err"
-      fi
+      transcode_args+=(-c:a eac3 -b:a "$tgt_br")
+    elif [[ "$tgt_codec" == "aac" ]]; then
+      transcode_args+=(-c:a aac -b:a "$tgt_br")
+    elif [[ "$tgt_codec" == "ac3" ]]; then
+      transcode_args+=(-c:a ac3 -b:a "$tgt_br")
     else
-      # AAC
-      if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
-        -c:a aac -b:a "$tgt_br" -ac "${ch}" "$A_PRIMARY" 2>"$WORKDIR/audio_primary.err"; then
-        die 43 "AAC audio transcode failed. See: $WORKDIR/audio_primary.err"
-      fi
+      transcode_args+=(-c:a "$tgt_codec" -b:a "$tgt_br")
+    fi
+
+    # Apply channel limit
+    transcode_args+=(-ac "$effective_ch")
+    transcode_args+=("$A_PRIMARY")
+
+    if ! ffmpeg "${transcode_args[@]}" 2>"$WORKDIR/audio_primary.err"; then
+      die 43 "Audio transcode to $tgt_codec failed. See: $WORKDIR/audio_primary.err"
     fi
   fi
 
@@ -1074,7 +1682,7 @@ run_audio_pipeline(){
   mark_done "Primary audio prepared"
 
   # Add stereo fallback if needed
-  if (( ADD_STEREO_IF_MULTICH )) && (( ch > 2 )); then
+  if (( ADD_STEREO_IF_MULTICH )) && (( effective_ch > 2 )); then
     note "→ Preparing stereo fallback → $AAC_STEREO"
     if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
       -c:a ac3 -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO" 2>"$WORKDIR/audio_stereo.err"; then
@@ -1279,6 +1887,8 @@ _prepare_sub_to_srt(){
 SRT_FORCED=""
 SRT_FULL=""
 SRT_SDH=""
+SRT_FORCED_BURN_PATH=""           # Set when SUB_BURN_FORCED=1; used by video pipeline
+declare -a EXTERNAL_SRT_PATHS=()  # Paths of external SRT files exported alongside output
 declare -i SRT_DIRECT_MAP=0
 DIRECT_SUB_RELIDX=""
 
@@ -1335,15 +1945,58 @@ build_subtitle_plan(){
   local p pick_count=0
   if [[ -n "$forced_idx" ]]; then
     p="$(_prepare_sub_to_srt "$forced_idx")"
-    [[ -n "$p" ]] && SRT_FORCED="$p" && (( pick_count++, 1 )) && note "[Subs] Prepared Forced → $SRT_FORCED"
+    if [[ -n "$p" ]]; then
+      if (( SUB_BURN_FORCED )); then
+        # Route forced sub to burn path (video pipeline will handle it)
+        SRT_FORCED_BURN_PATH="$p"
+        note "[Subs] Prepared Forced for burn-in → $SRT_FORCED_BURN_PATH"
+        report_add "sub_forced" "burn-in"
+      else
+        SRT_FORCED="$p"
+        ((pick_count++))
+        note "[Subs] Prepared Forced → $SRT_FORCED"
+        report_add "sub_forced" "embedded"
+      fi
+    fi
   fi
   if [[ -n "$full_idx" && $pick_count -lt $SUB_MAX_TRACKS ]]; then
     p="$(_prepare_sub_to_srt "$full_idx")"
-    [[ -n "$p" ]] && SRT_FULL="$p" && (( pick_count++, 1 )) && note "[Subs] Prepared Full → $SRT_FULL"
+    if [[ -n "$p" ]]; then
+      if (( SUB_EXPORT_EXTERNAL )); then
+        # Export as external SRT alongside output
+        local ext_srt="${OUT%.${OUTPUT_EXT}}.full.srt"
+        if (( ! DRY_RUN )); then
+          cp -f "$p" "$ext_srt" 2>/dev/null || true
+        fi
+        EXTERNAL_SRT_PATHS+=("$ext_srt")
+        note "[Subs] Exported Full → external $ext_srt"
+        report_add "sub_full" "external srt"
+      else
+        SRT_FULL="$p"
+        ((pick_count++))
+        note "[Subs] Prepared Full → $SRT_FULL"
+        report_add "sub_full" "embedded"
+      fi
+    fi
   fi
   if [[ -n "$sdh_idx" && $pick_count -lt $SUB_MAX_TRACKS ]]; then
     p="$(_prepare_sub_to_srt "$sdh_idx")"
-    [[ -n "$p" ]] && SRT_SDH="$p" && (( pick_count++, 1 )) && note "[Subs] Prepared SDH → $SRT_SDH"
+    if [[ -n "$p" ]]; then
+      if (( SUB_EXPORT_EXTERNAL )); then
+        local ext_srt="${OUT%.${OUTPUT_EXT}}.sdh.srt"
+        if (( ! DRY_RUN )); then
+          cp -f "$p" "$ext_srt" 2>/dev/null || true
+        fi
+        EXTERNAL_SRT_PATHS+=("$ext_srt")
+        note "[Subs] Exported SDH → external $ext_srt"
+        report_add "sub_sdh" "external srt"
+      else
+        SRT_SDH="$p"
+        ((pick_count++))
+        note "[Subs] Prepared SDH → $SRT_SDH"
+        report_add "sub_sdh" "embedded"
+      fi
+    fi
   fi
 
   # Fallback: try direct-mapping a text subtitle if no SRTs prepared
@@ -1393,7 +2046,7 @@ mux_final() {
     fi
     ff_in+=( -i "$V_MIXED" )
     vid_idx=$next_idx
-    (( next_idx++, 1 ))
+    ((next_idx++))
   else
     die 42 "No encoded video stream found."
   fi
@@ -1402,13 +2055,13 @@ mux_final() {
   if (( ! SKIP_AUDIO )) && (( HAS_AUDIO )) && [[ -n "${A_PRIMARY:-}" && -s "$A_PRIMARY" ]]; then
     ff_in+=( -i "$A_PRIMARY" )
     a_primary_idx=$next_idx
-    (( next_idx++, 1 ))
+    ((next_idx++))
   fi
   
   if (( ! SKIP_AUDIO )) && [[ -n "${AAC_STEREO:-}" && -s "$AAC_STEREO" ]]; then
     ff_in+=( -i "$AAC_STEREO" )
     a_stereo_idx=$next_idx
-    (( next_idx++, 1 ))
+    ((next_idx++))
   fi
 
   # Add subtitle streams
@@ -1416,21 +2069,21 @@ mux_final() {
     if [[ -n "${SRT_FORCED:-}" && -s "$SRT_FORCED" ]]; then
       ff_in+=( -i "$SRT_FORCED" )
       s_forced_idx=$next_idx
-      (( next_idx++, 1 ))
+      ((next_idx++))
       forced_present=1
     fi
     
     if [[ -n "${SRT_FULL:-}" && -s "$SRT_FULL" ]]; then
       ff_in+=( -i "$SRT_FULL" )
       s_full_idx=$next_idx
-      (( next_idx++, 1 ))
+      ((next_idx++))
       full_present=1
     fi
     
     if [[ -n "${SRT_SDH:-}" && -s "$SRT_SDH" ]]; then
       ff_in+=( -i "$SRT_SDH" )
       s_sdh_idx=$next_idx
-      (( next_idx++, 1 ))
+      ((next_idx++))
       sdh_present=1
     fi
   fi
@@ -1439,7 +2092,7 @@ mux_final() {
   if (( ! SKIP_SUBS )) && (( SRT_DIRECT_MAP )) && [[ -n "${DIRECT_SUB_RELIDX:-}" ]]; then
     ff_in+=( -i "$SRC_ABS" )
     src_sub_idx=$next_idx
-    (( next_idx++, 1 ))
+    ((next_idx++))
   fi
 
   # Build stream mapping
@@ -1456,15 +2109,41 @@ mux_final() {
     ff_map+=( -map "$src_sub_idx":s:"$DIRECT_SUB_RELIDX"? )
   fi
 
-  # Codec settings: copy everything, convert subs to mov_text
+  # Codec settings: copy everything, convert subs to appropriate codec
   ff_codec+=( -c copy )
 
   if (( forced_present || full_present || sdh_present )) || [[ -n "$src_sub_idx" ]]; then
-    ff_codec+=( -c:s mov_text )
+    if [[ "$MUX_FORMAT" == "matroska" ]]; then
+      # MKV can handle SRT natively (subrip)
+      ff_codec+=( -c:s srt )
+    else
+      # MP4/MOV: must use mov_text
+      ff_codec+=( -c:s mov_text )
+    fi
   fi
 
-  # MP4 optimization
-  ff_codec+=( -movflags +faststart )
+  # MP4/MOV optimization
+  if [[ "$MUX_FORMAT" != "matroska" ]]; then
+    ff_codec+=( -movflags +faststart )
+  fi
+
+  # Chapter handling
+  if (( ! KEEP_CHAPTERS )); then
+    ff_codec+=( -map_chapters -1 )
+    note "Stripping chapter markers from output."
+    report_add "chapters" "stripped"
+  else
+    report_add "chapters" "preserved"
+  fi
+
+  # Metadata stripping
+  if (( STRIP_METADATA )); then
+    ff_codec+=( -map_metadata -1 )
+    note "Stripping non-essential metadata from output."
+    report_add "metadata" "stripped"
+  else
+    report_add "metadata" "preserved"
+  fi
 
   # Execute final mux
   if ! ffmpeg "${ff_in[@]}" "${ff_map[@]}" "${ff_codec[@]}" -f "$MUX_FORMAT" "$TMP_OUT" 2>"$WORKDIR/mux.err"; then
@@ -1490,6 +2169,7 @@ main() {
   say "=== Output     : $OUT"
   say "=== Workdir    : $WORKDIR"
   say "=== Defaults   : CRF=$CRF_VALUE  StereoBitrate=$STEREO_BITRATE  Preset=$PRESET_VALUE"
+  [[ -n "${PROFILE_NAME:-}" ]] && say "=== Profile    : $PROFILE_NAME"
 
   (( DRY_RUN )) && note "DRY-RUN is ON"
   [[ ${#MUXM_CONFIG_LOADED[@]} -gt 0 ]] && note "Loaded config: ${MUXM_CONFIG_LOADED[*]}"
@@ -1499,14 +2179,32 @@ main() {
 
   # Cache metadata once for all operations
   cache_stream_metadata
+
+  # Skip-if-ideal: check early and exit if source is already compliant
+  if (( SKIP_IF_IDEAL )); then
+    if check_skip_if_ideal; then
+      # Source is ideal — write report and exit clean
+      write_json_report
+      # Copy source to output (or symlink) since it's already ideal
+      if (( ! DRY_RUN )); then
+        cp -f "$SRC_ABS" "$TMP_OUT"
+        note "Copied source to output (already ideal)."
+      fi
+      mark_done "Skip-if-ideal (source compliant)"
+      FAILED=0
+      return 0
+    fi
+  fi
   
   # Detect Dolby Vision
   if detect_dv; then
     IS_DV=1
     note "Dolby Vision detected — extraction/injection will be attempted in the video pipeline."
+    report_add "dv_detected" "true"
   else
     IS_DV=0
     note "No Dolby Vision detected."
+    report_add "dv_detected" "false"
   fi
   (( DISABLE_DV )) && note "DV handling explicitly disabled via --no-dv."
 
@@ -1514,6 +2212,12 @@ main() {
   decide_color_and_pixfmt "$SRC_ABS"
   build_x265_params
   [[ -n "$LEVEL_VALUE" ]] && apply_level_vbv "$LEVEL_VALUE"
+
+  # When burning forced subs, we need the subtitle plan BEFORE video encode
+  if (( SUB_BURN_FORCED && ! SKIP_SUBS )); then
+    build_subtitle_plan
+    mark_done "Subtitle plan (pre-video for burn-in)"
+  fi
 
   # Run pipelines
   if (( SKIP_VIDEO )); then
@@ -1531,7 +2235,11 @@ main() {
     run_audio_pipeline
   fi
 
-  build_subtitle_plan
+  # Build subtitle plan if not already done (non-burn case)
+  if (( ! SUB_BURN_FORCED || SKIP_SUBS )); then
+    build_subtitle_plan
+  fi
+
   mux_final
 
   (( IS_DV == 1 && DISABLE_DV == 0 )) && note "Dolby Vision present in output (best-effort)." || note "Output is non-DV."
@@ -1546,6 +2254,17 @@ main() {
 
   say "→ Output (temp) size:"
   (( DRY_RUN )) && say "DRY-RUN: size of $TMP_OUT" || filesize_pretty "$TMP_OUT"
+
+  # Write JSON report if requested
+  write_json_report
+
+  # Note external SRT files
+  if [[ ${#EXTERNAL_SRT_PATHS[@]} -gt 0 ]]; then
+    note "External subtitle files:"
+    for ext_path in "${EXTERNAL_SRT_PATHS[@]}"; do
+      note "  → $ext_path"
+    done
+  fi
 
   note "✅ Staging complete — will atomically move to: $OUT"
 }
