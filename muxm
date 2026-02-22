@@ -58,6 +58,7 @@ DV_SRC_PROFILE=""        # DV profile number (5, 7, 8, etc.)
 DV_SRC_COMPAT_ID=""      # BL signal compatibility ID (1=PQ/HDR10, 2=SDR, 4=HLG)
 DV_SRC_BL_PRESENT=""     # Base layer present flag
 DV_SRC_EL_PRESENT=""     # Enhancement layer present flag
+MP4BOX_CMD=""            # Path to mp4box/MP4Box binary (detected at runtime)
 
 # JSON report accumulator (for dv-archival reporting)
 declare -a REPORT_ENTRIES=()
@@ -878,6 +879,21 @@ else
   :
 fi
 
+# mp4box (GPAC) is used to mux raw HEVC ES into MP4 with proper dvcC/dvvC box
+# signaling. ffmpeg cannot synthesize dvcC from raw ES input — mp4box parses
+# RPU NAL units natively and writes correct DV container metadata.
+# Binary name varies by platform: MP4Box (macOS homebrew) vs mp4box (Linux).
+if (( ! DISABLE_DV )); then
+  if command -v MP4Box >/dev/null 2>&1; then
+    MP4BOX_CMD="MP4Box"
+  elif command -v mp4box >/dev/null 2>&1; then
+    MP4BOX_CMD="mp4box"
+  else
+    warn "mp4box (GPAC) not found — DV container signaling (dvcC box) may fail."
+    warn "  Install: brew install gpac (macOS) or apt install gpac (Linux)"
+  fi
+fi
+
 if (( SUB_ENABLE_OCR )); then
   # Security: reject OCR tool names containing shell metacharacters to prevent
   # injection via --ocr-tool or a malicious .muxmrc. Allows alphanumerics,
@@ -1443,50 +1459,62 @@ verify_dv_container_record() {
   warn "  Impact: Some players (Apple TV, iPhone, iPad) may not activate DV rendering"
   warn "  and will fall back to HDR10/HLG base layer instead."
 
-  # Attempt fallback: remux with dovi_tool mux to create proper DV container signaling,
-  # then merge audio/subs back with ffmpeg.
-  if command -v dovi_tool >/dev/null 2>&1 && (( ! VIDEO_COPY_FROM_SOURCE )); then
-    note "→ Attempting dovi_tool mux fallback for DV container signaling…"
+  # Attempt fallback: mux the raw HEVC ES into a DV-signaled MP4 with mp4box,
+  # then merge that video with audio/subs from the original mux.
+  if (( ! VIDEO_COPY_FROM_SOURCE )); then
+    note "→ Attempting DV container signaling fallback…"
     local dv_video_mp4="$WORKDIR/dv_video_only.mp4"
+    local fallback_ok=0
 
-    # dovi_tool mux --bl reads RPU NAL units from the HEVC bitstream and
-    # generates a proper DV-signaled MP4 with dvcC/dvvC box.
-    if dovi_tool mux --bl "$V_MIXED" --output "$dv_video_mp4" >"$WORKDIR/dovi_mux.log" 2>&1 && [[ -s "$dv_video_mp4" ]]; then
-      # Verify the muxed video has dvcC
-      local mux_probe
-      mux_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
-                   stream_side_data -select_streams v:0 "$dv_video_mp4" 2>&1)" || true
-
-      if printf '%s\n' "$mux_probe" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
-        # Success: now remux using dovi_tool's DV-signaled video + original audio/subs
-        local dv_final="$WORKDIR/dv_final_remux.${OUTPUT_EXT}"
-        local -a remux_cmd=("${FFMPEG_FLAGS[@]}")
-        remux_cmd+=(-i "$dv_video_mp4")  # Video from dovi_tool (has dvcC)
-        remux_cmd+=(-i "$TMP_OUT")       # Audio/subs from original mux
-        remux_cmd+=(-map 0:v:0)          # Video from dovi_tool mux
-        # Map all audio and subtitle streams from original mux
-        remux_cmd+=(-map 1:a? -map 1:s?)
-        remux_cmd+=(-c copy)
-        remux_cmd+=(-movflags +faststart)
-        remux_cmd+=(-f "$MUX_FORMAT" "$dv_final")
-
-        if ffmpeg "${remux_cmd[@]}" 2>"$WORKDIR/dv_remux.err" && [[ -s "$dv_final" ]]; then
-          # Final verification
-          local final_probe
-          final_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
-                         stream_side_data -select_streams v:0 "$dv_final" 2>&1)" || true
-
-          if printf '%s\n' "$final_probe" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
-            mv -f "$dv_final" "$TMP_OUT"
-            note "✅ dovi_tool mux fallback succeeded — DOVI configuration record added."
-            report_add "dv_container_record" "added via dovi_tool mux fallback"
-            return 0
-          fi
-        fi
-        warn "dovi_tool mux fallback remux failed. See: $WORKDIR/dv_remux.err"
+    # mp4box fallback: natively parses RPU NALs and writes dvcC box.
+    if (( ! fallback_ok )) && [[ -n "${MP4BOX_CMD:-}" && -n "${V_MIXED:-}" && -s "$V_MIXED" ]]; then
+      local dvp_hint=""
+      if [[ -n "${DV_SRC_PROFILE:-}" && -n "${DV_SRC_COMPAT_ID:-}" ]]; then
+        dvp_hint=":dvp=${DV_SRC_PROFILE}.${DV_SRC_COMPAT_ID}"
       fi
-    else
-      warn "dovi_tool mux failed. See: $WORKDIR/dovi_mux.log"
+
+      if "$MP4BOX_CMD" -add "${V_MIXED}${dvp_hint}" \
+           -new "$dv_video_mp4" >"$WORKDIR/dovi_mux_mp4box.log" 2>&1 && [[ -s "$dv_video_mp4" ]]; then
+        local mux_probe
+        mux_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
+                     stream_side_data -select_streams v:0 "$dv_video_mp4" 2>&1)" || true
+
+        if printf '%s\n' "$mux_probe" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
+          fallback_ok=1
+        else
+          warn "mp4box fallback muxed OK but dvcC not detected. See: $WORKDIR/dovi_mux_mp4box.log"
+        fi
+      else
+        warn "mp4box fallback mux failed. See: $WORKDIR/dovi_mux_mp4box.log"
+      fi
+    fi
+
+    # If mp4box produced a dvcC-bearing video MP4, remux it with audio/subs from original output.
+    if (( fallback_ok )); then
+      local dv_final="$WORKDIR/dv_final_remux.${OUTPUT_EXT}"
+      local -a remux_cmd=("${FFMPEG_FLAGS[@]}")
+      remux_cmd+=(-i "$dv_video_mp4")  # Video with dvcC from mp4box
+      remux_cmd+=(-i "$TMP_OUT")       # Audio/subs from original mux
+      remux_cmd+=(-map 0:v:0)          # Video from mp4box mux
+      remux_cmd+=(-map 1:a? -map 1:s?) # Audio + subs from original mux
+      remux_cmd+=(-c copy)
+      remux_cmd+=(-strict unofficial -tag:v dvh1)
+      remux_cmd+=(-movflags +faststart)
+      remux_cmd+=(-f "$MUX_FORMAT" "$dv_final")
+
+      if ffmpeg "${remux_cmd[@]}" 2>"$WORKDIR/dv_remux.err" && [[ -s "$dv_final" ]]; then
+        local final_probe
+        final_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
+                       stream_side_data -select_streams v:0 "$dv_final" 2>&1)" || true
+
+        if printf '%s\n' "$final_probe" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
+          mv -f "$dv_final" "$TMP_OUT"
+          note "✅ DV container fallback succeeded (mp4box) — DOVI configuration record added."
+          report_add "dv_container_record" "added via mp4box fallback"
+          return 0
+        fi
+      fi
+      warn "DV container fallback remux failed. See: $WORKDIR/dv_remux.err"
     fi
   fi
 
@@ -1972,41 +2000,84 @@ run_video_pipeline() {
 
   # Pre-wrap the DV-injected HEVC ES into an MP4 with proper dvcC/dvvC signaling.
   #
-  # Why: When mux_final feeds a raw HEVC ES to ffmpeg, ffmpeg cannot infer the DV
-  # profile/level/compat_id needed to write the dvcC container box — even with
-  # -strict unofficial -tag:v dvh1. The dvcC box lives in the container, not the
-  # bitstream, so ffmpeg needs to see it in an input container to copy it through.
+  # Why: When mux_final feeds a raw HEVC ES to ffmpeg, ffmpeg cannot synthesize
+  # a dvcC configuration record from RPU NAL units in a raw elementary stream.
+  # The raw HEVC demuxer does not parse RPU NALs (type 62) to construct DOVI
+  # side data — so even with -strict unofficial -tag:v dvh1, no dvcC box is
+  # written. The dvcC box must already exist in an input container for ffmpeg
+  # to copy it through to the output.
   #
-  # Solution: Use dovi_tool mux to create a video-only MP4 with the correct dvcC box.
-  # mux_final then uses this MP4 as the video input instead of the raw ES, and
-  # ffmpeg's -c copy preserves the dvcC box in the final output.
-  #
-  # dovi_tool mux syntax:
-  #   dovi_tool mux --bl <hevc_es> --output <mp4>   (HEVC with RPU already injected)
-  # The --bl flag indicates a base-layer HEVC input; dovi_tool reads the RPU NAL
-  # units from the bitstream and generates the correct dvcC/dvvC box.
-  if [[ "$MUX_FORMAT" != "matroska" ]] && command -v dovi_tool >/dev/null 2>&1; then
+  # Strategy: Use mp4box (GPAC) to mux the raw ES into a video-only MP4.
+  # mp4box natively parses RPU NAL units and writes the correct dvcC/dvvC box.
+  # The dvp= hint tells mp4box the exact DV profile and cross-compatibility ID.
+  # ffmpeg-based approaches are kept as fallbacks for environments without mp4box.
+  if [[ "$MUX_FORMAT" != "matroska" ]]; then
     local dv_prewrap="$WORKDIR/video_dv_prewrap.mp4"
-    note "→ Pre-wrapping DV video into MP4 with dvcC signaling via dovi_tool…"
+    note "→ Pre-wrapping DV video into MP4 with dvcC signaling…"
 
-    if dovi_tool mux --bl "$V_MIXED" --output "$dv_prewrap" >"$WORKDIR/dv_prewrap.log" 2>&1 && [[ -s "$dv_prewrap" ]]; then
-      # Verify dvcC is present in the pre-wrapped MP4
-      local pw_probe
-      pw_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
-                   stream_side_data -select_streams v:0 "$dv_prewrap" 2>&1)" || true
+    local prewrap_ok=0
 
-      if printf '%s\n' "$pw_probe" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
-        V_DV_MP4="$dv_prewrap"
-        note "✅ DV pre-wrap succeeded — dvcC box present in video MP4."
-        report_add "dv_prewrap" "success"
-      else
-        warn "dovi_tool mux produced MP4 but dvcC box not detected. Will use raw ES as fallback."
-        report_add "dv_prewrap" "failed (no dvcC in output)"
+    # Method 1: mp4box (GPAC) — natively understands DV RPU NALs.
+    # Constructs the dvcC box from RPU data; dvp=PROFILE.COMPAT_ID ensures
+    # correct signaling even if auto-detection is ambiguous.
+    if (( ! prewrap_ok )) && [[ -n "${MP4BOX_CMD:-}" ]]; then
+      local dvp_hint=""
+      if [[ -n "${DV_SRC_PROFILE:-}" && -n "${DV_SRC_COMPAT_ID:-}" ]]; then
+        dvp_hint=":dvp=${DV_SRC_PROFILE}.${DV_SRC_COMPAT_ID}"
       fi
-    else
-      warn "dovi_tool mux pre-wrap failed. See: $WORKDIR/dv_prewrap.log"
+
+      if "$MP4BOX_CMD" -add "${V_MIXED}${dvp_hint}" \
+           -new "$dv_prewrap" >"$WORKDIR/dv_prewrap_mp4box.log" 2>&1 && [[ -s "$dv_prewrap" ]]; then
+        local pw_probe
+        pw_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
+                     stream_side_data -select_streams v:0 "$dv_prewrap" 2>&1)" || true
+
+        if printf '%s\n' "$pw_probe" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
+          V_DV_MP4="$dv_prewrap"
+          prewrap_ok=1
+          note "✅ DV pre-wrap succeeded (mp4box) — dvcC box present."
+          report_add "dv_prewrap" "success (mp4box)"
+        else
+          warn "mp4box muxed OK but dvcC not detected by ffprobe. See: $WORKDIR/dv_prewrap_mp4box.log"
+        fi
+      else
+        warn "mp4box pre-wrap failed. See: $WORKDIR/dv_prewrap_mp4box.log"
+      fi
+    fi
+
+    # Method 2 (ffmpeg fallback): Direct mux with -strict unofficial.
+    # Some ffmpeg builds may gain raw-ES DV detection in the future.
+    # NOTE: Do NOT use -bsf:v hevc_mp4toannexb here — V_MIXED is already
+    # Annex B format. That BSF converts FROM MP4 length-prefixed NALUs and
+    # would corrupt the stream.
+    if (( ! prewrap_ok )); then
+      rm -f "$dv_prewrap" 2>/dev/null || true
+      if ffmpeg "${FFMPEG_FLAGS[@]}" \
+           -i "$V_MIXED" \
+           -c:v copy \
+           -strict unofficial \
+           -tag:v dvh1 \
+           -movflags +faststart \
+           -f mp4 "$dv_prewrap" >"$WORKDIR/dv_prewrap.log" 2>&1 && [[ -s "$dv_prewrap" ]]; then
+        local pw_probe2
+        pw_probe2="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
+                      stream_side_data -select_streams v:0 "$dv_prewrap" 2>&1)" || true
+
+        if printf '%s\n' "$pw_probe2" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
+          V_DV_MP4="$dv_prewrap"
+          prewrap_ok=1
+          note "✅ DV pre-wrap succeeded (ffmpeg direct) — dvcC box present."
+          report_add "dv_prewrap" "success (ffmpeg direct)"
+        fi
+      fi
+    fi
+
+    if (( ! prewrap_ok )); then
+      warn "DV pre-wrap could not produce dvcC box."
+      [[ -n "${MP4BOX_CMD:-}" ]] || warn "  mp4box (GPAC) is not installed — this is the recommended tool for DV container signaling."
       warn "  Final mux will use raw HEVC ES — dvcC box may be missing in output."
-      report_add "dv_prewrap" "failed (dovi_tool error)"
+      warn "  Impact: Players may not activate DV rendering and fall back to HDR10/HLG."
+      report_add "dv_prewrap" "failed"
     fi
   fi
 
