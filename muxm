@@ -282,6 +282,205 @@ ffmpeg_has_muxer(){
   ffmpeg -hide_banner -muxers 2>/dev/null | awk '{print $1}' | grep -qx "$mux"
 }
 
+# ===== Section 5b: Dependency installer ========================================================
+# Invoked via --install-dependencies. Checks for all tools required by muxm and
+# installs any that are missing via Homebrew and pipx. Exits after completion.
+#
+# Required:     ffmpeg, ffprobe, jq
+# DV pipeline:  dovi_tool, mp4box (gpac)
+# Subtitles:    tesseract, pgsrip (Python, via pipx)
+#
+# This function is intentionally placed before config chain / CLI parsing so that
+# --install-dependencies can short-circuit before any source file validation.
+
+_dep_install_dependencies(){
+  say "=== ${APP_NAME} v${VERSION} — Dependency Installer ==="
+  echo ""
+
+  # ---- Preflight: need Homebrew and a working shell
+  if ! command -v brew >/dev/null 2>&1; then
+    printf "❌ Homebrew is not installed. Install it first:\n" >&2
+    printf "   /bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"\n" >&2
+    exit 10
+  fi
+
+  local -i total=0 installed=0 skipped=0 failed=0
+
+  # Helper: check + brew install
+  _brew_ensure(){
+    local _tool="$1" formula="${2:-$1}"
+    total=$(( total + 1 ))
+    printf "  %-14s" "$_tool"
+    if command -v "$_tool" >/dev/null 2>&1; then
+      printf "✅ already installed (%s)\n" "$(command -v "$_tool")"
+      skipped=$(( skipped + 1 ))
+    else
+      printf "⏳ installing via brew (%s)...\n" "$formula"
+      if brew install "$formula" 2>&1 | sed 's/^/    /'; then
+        if command -v "$_tool" >/dev/null 2>&1; then
+          printf "  %-14s✅ installed successfully\n" "$_tool"
+          installed=$(( installed + 1 ))
+        else
+          printf "  %-14s⚠️  brew install succeeded but '%s' not found in PATH\n" "$_tool" "$_tool"
+          failed=$(( failed + 1 ))
+        fi
+      else
+        printf "  %-14s❌ brew install failed\n" "$_tool"
+        failed=$(( failed + 1 ))
+      fi
+    fi
+  }
+
+  # Helper: check + pipx install (for Python CLI tools)
+  _pipx_ensure(){
+    local _tool="$1" pkg="${2:-$1}"
+    total=$(( total + 1 ))
+    printf "  %-14s" "$_tool"
+    if command -v "$_tool" >/dev/null 2>&1; then
+      printf "✅ already installed (%s)\n" "$(command -v "$_tool")"
+      skipped=$(( skipped + 1 ))
+    else
+      # Ensure pipx is available
+      if ! command -v pipx >/dev/null 2>&1; then
+        printf "⏳ installing pipx first...\n"
+        brew install pipx 2>&1 | sed 's/^/    /'
+        pipx ensurepath 2>/dev/null || true
+        # Re-source PATH so pipx-installed tools are visible
+        eval "$(pipx environment --value PIPX_BIN_DIR 2>/dev/null)" 2>/dev/null || true
+        export PATH="$HOME/.local/bin:$PATH"
+      fi
+      printf "  %-14s⏳ installing via pipx (%s)...\n" "$_tool" "$pkg"
+      if pipx install "$pkg" 2>&1 | sed 's/^/    /'; then
+        export PATH="$HOME/.local/bin:$PATH"
+        if command -v "$_tool" >/dev/null 2>&1; then
+          printf "  %-14s✅ installed successfully\n" "$_tool"
+          installed=$(( installed + 1 ))
+        else
+          printf "  %-14s⚠️  pipx install succeeded but '%s' not found in PATH\n" "$_tool" "$_tool"
+          printf "              Try: pipx ensurepath && source ~/.zshrc\n"
+          failed=$(( failed + 1 ))
+        fi
+      else
+        printf "  %-14s❌ pipx install failed\n" "$_tool"
+        failed=$(( failed + 1 ))
+      fi
+    fi
+  }
+
+  # Helper: check for Tesseract language data
+  _tessdata_ensure(){
+    local lang="$1"
+    total=$(( total + 1 ))
+    printf "  %-14s" "tess:$lang"
+    local tessdir
+    tessdir="$(brew --prefix 2>/dev/null)/share/tessdata"
+    if [[ -f "$tessdir/${lang}.traineddata" ]]; then
+      printf "✅ language data present (%s)\n" "$tessdir/${lang}.traineddata"
+      skipped=$(( skipped + 1 ))
+    else
+      printf "⏳ installing tesseract-lang for full language support...\n"
+      if brew install tesseract-lang 2>&1 | sed 's/^/    /'; then
+        if [[ -f "$tessdir/${lang}.traineddata" ]]; then
+          printf "  %-14s✅ language data installed\n" "tess:$lang"
+          installed=$(( installed + 1 ))
+        else
+          printf "  %-14s⚠️  installed but %s.traineddata not found in %s\n" "tess:$lang" "$lang" "$tessdir"
+          failed=$(( failed + 1 ))
+        fi
+      else
+        printf "  %-14s❌ brew install tesseract-lang failed\n" "tess:$lang"
+        failed=$(( failed + 1 ))
+      fi
+    fi
+  }
+
+  say "Core tools (required):"
+  _brew_ensure ffmpeg   ffmpeg
+  _brew_ensure ffprobe  ffmpeg
+  _brew_ensure jq       jq
+  echo ""
+
+  say "Dolby Vision pipeline (recommended):"
+  _brew_ensure dovi_tool dovi_tool
+  # mp4box: binary name varies — check both MP4Box and mp4box
+  total=$(( total + 1 ))
+  printf "  %-14s" "mp4box"
+  if command -v MP4Box >/dev/null 2>&1 || command -v mp4box >/dev/null 2>&1; then
+    local _mp4box_path
+    _mp4box_path="$(command -v MP4Box 2>/dev/null || command -v mp4box 2>/dev/null)"
+    printf "✅ already installed (%s)\n" "$_mp4box_path"
+    skipped=$(( skipped + 1 ))
+  else
+    printf "⏳ installing via brew (gpac)...\n"
+    if brew install gpac 2>&1 | sed 's/^/    /'; then
+      if command -v MP4Box >/dev/null 2>&1 || command -v mp4box >/dev/null 2>&1; then
+        printf "  %-14s✅ installed successfully\n" "mp4box"
+        installed=$(( installed + 1 ))
+      else
+        printf "  %-14s⚠️  brew install succeeded but mp4box/MP4Box not found in PATH\n" "mp4box"
+        failed=$(( failed + 1 ))
+      fi
+    else
+      printf "  %-14s❌ brew install gpac failed\n" "mp4box"
+      failed=$(( failed + 1 ))
+    fi
+  fi
+  echo ""
+
+  say "Subtitle OCR pipeline (recommended for PGS/Blu-ray subtitles):"
+  _brew_ensure tesseract tesseract
+  _tessdata_ensure eng
+  _pipx_ensure pgsrip   pgsrip
+  echo ""
+
+  # TESSDATA_PREFIX check
+  say "Environment:"
+  local tessdir_resolved
+  tessdir_resolved="$(brew --prefix 2>/dev/null)/share/tessdata"
+  printf "  %-14s" "TESSDATA"
+  if [[ -n "${TESSDATA_PREFIX:-}" ]]; then
+    printf "✅ TESSDATA_PREFIX=%s\n" "$TESSDATA_PREFIX"
+  elif [[ -d "$tessdir_resolved" ]]; then
+    printf "⚠️  TESSDATA_PREFIX not set. Add to ~/.zshrc:\n"
+    printf "              export TESSDATA_PREFIX=\"%s\"\n" "$tessdir_resolved"
+  else
+    printf "⚠️  No tessdata directory found\n"
+  fi
+
+  # .muxmrc OCR tool configuration check
+  printf "  %-14s" "OCR config"
+  if command -v pgsrip >/dev/null 2>&1; then
+    if [[ "${SUB_OCR_TOOL:-sub2srt}" == "sub2srt" ]]; then
+      printf "⚠️  pgsrip is installed but SUB_OCR_TOOL is '%s'.\n" "${SUB_OCR_TOOL:-sub2srt}"
+      printf "              Set in ~/.muxmrc:  SUB_OCR_TOOL=\"pgsrip\"\n"
+      printf "              Or use per-run:    --ocr-tool pgsrip\n"
+    else
+      printf "✅ SUB_OCR_TOOL=%s\n" "$SUB_OCR_TOOL"
+    fi
+  else
+    printf "ℹ️  SUB_OCR_TOOL=%s (pgsrip not installed)\n" "${SUB_OCR_TOOL:-sub2srt}"
+  fi
+  echo ""
+
+  # Summary
+  say "Summary: $total checked, $installed installed, $skipped already present, $failed failed"
+  if (( failed > 0 )); then
+    warn "Some dependencies could not be installed. Check output above for details."
+    exit 1
+  fi
+  say "✅ All dependencies satisfied."
+  exit 0
+}
+
+# Pre-scan for --install-dependencies (must run before config/profile/CLI parsing)
+for _arg in "$@"; do
+  if [[ "$_arg" == "--install-dependencies" ]]; then
+    _dep_install_dependencies
+    # _dep_install_dependencies always exits; this line is unreachable
+  fi
+done
+unset _arg
+
 # ===== Section 6: Config chain: Defaults → /etc → ~ → project =================================
 _muxm_try_source(){
   local f="$1"
@@ -505,6 +704,8 @@ Profile (format presets):
 Core options:
   -h, --help                  Show help
   -V, --version               Show version
+  --install-dependencies      Check and install all required/optional tools via
+                              Homebrew and pipx. Skips encoding; exits after install.
   -K, --keep-temp-always      Keep workdir even on success
   -k, --keep-temp             Keep workdir on failure (default behavior keeps on failure anyway)
   --dry-run                   Print actions and create stub artifacts (no real encode)
@@ -2587,6 +2788,8 @@ _prepare_sub_to_srt(){
         return 0
       fi
 
+      local _ocr_ok=0
+
       # Try vobsub conversion if muxer is available
       if ffmpeg_has_muxer vobsub; then
         vob_base="$WORKDIR/sub.${idx}.vob"
@@ -2596,35 +2799,48 @@ _prepare_sub_to_srt(){
           return 0
         fi
 
-        # Run OCR tool
-        if "$SUB_OCR_TOOL" "${vob_base}.idx" >/dev/null 2>&1 || "$SUB_OCR_TOOL" -l "$SUB_OCR_LANG" "${vob_base}.idx" >/dev/null 2>&1; then
-          if [[ -s "${vob_base}.srt" ]]; then
-            mv -f "${vob_base}.srt" "$srt" || true
-          fi
-          if [[ -s "$srt" ]]; then
-            echo "$srt"
-            return 0
-          fi
-        fi
-        warn "OCR tool failed for subtitle #$idx — skipping."
-        echo ""
-        return 0
-      fi
-
-      # Fallback: try OCR tool directly on .sup
-      if "$SUB_OCR_TOOL" "$sup" >/dev/null 2>&1 || "$SUB_OCR_TOOL" -l "$SUB_OCR_LANG" "$sup" >/dev/null 2>&1; then
-        if [[ -s "${sup%.sup}.srt" ]]; then
-          mv -f "${sup%.sup}.srt" "$srt" || true
-        elif [[ -s "${sup}.srt" ]]; then
-          mv -f "${sup}.srt" "$srt" || true
+        # Run OCR tool on VobSub .idx
+        "$SUB_OCR_TOOL" "${vob_base}.idx" >"$WORKDIR/sub_${idx}_ocr.log" 2>&1 \
+          || "$SUB_OCR_TOOL" -l "$SUB_OCR_LANG" "${vob_base}.idx" >"$WORKDIR/sub_${idx}_ocr.log" 2>&1 \
+          || true
+        if [[ -s "${vob_base}.srt" ]]; then
+          mv -f "${vob_base}.srt" "$srt" || true
         fi
         if [[ -s "$srt" ]]; then
           echo "$srt"
           return 0
         fi
+        warn "OCR tool ('$SUB_OCR_TOOL') ran on VobSub but produced no SRT for subtitle #$idx. See: $WORKDIR/sub_${idx}_ocr.log"
+        echo ""
+        return 0
       fi
 
-      warn "PGS OCR could not run (no vobsub muxer; tool didn't accept .sup) — skipping subtitle #$idx."
+      # Fallback: try OCR tool directly on .sup
+      "$SUB_OCR_TOOL" "$sup" >"$WORKDIR/sub_${idx}_ocr_sup.log" 2>&1 \
+        || "$SUB_OCR_TOOL" -l "$SUB_OCR_LANG" "$sup" >"$WORKDIR/sub_${idx}_ocr_sup.log" 2>&1 \
+        || true
+      # Check common output locations for the SRT
+      if [[ -s "${sup%.sup}.srt" ]]; then
+        mv -f "${sup%.sup}.srt" "$srt" || true
+        _ocr_ok=1
+      elif [[ -s "${sup}.srt" ]]; then
+        mv -f "${sup}.srt" "$srt" || true
+        _ocr_ok=1
+      fi
+      if (( _ocr_ok )) && [[ -s "$srt" ]]; then
+        echo "$srt"
+        return 0
+      fi
+
+      # Provide specific diagnostic based on what failed
+      if ! ffmpeg_has_muxer vobsub; then
+        warn "PGS subtitle #$idx: ffmpeg lacks the 'vobsub' muxer (common on macOS Homebrew builds)."
+        warn "  '$SUB_OCR_TOOL' also could not process .sup directly. See: $WORKDIR/sub_${idx}_ocr_sup.log"
+        warn "  Fix: install a PGS-capable OCR tool (e.g., pgsrip) or rebuild ffmpeg with vobsub."
+      else
+        warn "PGS OCR failed for subtitle #$idx — '$SUB_OCR_TOOL' produced no output."
+        warn "  See: $WORKDIR/sub_${idx}_ocr_sup.log"
+      fi
       echo ""
       return 0
       ;;
@@ -2645,6 +2861,14 @@ SRT_FORCED_BURN_PATH=""           # Set when SUB_BURN_FORCED=1; used by video pi
 declare -a EXTERNAL_SRT_PATHS=()  # Paths of external SRT files exported alongside output
 declare -i SRT_DIRECT_MAP=0
 DIRECT_SUB_RELIDX=""
+
+# Subtitle metadata for mux tagging (populated by build_subtitle_plan)
+SRT_FORCED_LANG=""
+SRT_FULL_LANG=""
+SRT_SDH_LANG=""
+SRT_FORCED_TITLE=""
+SRT_FULL_TITLE=""
+SRT_SDH_TITLE=""
 
 # Process a prepared subtitle: either export as external SRT or embed.
 # Sets _SUB_EMBED_PATH to the SRT path if embedded, empty if exported externally.
@@ -2725,6 +2949,8 @@ build_subtitle_plan(){
   if [[ -n "$forced_idx" ]]; then
     p="$(_prepare_sub_to_srt "$forced_idx")"
     if [[ -n "$p" ]]; then
+      SRT_FORCED_LANG="$(_sp_sub_lang "$forced_idx")"
+      SRT_FORCED_TITLE="Forced"
       if (( SUB_BURN_FORCED )); then
         # Route forced sub to burn path (video pipeline will handle it)
         SRT_FORCED_BURN_PATH="$p"
@@ -2741,6 +2967,10 @@ build_subtitle_plan(){
   if [[ -n "$full_idx" && $pick_count -lt $SUB_MAX_TRACKS ]]; then
     p="$(_prepare_sub_to_srt "$full_idx")"
     if [[ -n "$p" ]]; then
+      SRT_FULL_LANG="$(_sp_sub_lang "$full_idx")"
+      local _full_src_title
+      _full_src_title="$(_sp_sub_tag "$full_idx" title)"
+      SRT_FULL_TITLE="${_full_src_title:-Full}"
       _export_or_embed_sub "$p" "full"
       if [[ -n "$_SUB_EMBED_PATH" ]]; then
         SRT_FULL="$_SUB_EMBED_PATH"
@@ -2751,6 +2981,8 @@ build_subtitle_plan(){
   if [[ -n "$sdh_idx" && $pick_count -lt $SUB_MAX_TRACKS ]]; then
     p="$(_prepare_sub_to_srt "$sdh_idx")"
     if [[ -n "$p" ]]; then
+      SRT_SDH_LANG="$(_sp_sub_lang "$sdh_idx")"
+      SRT_SDH_TITLE="SDH"
       _export_or_embed_sub "$p" "sdh"
       if [[ -n "$_SUB_EMBED_PATH" ]]; then
         SRT_SDH="$_SUB_EMBED_PATH"
@@ -2898,6 +3130,28 @@ mux_final() {
       # MP4/MOV: must use mov_text
       ff_codec+=( -c:s mov_text )
     fi
+  fi
+
+  # Subtitle metadata: language, title, and disposition tagging.
+  # Output subtitle index tracks which output stream we're tagging.
+  local -i out_s_idx=0
+  if (( forced_present )); then
+    [[ -n "$SRT_FORCED_LANG" ]]  && ff_codec+=( "-metadata:s:s:${out_s_idx}" "language=$SRT_FORCED_LANG" )
+    [[ -n "$SRT_FORCED_TITLE" ]] && ff_codec+=( "-metadata:s:s:${out_s_idx}" "title=$SRT_FORCED_TITLE" )
+    ff_codec+=( "-disposition:s:${out_s_idx}" forced )
+    out_s_idx=$(( out_s_idx + 1 ))
+  fi
+  if (( full_present )); then
+    [[ -n "$SRT_FULL_LANG" ]]  && ff_codec+=( "-metadata:s:s:${out_s_idx}" "language=$SRT_FULL_LANG" )
+    [[ -n "$SRT_FULL_TITLE" ]] && ff_codec+=( "-metadata:s:s:${out_s_idx}" "title=$SRT_FULL_TITLE" )
+    ff_codec+=( "-disposition:s:${out_s_idx}" 0 )
+    out_s_idx=$(( out_s_idx + 1 ))
+  fi
+  if (( sdh_present )); then
+    [[ -n "$SRT_SDH_LANG" ]]  && ff_codec+=( "-metadata:s:s:${out_s_idx}" "language=$SRT_SDH_LANG" )
+    [[ -n "$SRT_SDH_TITLE" ]] && ff_codec+=( "-metadata:s:s:${out_s_idx}" "title=$SRT_SDH_TITLE" )
+    ff_codec+=( "-disposition:s:${out_s_idx}" hearing_impaired )
+    out_s_idx=$(( out_s_idx + 1 ))
   fi
 
   # MP4/MOV optimization
