@@ -29,7 +29,7 @@ if shopt -q inherit_errexit 2>/dev/null; then shopt -s inherit_errexit; fi
 # ===== Section 2: Branding / CLI constants =====================================================
 readonly APP_NAME="MuxMaster"
 readonly CLI_NAME="muxm"
-readonly VERSION="0.10.2"
+readonly VERSION="0.10.3"
 
 # ===== Section 3: Globals =====================================================================
 declare -a COMPLETED_STEPS=()
@@ -1534,16 +1534,56 @@ run_video_pipeline() {
     return 0
   fi
 
-  # Try extracting RPU from the demuxed ES
-  if [[ ! -s "$V_SRC_ES" ]]; then
-    warn "No ES available for DV extraction; using base video."
-    cp -f "$V_BASE" "$V_MIXED"
-    mark_done "Use base video (non-DV fallback - no ES)"
-    return 0
+  # Try extracting RPU from the source.
+  #
+  # Primary method: pipe ffmpeg → dovi_tool via stdin.
+  # This matches the dovi_tool README's recommended workflow and avoids
+  # subtle issues with file-based extraction (EOS/EOB NAL handling,
+  # buffer flushing differences) that cause failures on some sources
+  # — particularly iPhone P8.4 HLG MOV files.
+  #
+  # Fallback: extract from the previously demuxed ES file on disk.
+
+  local rpu_extracted=0
+
+  # Primary: piped extraction (ffmpeg → dovi_tool stdin)
+  if (( ! DRY_RUN )); then
+    note "→ Extracting DV RPU via piped stdin…"
+    if ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c copy \
+         -bsf:v hevc_mp4toannexb -f hevc - 2>"$WORKDIR/rpu_pipe_demux.err" \
+       | dovi_tool extract-rpu - -o "$RPU_P7" >"$WORKDIR/rpu_pipe.log" 2>&1; then
+      if [[ -s "$RPU_P7" ]]; then
+        rpu_extracted=1
+        note "DV RPU extracted successfully (piped method)."
+      else
+        warn "Piped RPU extraction produced empty file — trying file-based fallback."
+      fi
+    else
+      warn "Piped RPU extraction failed — trying file-based fallback."
+      warn "See: $WORKDIR/rpu_pipe_demux.err and $WORKDIR/rpu_pipe.log"
+    fi
   fi
 
-  if ! dovi_tool extract-rpu -i "$V_SRC_ES" -o "$RPU_P7" >/dev/null 2>&1; then
-    warn "DV RPU extract failed; using base video."
+  # Fallback: file-based extraction from demuxed ES
+  if (( ! rpu_extracted && ! DRY_RUN )); then
+    if [[ -s "$V_SRC_ES" ]]; then
+      note "→ Extracting DV RPU from demuxed ES file (fallback)…"
+      if dovi_tool extract-rpu -i "$V_SRC_ES" -o "$RPU_P7" >"$WORKDIR/rpu_file.log" 2>&1; then
+        if [[ -s "$RPU_P7" ]]; then
+          rpu_extracted=1
+          note "DV RPU extracted successfully (file-based fallback)."
+        fi
+      else
+        warn "File-based RPU extraction also failed."
+        warn "See: $WORKDIR/rpu_file.log"
+      fi
+    else
+      warn "No demuxed ES file available for fallback RPU extraction."
+    fi
+  fi
+
+  if (( ! rpu_extracted && ! DRY_RUN )); then
+    warn "All DV RPU extraction methods failed; using base video."
     if (( ALLOW_DV_FALLBACK )); then
       cp -f "$V_BASE" "$V_MIXED"
       mark_done "Use base video (DV extract failed)"
@@ -2402,6 +2442,18 @@ mux_final() {
     ff_codec+=( -movflags +faststart )
   fi
 
+  # Dolby Vision container signalling for MP4/MOV.
+  # ffmpeg refuses to write the DOVI configuration record (dvcC/dvvC MP4 box)
+  # without -strict unofficial. Without this box, players cannot identify the
+  # stream as Dolby Vision even when RPU NAL units are present in the bitstream.
+  # -tag:v dvh1 sets the codec tag required by Apple devices (Apple TV, iPhone,
+  # iPad) — Apple's player ignores dvhe/hev1 tagged DV streams.
+  if (( OUTPUT_HAS_DV )) && [[ "$MUX_FORMAT" != "matroska" ]]; then
+    ff_codec+=( -strict unofficial -tag:v dvh1 )
+    note "Adding DV container signalling: -strict unofficial -tag:v dvh1"
+    report_add "dv_mux_flags" "strict unofficial + dvh1 tag"
+  fi
+
   # Chapter handling
   if (( ! KEEP_CHAPTERS )); then
     ff_codec+=( -map_chapters -1 )
@@ -2516,7 +2568,9 @@ main() {
 
   mux_final
 
-  if (( OUTPUT_HAS_DV )); then
+  if (( DRY_RUN )); then
+    note "DRY-RUN: DV output status not evaluated (no real encode performed)."
+  elif (( OUTPUT_HAS_DV )); then
     note "Dolby Vision present in output."
     report_add "dv_output" "preserved"
   elif (( IS_DV == 1 && DISABLE_DV == 0 )); then
