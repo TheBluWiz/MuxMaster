@@ -29,7 +29,7 @@ if shopt -q inherit_errexit 2>/dev/null; then shopt -s inherit_errexit; fi
 # ===== Section 2: Branding / CLI constants =====================================================
 readonly APP_NAME="MuxMaster"
 readonly CLI_NAME="muxm"
-readonly VERSION="0.10.3"
+readonly VERSION="0.11.0"
 
 # ===== Section 3: Globals =====================================================================
 declare -a COMPLETED_STEPS=()
@@ -184,6 +184,113 @@ say()  { printf "%s\n" "$@" >&2; }
 note() { printf "ℹ️  %s\n" "$@" >&2; }
 warn() { printf "⚠️  %s\n" "$@" >&2; }
 
+# log() — write ONLY to the log file, not to the terminal.
+# Falls back to say() if LOGFILE isn't set yet (pre–Section 12).
+log() {
+  if [[ -n "${LOGFILE:-}" && -w "${LOGFILE:-}" ]]; then
+    printf "%s\n" "$@" >> "$LOGFILE"
+  else
+    say "$@"
+  fi
+}
+
+# ---- Terminal FD for interactive UI (spinner / progress bar) ----
+# Saved in Section 12 before the exec > >(tee …) redirect.
+# Falls back to stderr if not yet initialised.
+TERM_FD=""
+# shellcheck disable=SC2059  # Callers pass printf format + args intentionally
+_term_print() { printf -- "$@" >&"${TERM_FD:-2}"; }
+
+# ---- Spinner — indeterminate progress indicator ----
+# Usage: some_command & spinner $! "Doing something…"
+spinner() {
+  local pid=$1 msg=$2 i=0
+  local -a sym=( '|' '/' '—' $'\\' )
+  # Only draw if connected to a terminal
+  if [[ -t ${TERM_FD:-2} ]]; then
+    while kill -0 "$pid" 2>/dev/null; do
+      _term_print '\r  %s  [ %s ]' "$msg" "${sym[i]}"
+      i=$(( (i+1) % 4 ))
+      sleep 0.2
+    done
+    _term_print '\r  %s  [ done ]\n' "$msg"
+  else
+    wait "$pid" 2>/dev/null || true
+  fi
+}
+
+# run_with_spinner CMD_ARRAY_NAME "Message"
+# Runs a command (passed as array name) in the background with a spinner.
+# Returns the exit status of the background command.
+run_with_spinner() {
+  local -n _cmd_arr=$1
+  local msg="$2"
+  "${_cmd_arr[@]}" &
+  local bg_pid=$!
+  spinner "$bg_pid" "$msg"
+  wait "$bg_pid" 2>/dev/null
+  return $?
+}
+
+# ---- Progress bar — percentage-based for ffmpeg encodes ----
+# Reads ffmpeg -progress output from a pipe and renders a bar.
+# Args: $1 = ffmpeg PID, $2 = progress pipe path, $3 = total duration (seconds),
+#       $4 = label
+ffmpeg_progress_bar() {
+  local pid=$1 pipe=$2 total_secs=$3 label=$4
+  local pct=0 bar="" elapsed_us=0
+
+  # Only draw if connected to a terminal and total is known
+  if [[ ! -t ${TERM_FD:-2} ]] || (( total_secs <= 0 )); then
+    wait "$pid" 2>/dev/null || true
+    return $?
+  fi
+
+  local -i cols=40
+  while IFS='=' read -r key val 2>/dev/null; do
+    case "$key" in
+      out_time_us)
+        elapsed_us="${val:-0}"
+        # Guard against non-numeric values
+        [[ "$elapsed_us" =~ ^-?[0-9]+$ ]] || continue
+        (( elapsed_us < 0 )) && elapsed_us=0
+        pct=$(( elapsed_us * 100 / (total_secs * 1000000) ))
+        (( pct > 100 )) && pct=100
+        local filled empty
+        filled=$(( pct * cols / 100 ))
+        empty=$(( cols - filled ))
+        bar="$(printf '%0.s█' $(seq 1 "$filled" 2>/dev/null) || true)"
+        bar+="$(printf '%0.s░' $(seq 1 "$empty" 2>/dev/null) || true)"
+        _term_print '\r  %s  [%s] %3d%%' "$label" "$bar" "$pct"
+        ;;
+      progress)
+        # ffmpeg writes "progress=end" when done
+        [[ "$val" == "end" ]] && break
+        ;;
+    esac
+  done < "$pipe"
+
+  # Ensure the bar reaches 100% visually
+  bar="$(printf '%0.s█' $(seq 1 "$cols"))"
+  _term_print '\r  %s  [%s] 100%%\n' "$label" "$bar"
+
+  wait "$pid" 2>/dev/null
+  return $?
+}
+
+# _get_source_duration_secs — extract source video duration in whole seconds.
+# Globals: METADATA_CACHE (read)
+_get_source_duration_secs() {
+  local dur
+  dur="$(printf '%s\n' "$METADATA_CACHE" | jq -r \
+    '[.streams[] | select(.codec_type=="video")] | .[0].duration // empty' 2>/dev/null | head -n1)"
+  if [[ "$dur" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    printf '%.0f\n' "$dur"
+  else
+    echo 0
+  fi
+}
+
 # Lowercase a string (avoids repeated inline tr calls)
 _lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
 
@@ -236,21 +343,37 @@ realpath_fallback(){
   fi
 }
 
-# Improved filesize_pretty - checks native stat first for performance
+# Improved filesize_pretty - outputs human-readable file size string to stdout.
+# Composable: callers format/route the output (e.g., say "Size: $(filesize_pretty f)")
 filesize_pretty(){
-  local file="$1"
-  # Try native stat first (faster)
-  if stat -f "%N %z bytes" /dev/null >/dev/null 2>&1; then
-    # macOS/BSD
-    stat -f "%N %z bytes" "$file"
-  elif stat --printf '%n %s bytes\n' /dev/null >/dev/null 2>&1; then
-    # GNU/Linux
-    stat --printf '%n %s bytes\n' "$file"
-  elif command -v gstat >/dev/null 2>/dev/null; then
-    # GNU stat as gstat
-    gstat -c "%n %s bytes" "$file"
+  local file="$1" bytes=""
+  [[ -f "$file" ]] || { echo "unknown (file not found)"; return 1; }
+
+  # Get raw byte count (try multiple methods for portability)
+  if stat -f "%z" "$file" >/dev/null 2>&1; then
+    bytes="$(stat -f "%z" "$file")"            # macOS / BSD
+  elif stat -c "%s" "$file" >/dev/null 2>&1; then
+    bytes="$(stat -c "%s" "$file")"            # GNU / Linux
+  elif command -v gstat >/dev/null 2>&1; then
+    bytes="$(gstat -c "%s" "$file")"           # Homebrew GNU stat
+  elif command -v wc >/dev/null 2>&1; then
+    bytes="$(wc -c < "$file" | tr -d ' ')"     # POSIX fallback
+  fi
+
+  if [[ -z "$bytes" || ! "$bytes" =~ ^[0-9]+$ ]]; then
+    echo "unknown size"
+    return 0
+  fi
+
+  # Human-readable formatting
+  if (( bytes >= 1073741824 )); then
+    printf '%.2f GB (%s bytes)\n' "$(echo "scale=2; $bytes/1073741824" | bc)" "$bytes"
+  elif (( bytes >= 1048576 )); then
+    printf '%.1f MB (%s bytes)\n' "$(echo "scale=1; $bytes/1048576" | bc)" "$bytes"
+  elif (( bytes >= 1024 )); then
+    printf '%.0f KB\n' "$(echo "scale=0; $bytes/1024" | bc)"
   else
-    ls -lh "$file"
+    printf '%s bytes\n' "$bytes"
   fi
 }
 
@@ -1194,13 +1317,18 @@ LOGFILE="$WORKDIR/muxm.$(date +%Y%m%d-%H%M%S).log"
 # ===== Section 12: Begin logging to file =======================================================
 if [[ "${DEBUG:-0}" != "1" ]]; then
   : > "$LOGFILE" 2>/dev/null || true
+  # Preserve a raw terminal FD for spinner / progress-bar output.
+  # After the exec redirect, stdout and stderr both go through tee → log + terminal.
+  # FD 3 bypasses tee so \r-based progress UI doesn't pollute the log file.
+  exec 3>&2
+  TERM_FD=3
   exec > >(tee -a "$LOGFILE") 2>&1
   note "Logging to $(realpath_fallback "$LOGFILE")"
 fi
 
 # ===== Section 13: Traps =======================================================================
 trap 'on_error $LINENO "$BASH_COMMAND" "$?"' ERR
-trap 'FAILED=1; EXIT_CODE=130; FAIL_MSG="Interrupted by user (SIGINT)"; exit 130' INT
+trap 'FAILED=1; EXIT_CODE=130; FAIL_MSG="Interrupted by user (SIGINT)"; _term_print "\n"; exit 130' INT
 trap 'FAILED=1; EXIT_CODE=143; FAIL_MSG="Terminated (SIGTERM)"; exit 143' TERM
 
 _print_completed_steps(){
@@ -1210,6 +1338,9 @@ _print_completed_steps(){
 }
 
 on_exit() {
+  # Close the raw-terminal FD if it was opened (Section 12)
+  [[ -n "${TERM_FD:-}" ]] && exec 3>&- 2>/dev/null || true
+
   local have_result=0
   
   if (( DRY_RUN )); then
@@ -1272,7 +1403,7 @@ disk_free_warn
 # ===== Section 15: Metadata caching & ffprobe helpers ==========================================
 # Cache all stream metadata in one call for performance
 cache_stream_metadata() {
-  note "→ Caching stream metadata..."
+  log "→ Caching stream metadata..."
   METADATA_CACHE="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -of json "$SRC_ABS" 2>/dev/null)" || {
     die 12 "Failed to probe source file metadata - file may be corrupt"
   }
@@ -1877,7 +2008,7 @@ run_video_pipeline() {
     fi
   fi
 
-  note "→ Preparing raw video elementary stream…"
+  log "→ Preparing raw video elementary stream…"
   
   if (( DRY_RUN )); then
     : > "$V_SRC_ES" 2>/dev/null || true
@@ -1887,7 +2018,10 @@ run_video_pipeline() {
     # -bsf:v hevc_mp4toannexb ensures proper conversion from hvc1/hev1
     # length-prefixed NAL units to Annex B start codes, which preserves
     # DV RPU NAL units that dovi_tool requires for extraction.
-    if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c copy -bsf:v hevc_mp4toannexb -f hevc "$V_SRC_ES" 2>"$WORKDIR/demux.err"; then
+    ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c copy -bsf:v hevc_mp4toannexb -f hevc "$V_SRC_ES" 2>"$WORKDIR/demux.err" &
+    local demux_pid=$!
+    spinner "$demux_pid" "Demuxing video elementary stream"
+    if ! wait "$demux_pid" 2>/dev/null; then
       local codec
       codec="$(_probe_field codec_name)"
       warn "Could not demux raw ES - source codec: ${codec:-unknown}. DV extraction may be skipped."
@@ -1942,7 +2076,7 @@ run_video_pipeline() {
 
   if [[ "$VIDEO_CODEC" == "libx264" ]]; then
     # H.264 encode (universal profile)
-    note "→ Encoding video (H.264/SDR, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
+    log "→ Encoding video (H.264/SDR, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
     encode_args=(
       -c:v libx264
       -preset "$PRESET_VALUE"
@@ -1953,7 +2087,7 @@ run_video_pipeline() {
     report_add "video_codec" "h264"
   else
     # HEVC encode (default, hdr10-hq, atv-directplay-hq)
-    note "→ Encoding video (${PROFILE_DESC}, ${TARGET_PIXFMT}, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
+    log "→ Encoding video (${PROFILE_DESC}, ${TARGET_PIXFMT}, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
     encode_args=(
       -c:v libx265
       -preset "$PRESET_VALUE"
@@ -1973,9 +2107,20 @@ run_video_pipeline() {
     [[ -n "$vf_str" ]] && ff_cmd+=(-vf "$vf_str")
     ff_cmd+=("${encode_args[@]}" "${thread_args[@]}" -an -sn -dn -f hevc "$V_BASE")
 
-    if ! ffmpeg "${ff_cmd[@]}" 2>"$WORKDIR/encode.err"; then
+    local total_secs
+    total_secs="$(_get_source_duration_secs)"
+    local progress_pipe="$WORKDIR/encode_progress.pipe"
+    mkfifo "$progress_pipe" 2>/dev/null || true
+
+    log "ffmpeg encode command: ffmpeg ${ff_cmd[*]}"
+    ffmpeg "${ff_cmd[@]}" -progress "$progress_pipe" 2>"$WORKDIR/encode.err" &
+    local enc_pid=$!
+    ffmpeg_progress_bar "$enc_pid" "$progress_pipe" "$total_secs" "Encoding video"
+    if ! wait "$enc_pid" 2>/dev/null; then
+      rm -f "$progress_pipe" 2>/dev/null || true
       die 40 "Base video encode failed. See: $WORKDIR/encode.err"
     fi
+    rm -f "$progress_pipe" 2>/dev/null || true
 
     # Validate encoded output
     _validate_media_file "$V_BASE" "Base video encode"
@@ -1983,7 +2128,7 @@ run_video_pipeline() {
     mark_done "Encode base video"
   fi
 
-  note "→ Finalizing video stream (DV inject if available) → $V_MIXED"
+  log "→ Finalizing video stream (DV inject if available) → $V_MIXED"
 
   if (( DRY_RUN )); then
     : > "$V_MIXED" 2>/dev/null || true
@@ -2012,34 +2157,43 @@ run_video_pipeline() {
 
   # Primary: piped extraction (ffmpeg → dovi_tool stdin)
   if (( ! DRY_RUN )); then
-    note "→ Extracting DV RPU via piped stdin…"
-    if ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c copy \
-         -bsf:v hevc_mp4toannexb -f hevc - 2>"$WORKDIR/rpu_pipe_demux.err" \
-       | dovi_tool extract-rpu - -o "$RPU_P7" >"$WORKDIR/rpu_pipe.log" 2>&1; then
+    log "→ Extracting DV RPU via piped stdin…"
+    (
+      set +eE  # Prevent ERR trap from firing inside this subshell
+      ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c copy \
+           -bsf:v hevc_mp4toannexb -f hevc - 2>"$WORKDIR/rpu_pipe_demux.err" \
+         | dovi_tool extract-rpu - -o "$RPU_P7" >"$WORKDIR/rpu_pipe.log" 2>&1
+    ) &
+    local rpu_pipe_pid=$!
+    spinner "$rpu_pipe_pid" "Extracting DV RPU (piped)"
+    if wait "$rpu_pipe_pid" 2>/dev/null; then
       if [[ -s "$RPU_P7" ]]; then
         rpu_extracted=1
-        note "DV RPU extracted successfully (piped method)."
+        log "DV RPU extracted successfully (piped method)."
       else
         warn "Piped RPU extraction produced empty file — trying file-based fallback."
       fi
     else
       warn "Piped RPU extraction failed — trying file-based fallback."
-      warn "See: $WORKDIR/rpu_pipe_demux.err and $WORKDIR/rpu_pipe.log"
+      log "See: $WORKDIR/rpu_pipe_demux.err and $WORKDIR/rpu_pipe.log"
     fi
   fi
 
   # Fallback: file-based extraction from demuxed ES
   if (( ! rpu_extracted && ! DRY_RUN )); then
     if [[ -s "$V_SRC_ES" ]]; then
-      note "→ Extracting DV RPU from demuxed ES file (fallback)…"
-      if dovi_tool extract-rpu -i "$V_SRC_ES" -o "$RPU_P7" >"$WORKDIR/rpu_file.log" 2>&1; then
+      log "→ Extracting DV RPU from demuxed ES file (fallback)…"
+      dovi_tool extract-rpu -i "$V_SRC_ES" -o "$RPU_P7" >"$WORKDIR/rpu_file.log" 2>&1 &
+      local rpu_file_pid=$!
+      spinner "$rpu_file_pid" "Extracting DV RPU (file fallback)"
+      if wait "$rpu_file_pid" 2>/dev/null; then
         if [[ -s "$RPU_P7" ]]; then
           rpu_extracted=1
-          note "DV RPU extracted successfully (file-based fallback)."
+          log "DV RPU extracted successfully (file-based fallback)."
         fi
       else
         warn "File-based RPU extraction also failed."
-        warn "See: $WORKDIR/rpu_file.log"
+        log "See: $WORKDIR/rpu_file.log"
       fi
     else
       warn "No demuxed ES file available for fallback RPU extraction."
@@ -2142,7 +2296,10 @@ run_video_pipeline() {
   fi
 
   # Inject RPU into encoded video
-  if ! dovi_tool inject-rpu -i "$V_BASE" --rpu-in "$RPU_FINAL" -o "$V_MIXED" >"$WORKDIR/rpu_inject.log" 2>&1; then
+  dovi_tool inject-rpu -i "$V_BASE" --rpu-in "$RPU_FINAL" -o "$V_MIXED" >"$WORKDIR/rpu_inject.log" 2>&1 &
+  local inject_pid=$!
+  spinner "$inject_pid" "Injecting DV RPU into video"
+  if ! wait "$inject_pid" 2>/dev/null; then
     warn "DV RPU injection failed. See: $WORKDIR/rpu_inject.log"
     if (( ALLOW_DV_FALLBACK )); then
       warn "Falling back to base video without DV."
@@ -2508,7 +2665,7 @@ run_audio_pipeline(){
   br="$(_audio_bitrate "$idx")"
   title="$(_audio_title "$idx")"
 
-  say "• Detected audio streams:"
+  log "• Detected audio streams:"
   local i
   for (( i=0; i<n; i++ )); do
     local c ch_i l t br_i pretty
@@ -2521,15 +2678,21 @@ run_audio_pipeline(){
     pretty="#$i: $c ${ch_i}ch [$l]"
     [[ -n "$t" ]] && pretty="$pretty — $t"
     [[ "$br_i" =~ ^[0-9]+$ ]] && (( br_i > 0 )) && pretty="$pretty, $((br_i/1000))kbps"
-    say "  $pretty"
+    log "  $pretty"
   done
 
-  note "[Audio Select] Using track #$idx: $codec ${ch}ch [$lang]${title:+ — $title}${br:+, $((br/1000))kbps}"
+  note "[Audio] Selected track #$idx: $codec ${ch}ch [$lang]${title:+ — $title}${br:+, $((br/1000))kbps}"
   report_add "audio_source" "track #$idx: $codec ${ch}ch [$lang]"
 
   A_PRIMARY="$WORKDIR/audio_primary.${codec}"
   AAC_STEREO="$WORKDIR/audio_stereo.aac"
   HAS_AUDIO=1
+
+  # Persist audio metadata for mux_final tagging
+  A_PRIMARY_LANG="$lang"
+  A_PRIMARY_TITLE="${title:-}"
+  A_PRIMARY_CHANNELS="$ch"
+  A_STEREO_LANG="$lang"
 
   # Enforce MAX_AUDIO_CHANNELS
   local effective_ch="$ch"
@@ -2538,7 +2701,7 @@ run_audio_pipeline(){
     effective_ch="$MAX_AUDIO_CHANNELS"
   fi
 
-  note "→ Preparing primary audio → $A_PRIMARY"
+  log "→ Preparing primary audio → $A_PRIMARY"
 
   if (( DRY_RUN )); then
     : > "$A_PRIMARY" 2>/dev/null || true
@@ -2595,7 +2758,10 @@ run_audio_pipeline(){
   fi
 
   if (( do_copy )); then
-    if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" -c copy "$A_PRIMARY" 2>"$WORKDIR/audio_primary.err"; then
+    ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" -c copy "$A_PRIMARY" 2>"$WORKDIR/audio_primary.err" &
+    local acopy_pid=$!
+    spinner "$acopy_pid" "Copying audio stream"
+    if ! wait "$acopy_pid" 2>/dev/null; then
       die 43 "Audio copy failed. See: $WORKDIR/audio_primary.err"
     fi
   else
@@ -2616,9 +2782,19 @@ run_audio_pipeline(){
     transcode_args+=(-ac "$effective_ch")
     transcode_args+=("$A_PRIMARY")
 
-    if ! ffmpeg "${transcode_args[@]}" 2>"$WORKDIR/audio_primary.err"; then
+    local total_secs
+    total_secs="$(_get_source_duration_secs)"
+    local a_progress_pipe="$WORKDIR/audio_progress.pipe"
+    mkfifo "$a_progress_pipe" 2>/dev/null || true
+
+    ffmpeg "${transcode_args[@]}" -progress "$a_progress_pipe" 2>"$WORKDIR/audio_primary.err" &
+    local atx_pid=$!
+    ffmpeg_progress_bar "$atx_pid" "$a_progress_pipe" "$total_secs" "Transcoding audio"
+    if ! wait "$atx_pid" 2>/dev/null; then
+      rm -f "$a_progress_pipe" 2>/dev/null || true
       die 43 "Audio transcode to $tgt_codec failed. See: $WORKDIR/audio_primary.err"
     fi
+    rm -f "$a_progress_pipe" 2>/dev/null || true
   fi
 
   # Validate primary audio
@@ -2630,14 +2806,24 @@ run_audio_pipeline(){
 
   # Add stereo fallback if needed
   if (( ADD_STEREO_IF_MULTICH )) && (( effective_ch > 2 )); then
-    note "→ Preparing stereo fallback → $AAC_STEREO"
-    if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
-      -c:a aac -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO" 2>"$WORKDIR/audio_stereo.err"; then
+    log "→ Preparing stereo fallback → $AAC_STEREO"
+    local stereo_total_secs
+    stereo_total_secs="$(_get_source_duration_secs)"
+    local stereo_progress_pipe="$WORKDIR/stereo_progress.pipe"
+    mkfifo "$stereo_progress_pipe" 2>/dev/null || true
+
+    ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
+      -c:a aac -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO" \
+      -progress "$stereo_progress_pipe" 2>"$WORKDIR/audio_stereo.err" &
+    local stereo_pid=$!
+    ffmpeg_progress_bar "$stereo_pid" "$stereo_progress_pipe" "$stereo_total_secs" "Creating stereo fallback"
+    if ! wait "$stereo_pid" 2>/dev/null; then
       warn "Stereo fallback creation failed - continuing without it. See: $WORKDIR/audio_stereo.err"
       AAC_STEREO=""
     else
       mark_done "Stereo fallback prepared"
     fi
+    rm -f "$stereo_progress_pipe" 2>/dev/null || true
   else
     note "Primary audio is stereo (or fallback disabled); no extra stereo needed."
   fi
@@ -2871,6 +3057,12 @@ SRT_FORCED_TITLE=""
 SRT_FULL_TITLE=""
 SRT_SDH_TITLE=""
 
+# Audio metadata for mux tagging (populated by run_audio_pipeline)
+A_PRIMARY_LANG=""
+A_PRIMARY_TITLE=""
+A_PRIMARY_CHANNELS=""
+A_STEREO_LANG=""
+
 # Process a prepared subtitle: either export as external SRT or embed.
 # Sets _SUB_EMBED_PATH to the SRT path if embedded, empty if exported externally.
 # Args: $1 — SRT file path, $2 — label (full|sdh)
@@ -3010,7 +3202,7 @@ build_subtitle_plan(){
 # into the target container format. Handles stream mapping, codec assignment,
 # chapter/metadata policy, and validates the muxed output.
 mux_final() {
-  say "→ Muxing final ${OUTPUT_EXT^^} with ffmpeg → $TMP_OUT"
+  log "→ Muxing final ${OUTPUT_EXT^^} with ffmpeg → $TMP_OUT"
 
   if (( DRY_RUN )); then
     : > "$TMP_OUT" 2>/dev/null || true
@@ -3155,6 +3347,24 @@ mux_final() {
     out_s_idx=$(( out_s_idx + 1 ))
   fi
 
+  # Audio metadata: language, title, and disposition tagging.
+  # Output audio index tracks which output stream we're tagging.
+  local -i out_a_idx=0
+  if [[ -n "$a_primary_idx" ]]; then
+    [[ -n "${A_PRIMARY_LANG:-}" ]]  && ff_codec+=( "-metadata:s:a:${out_a_idx}" "language=$A_PRIMARY_LANG" )
+    if [[ -n "${A_PRIMARY_TITLE:-}" ]]; then
+      ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=$A_PRIMARY_TITLE" )
+    fi
+    ff_codec+=( "-disposition:a:${out_a_idx}" default )
+    out_a_idx=$(( out_a_idx + 1 ))
+  fi
+  if [[ -n "$a_stereo_idx" ]]; then
+    [[ -n "${A_STEREO_LANG:-}" ]] && ff_codec+=( "-metadata:s:a:${out_a_idx}" "language=$A_STEREO_LANG" )
+    ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=Stereo" )
+    ff_codec+=( "-disposition:a:${out_a_idx}" 0 )
+    out_a_idx=$(( out_a_idx + 1 ))
+  fi
+
   # MP4/MOV optimization
   if [[ "$MUX_FORMAT" != "matroska" ]]; then
     ff_codec+=( -movflags +faststart )
@@ -3191,7 +3401,10 @@ mux_final() {
   fi
 
   # Execute final mux
-  if ! ffmpeg "${ff_in[@]}" "${ff_map[@]}" "${ff_codec[@]}" -f "$MUX_FORMAT" "$TMP_OUT" 2>"$WORKDIR/mux.err"; then
+  ffmpeg "${ff_in[@]}" "${ff_map[@]}" "${ff_codec[@]}" -f "$MUX_FORMAT" "$TMP_OUT" 2>"$WORKDIR/mux.err" &
+  local mux_pid=$!
+  spinner "$mux_pid" "Muxing final ${OUTPUT_EXT^^}"
+  if ! wait "$mux_pid" 2>/dev/null; then
     die 41 "ffmpeg final mux failed. See: $WORKDIR/mux.err"
   fi
 
@@ -3311,20 +3524,80 @@ main() {
     note "Output is non-DV."
   fi
 
-  say "→ Verifying output streams…"
+  say "→ Verifying output…"
   if (( DRY_RUN )); then
-    say "DRY-RUN: ffprobe verify $TMP_OUT"
+    say "  DRY-RUN: ffprobe verify $TMP_OUT"
+    say "  DRY-RUN: size of $TMP_OUT"
   else
-    ffprobe -hide_banner -show_streams "$TMP_OUT" 2>/dev/null | sed -n '1,220p' || true
+    # Full ffprobe dump → log only (not to terminal)
+    log "--- ffprobe output streams (full) ---"
+    ffprobe -hide_banner -show_streams "$TMP_OUT" 2>/dev/null >> "$LOGFILE" || true
+    log "--- end ffprobe output ---"
+
+    # Compact stream summary → terminal + log (via say)
+    local verify_json
+    verify_json="$(ffprobe -v error -show_streams -of json "$TMP_OUT" 2>/dev/null)" || true
+    if [[ -n "${verify_json:-}" ]]; then
+      local v_codec v_res v_fps s_count
+      v_codec="$(printf '%s\n' "$verify_json" | jq -r '[.streams[] | select(.codec_type=="video")][0] | "\(.codec_name // "?") \(.profile // "")" ' 2>/dev/null | sed 's/ $//')"
+      v_res="$(printf '%s\n' "$verify_json" | jq -r '[.streams[] | select(.codec_type=="video")][0] | "\(.width)x\(.height)"' 2>/dev/null)"
+      v_fps="$(printf '%s\n' "$verify_json" | jq -r '[.streams[] | select(.codec_type=="video")][0] | .r_frame_rate' 2>/dev/null)"
+      # Convert fractional fps like 24000/1001 to decimal
+      if [[ "$v_fps" == */* ]]; then
+        v_fps="$(echo "scale=3; $v_fps" | bc 2>/dev/null | sed 's/0*$//' | sed 's/\.$//')"
+      fi
+      s_count="$(printf '%s\n' "$verify_json" | jq '[.streams[] | select(.codec_type=="subtitle")] | length' 2>/dev/null)"
+
+      say "  Video : ${v_codec:-?} ${v_res:-?} @ ${v_fps:-?} fps"
+
+      # Audio: rich per-track metadata (codec, channels, language, bitrate, title)
+      local a_track_count
+      a_track_count="$(printf '%s\n' "$verify_json" | jq '[.streams[] | select(.codec_type=="audio")] | length' 2>/dev/null)"
+      if [[ "${a_track_count:-0}" != "0" ]]; then
+        local a_idx=0
+        while (( a_idx < a_track_count )); do
+          local a_codec a_ch a_lang a_br a_title a_layout a_line a_ch_label
+          a_codec="$(printf '%s\n' "$verify_json" | jq -r "[.streams[] | select(.codec_type==\"audio\")][$a_idx].codec_name // \"?\"" 2>/dev/null)"
+          a_ch="$(printf '%s\n' "$verify_json" | jq -r "[.streams[] | select(.codec_type==\"audio\")][$a_idx].channels // 0" 2>/dev/null)"
+          a_lang="$(printf '%s\n' "$verify_json" | jq -r "[.streams[] | select(.codec_type==\"audio\")][$a_idx].tags.language // \"und\"" 2>/dev/null)"
+          a_br="$(printf '%s\n' "$verify_json" | jq -r "[.streams[] | select(.codec_type==\"audio\")][$a_idx].bit_rate // empty" 2>/dev/null)"
+          a_title="$(printf '%s\n' "$verify_json" | jq -r "[.streams[] | select(.codec_type==\"audio\")][$a_idx].tags.title // empty" 2>/dev/null)"
+          a_layout="$(printf '%s\n' "$verify_json" | jq -r "[.streams[] | select(.codec_type==\"audio\")][$a_idx].channel_layout // empty" 2>/dev/null)"
+
+          # Descriptive channel label
+          case "${a_ch:-0}" in
+            1) a_ch_label="mono" ;;
+            2) a_ch_label="stereo" ;;
+            6) a_ch_label="5.1" ;;
+            8) a_ch_label="7.1" ;;
+            *) a_ch_label="${a_ch}ch" ;;
+          esac
+          # Prefer channel_layout if available and more descriptive
+          [[ -n "$a_layout" && "$a_layout" != "unknown" ]] && a_ch_label="$a_layout"
+
+          a_line="${a_codec} ${a_ch_label} [${a_lang}]"
+          [[ -n "$a_br" && "$a_br" =~ ^[0-9]+$ ]] && (( a_br > 0 )) && a_line+=" $(( a_br / 1000 ))kbps"
+          [[ -n "$a_title" ]] && a_line+=" — $a_title"
+
+          if (( a_idx == 0 )); then
+            say "  Audio : $a_line"
+          else
+            say "          $a_line"
+          fi
+          a_idx=$(( a_idx + 1 ))
+        done
+      else
+        say "  Audio : none"
+      fi
+
+      [[ "${s_count:-0}" != "0" ]] && say "  Subs  : ${s_count} track(s)"
+      (( OUTPUT_HAS_DV )) && say "  DV    : present"
+    fi
+
+    # File size
+    say "  Size  : $(filesize_pretty "$TMP_OUT")"
   fi
   mark_done "Verify output"
-
-  say "→ Output (temp) size:"
-  if (( DRY_RUN )); then
-    say "DRY-RUN: size of $TMP_OUT"
-  else
-    filesize_pretty "$TMP_OUT"
-  fi
 
   # Write JSON report if requested
   write_json_report
