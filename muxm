@@ -40,11 +40,6 @@ FAILED=0
 FAIL_MSG=""
 EXIT_CODE=1
 PRINT_EFFCONF=0
-# TODO(future): Config file rotation — write-back of resolved config to disk
-# shellcheck disable=SC2034  # Reserved for future use
-CONFIG_WRITE_ROTATE=0
-# shellcheck disable=SC2034  # Reserved for future use
-CONFIG_WRITE_PATH=""
 PROFILE_NAME=""
 
 # Metadata cache for performance optimization
@@ -118,13 +113,7 @@ SUB_OCR_LANG="eng"
 
 # ---- Muxing / output
 OUTPUT_EXT="mp4"               # supports mp4|m4v|mov
-# TODO(future): MP4 interleave duration for streaming optimization
-# shellcheck disable=SC2034  # Reserved for future use
-declare -i MP4_INTERLEAVE_MS=500
 TAG_LANGUAGE_DEFAULT="und"
-# TODO(future): Include descriptive titles in audio stream metadata tags
-# shellcheck disable=SC2034  # Reserved for future use
-declare -i INCLUDE_AUDIO_TITLES=1
 
 # ---- Operational defaults
 declare -i CHECKSUM=0

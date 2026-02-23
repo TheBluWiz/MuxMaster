@@ -9,6 +9,7 @@
 - [Usage](#usage)
 - [Examples](#examples)
 - [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
 - [Going Forward](#goingforward)
 - [License](#license)
 - [Contributing](#contributing)
@@ -114,12 +115,29 @@ chmod +x muxm
 sudo mv muxm /usr/local/bin/muxm
 ```
 
+### Quick Setup (macOS)
+
+If you have Homebrew installed, `muxm` can check and install everything it needs automatically:
+
+```bash
+muxm --install-dependencies
+```
+
+This checks for all required and optional tools, installs missing ones via Homebrew and pipx, and verifies your environment (including Tesseract language data and `TESSDATA_PREFIX`).
+
 ### Dependencies
 
-- **ffmpeg** and **ffprobe** (required)
-- **jq** (required — JSON parsing for stream metadata)
-- **dovi_tool** (required for Dolby Vision handling; auto-disabled if missing)
-- **sub2srt** or equivalent OCR tool (optional, for PGS subtitle conversion)
+**Required:**
+- **ffmpeg** and **ffprobe** — media encoding and probing
+- **jq** — JSON processing (used internally for stream metadata)
+
+**Recommended (Dolby Vision pipeline):**
+- **dovi_tool** — DV RPU extraction and injection (auto-disabled if missing)
+- **mp4box** (GPAC) — DV container signaling (`dvcC`/`dvvC` box writing). Install: `brew install gpac` (macOS) or `apt install gpac` (Linux)
+
+**Optional (PGS subtitle OCR):**
+- **sub2srt** or **pgsrip** — PGS bitmap subtitle OCR (set via `--ocr-tool`)
+- **tesseract** — OCR engine used by pgsrip
 
 ---
 
@@ -150,6 +168,12 @@ muxm [options] <source> [target.mp4]
 | `--strip-metadata` | Strip non-essential metadata |
 | `--skip-if-ideal` | Skip processing if source matches target |
 | `--print-effective-config` | Show resolved config after all overrides |
+| `--install-dependencies` | Check and install all required/optional tools |
+| `--checksum` | Write SHA-256 checksum for final output |
+| `-k, --keep-temp` | Keep temp workdir on failure (useful for debugging) |
+| `-K, --keep-temp-always` | Keep temp workdir even on success |
+
+> **Tip:** Most boolean flags support a `--no-*` counterpart (e.g., `--no-tonemap`, `--no-stereo-fallback`, `--no-strip-metadata`). This lets you override profile defaults on a per-run basis.
 
 Run `muxm --help` for the full flag reference.
 
@@ -195,8 +219,6 @@ Hardcoded defaults
           → CLI flags      (highest — always wins)
 ```
 
-> ⚠️ **Security note:** `muxm` sources `./.muxmrc` from the current working directory. Do not run `muxm` inside untrusted directories (e.g., downloaded archives or shared network mounts) as a malicious `.muxmrc` could execute arbitrary code. System and user config files (`/etc/.muxmrc`, `~/.muxmrc`) are not affected by this concern.
-
 ### Setting a Default Profile
 
 Add to any `.muxmrc` file:
@@ -216,6 +238,69 @@ muxm --profile hdr10-hq --crf 20 --print-effective-config
 ```
 
 This shows every variable grouped by section, the active profile name, and whether the profile came from a config file or the CLI.
+
+---
+
+## 🔧 Troubleshooting <a id="troubleshooting"></a>
+
+All errors are prefixed with `❌ ERROR:` and printed to stderr. Warnings (`⚠️`) are non-fatal and never stop execution.
+
+### Exit Codes
+
+| Code | Category | Meaning |
+|---|---|---|
+| `0` | Success | Processing completed normally |
+| `10` | Dependency | A required tool is missing (ffmpeg, ffprobe, jq) |
+| `11` | Input / Arguments | Bad CLI flag, unknown option, missing source file, invalid output path, or source and output are the same file |
+| `12` | Source problem | Source file is corrupt, has no video streams, or ffprobe returned invalid data |
+| `40` | Video pipeline | Video encode failed, DV RPU extraction failed (with fallback disabled) |
+| `41` | Mux / Output | Final mux failed, DV injection failed, or output file is empty/corrupt |
+| `42` | Pipeline logic | Missing video stream for output, `--skip-video` used with a real encode job |
+| `43` | Audio pipeline | Audio copy or transcode failed |
+| `130` | Interrupted | User pressed Ctrl+C (SIGINT) |
+| `143` | Terminated | Process received SIGTERM |
+
+### Common Errors and What to Do
+
+**`Missing required tool: jq`** (exit 10)
+Install the missing dependency. On macOS: `brew install jq`. Or run `muxm --install-dependencies` to check and install everything at once.
+
+**`Source file not found`** (exit 11)
+Double-check the path. `muxm` resolves the source to an absolute path — typos, broken symlinks, and missing files all trigger this.
+
+**`Source file contains no video streams`** (exit 12)
+The file exists but ffprobe found no video tracks. It may be audio-only, corrupt, or in a format ffprobe can't read.
+
+**`ffmpeg final mux failed`** (exit 41)
+Check the detailed error log at `$WORKDIR/mux.err` (printed in the error message). Common causes include incompatible codec/container combinations (e.g., PGS subtitles in MP4) or disk full.
+
+**`DV RPU extraction failed and fallback is disabled`** (exit 40)
+`dovi_tool` couldn't extract RPU data and `--no-allow-dv-fallback` was set. Remove that flag to allow graceful fallback to non-DV output, or check that `dovi_tool` is installed and the source actually contains DV metadata.
+
+**`⚠️ Less than ~5GB free on output volume`** (warning)
+Not fatal, but encodes may fail mid-process if disk space runs out. Free up space or encode to a different volume.
+
+**`⚠️ dovi_tool not found`** (warning)
+Dolby Vision handling is auto-disabled. Install it (`brew install dovi_tool`) or run `muxm --install-dependencies`.
+
+**`⚠️ mp4box (GPAC) not found`** (warning)
+DV container signaling (`dvcC`/`dvvC` box) may fail without it. Install: `brew install gpac` (macOS) or `apt install gpac` (Linux).
+
+### Debugging Tips
+
+Use `--keep-temp` (or `-k`) to preserve the temp workdir on failure — it contains per-stage error logs (`encode.err`, `audio_primary.err`, `mux.err`) and intermediate files. Use `--keep-temp-always` (or `-K`) to keep it even on success.
+
+Use `--print-effective-config` to verify which settings are active after config files, profiles, and CLI flags are merged. Combine it with `--profile` to inspect what a profile actually sets:
+
+```bash
+muxm --profile atv-directplay-hq --print-effective-config
+```
+
+Set `DEBUG=1` in the environment to enable bash trace output (`set -x`) for low-level debugging:
+
+```bash
+DEBUG=1 muxm --profile universal input.mkv
+```
 
 ---
 

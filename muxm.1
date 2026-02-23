@@ -1,71 +1,374 @@
-.TH MUXM 1 "2025-08-13" "MuxMaster v1.3" "User Commands"
+.TH MUXM 1 "2026-02-23" "MuxMaster v0.11.0" "User Commands"
 .SH NAME
-muxm \- Universal DV/HLG/HDR10/SDR → MP4 encoder/muxer for Apple TV direct play
+muxm \- video encoder/muxer with Dolby Vision, HDR10, HLG, and SDR support
 .SH SYNOPSIS
 .B muxm
-[\fIoptions\fR] \fIsource\fR [\fItarget.mp4\fR]
+[\fIoptions\fR] \fIsource\fR [\fItarget\fR]
 .SH DESCRIPTION
-MuxMaster converts and muxes video to MP4 suitable for Apple TV direct play.
-It handles Dolby Vision (extract/convert/inject), HDR/HLG/SDR color handling,
-audio selection/transcoding, and subtitle selection with optional PGS→SRT OCR.
+MuxMaster (\fBmuxm\fR) converts and muxes video for playback on Apple TV, Plex,
+and a wide range of devices. It handles Dolby Vision (extract/convert/inject),
+HDR/HLG/SDR color matching, smart audio selection and transcoding, subtitle
+selection with optional PGS\(->SRT OCR, and multi-container output (MP4, MKV,
+M4V, MOV).
 .PP
-Configuration layers (lowest to highest precedence):
+The recommended way to use \fBmuxm\fR is with \fB\-\-profile\fR, which configures
+dozens of settings for a specific use case in a single flag. Every setting a
+profile changes can be individually overridden with CLI flags.
+.SH PROFILES
+Profiles are named presets that configure \fBmuxm\fR for a target workflow.
+.TP
+.B dv\-archival
+Dolby Vision archival. Copies video without re-encoding, passes lossless audio
+through, keeps all subtitles and chapters, and generates a JSON report. Skips
+processing entirely if the source already matches. Container: MKV.
+.TP
+.B hdr10\-hq
+High quality HDR10. Strips Dolby Vision layers and re-encodes to clean HDR10
+HEVC at CRF 17. Preserves lossless audio (TrueHD, DTS-HD MA, FLAC) and adds a
+stereo fallback track. Container: MKV.
+.TP
+.B atv\-directplay\-hq
+Apple TV Direct Play. Targets true Direct Play on Apple TV 4K via Plex: MP4
+container, HEVC Main10 with DV Profile 8.1 when possible, E-AC-3 surround with
+AAC stereo fallback, and forced subtitle burn-in. Copies compliant video
+without re-encoding. Skips processing if source is already ATV-compliant.
+.TP
+.B universal
+Universal compatibility. Plays on everything: old Rokus, mobile devices, web
+browsers, non-HDR TVs. Tone-maps HDR to SDR, encodes to H.264, forces AAC
+stereo audio, burns forced subtitles, exports others as external SRT, and
+strips chapters and non-essential metadata. Container: MP4.
 .PP
-Defaults → /etc/.muxmrc → ~/.muxmrc → ./.muxmrc → CLI flags
-.SH COMMON OPTIONS
+Profiles can also be set as a default in any \fB.muxmrc\fR config file:
+.PP
+.RS
+PROFILE_NAME="atv\-directplay\-hq"
+.RE
+.PP
+CLI \fB\-\-profile\fR always overrides a config-file PROFILE_NAME.
+.SH CORE OPTIONS
 .TP
-.BR --dry-run
-Plan steps without encoding/muxing (creates placeholders only).
+.BR \-h ", " \-\-help
+Show usage and exit.
 .TP
-.BR --output-ext " " EXT
-Output container: mp4|m4v|mov. Default: mp4.
+.BR \-V ", " \-\-version
+Show version and exit.
 .TP
-.BR --crf " " N
-x265 quality CRF (lower = higher quality). Typical: 18–22.
+.BR \-\-install\-dependencies
+Check for all required and optional tools, install missing ones via Homebrew
+and pipx, verify environment settings (Tesseract language data, TESSDATA_PREFIX),
+and exit. Does not encode anything.
 .TP
-.BR -p ", " --preset " " NAME
-x265 preset ultrafast..placebo. Default: slower.
+.BR \-\-profile " " \fINAME\fR
+Apply a named format profile (\fBdv\-archival\fR, \fBhdr10\-hq\fR,
+\fBatv\-directplay\-hq\fR, \fBuniversal\fR). CLI flags given after \-\-profile
+override the profile's defaults.
 .TP
-.BR -l ", " --level " " N
-x265 level-idc (e.g., 5.1).
+.BR \-\-print\-effective\-config
+Show the fully resolved configuration after merging config files, profile, and
+CLI flags, then exit. Useful for verifying what a profile actually sets.
 .TP
-.BR --x265-params " " STR
-Advanced x265 parameter string.
+.BR \-\-dry\-run
+Plan steps and create stub artifacts without encoding or muxing.
 .TP
-.BR --audio-track " " N
-Select specific audio stream index (0-based).
+.BR \-\-checksum
+Write a SHA-256 checksum file alongside the output.
 .TP
-.BR --audio-lang-pref " " LIST
-Preferred audio languages (comma-separated, e.g., eng,spa).
+.BR \-k ", " \-\-keep\-temp
+Keep the temporary working directory on failure (useful for inspecting
+per-stage error logs like \fIencode.err\fR, \fIaudio_primary.err\fR,
+\fImux.err\fR).
 .TP
-.BR --stereo-fallback " , " --no-stereo-fallback
-Enable/disable automatic AAC stereo track when primary >2ch.
+.BR \-K ", " \-\-keep\-temp\-always
+Keep the temporary working directory even on success.
 .TP
-.BR --sub-lang-pref " " LIST
-Preferred subtitle languages (comma-separated).
+.BR \-\-skip\-if\-ideal
+Skip processing entirely if the source already matches the target profile.
+Enabled by default in \fBdv\-archival\fR and \fBatv\-directplay\-hq\fR profiles.
 .TP
-.BR --no-ocr
-Disable PGS→SRT OCR (PGS will be skipped unless directly mapped).
+.BR \-\-report\-json
+Generate a machine-readable JSON report alongside the output.
+.SH VIDEO OPTIONS
 .TP
-.BR --skip-video " , " --skip-audio " , " --skip-subs
-Disable respective pipelines (useful for quick tests).
-.SH FULL OPTIONS
-See \fB--help-all\fR for the comprehensive list, defaults, and notes.
-.SH EXAMPLES
+.BR \-\-crf " " \fIN\fR
+x265/x264 quality CRF value (lower = higher quality). Typical range: 17\(en22.
+Default: 18.
+.TP
+.BR \-p ", " \-\-preset " " \fINAME\fR
+x265/x264 encoder preset: ultrafast, superfast, veryfast, faster, fast, medium,
+slow, slower, veryslow, placebo. Default: slower.
+.TP
+.BR \-l ", " \-\-level " " \fIN\fR
+HEVC level-idc (e.g., 4.1, 5.0, 5.1). When set, conservative VBV rate
+control is applied automatically. Default: encoder decides.
+.TP
+.BR \-\-x265\-params " " \fISTR\fR
+Override the base x265 parameter string. Advanced.
+.TP
+.BR \-\-video\-codec " " libx265|libx264
+Video encoder. Default: libx265. Set to libx264 by the \fBuniversal\fR profile.
+.TP
+.BR \-\-video\-copy\-if\-compliant
+Copy (stream-copy) the video track if the source already matches the target
+codec and profile, skipping re-encoding. Enabled by \fBdv\-archival\fR and
+\fBatv\-directplay\-hq\fR profiles.
+.TP
+.BR \-\-tonemap
+Tone-map HDR/HLG content to SDR using a zscale+hable filter chain. Enabled by
+the \fBuniversal\fR profile.
+.TP
+.BR \-\-no\-dv
+Disable Dolby Vision RPU extraction and injection entirely.
+.TP
+.BR \-\-allow\-dv\-fallback ", " \-\-no\-allow\-dv\-fallback
+Control whether DV handling failures fall back gracefully to non-DV output
+(default: allow fallback) or hard-fail the pipeline.
+.TP
+.BR \-\-dv\-convert\-p81 ", " \-\-no\-dv\-convert\-p81
+Control whether non-P8.1 DV sources are converted to Profile 8.1 when DV
+handling fails. Default: enabled.
+.TP
+.BR \-\-no\-conservative\-vbv
+Disable automatic VBV rate control guardrails when a level is set.
+.TP
+.BR \-\-threads " " \fIN\fR
+Set ffmpeg thread count. Default: ffmpeg chooses automatically.
+.SH AUDIO OPTIONS
+.TP
+.BR \-\-audio\-track " " \fIN\fR
+Force selection of a specific audio stream by index (0-based, relative to
+audio streams only). Bypasses the automatic scoring/selection logic.
+.TP
+.BR \-\-audio\-lang\-pref " " \fILIST\fR
+Preferred audio languages, comma-separated (e.g., eng,spa). Default: eng.
+.TP
+.BR \-\-stereo\-fallback ", " \-\-no\-stereo\-fallback
+Enable or disable automatic creation of a stereo AAC track when the primary
+audio has more than 2 channels. Default: enabled.
+.TP
+.BR \-\-stereo\-bitrate " " \fIRATE\fR
+Bitrate for the stereo fallback track (e.g., 192k, 256k). Default: 192k.
+.TP
+.BR \-\-audio\-force\-codec " " \fICODEC\fR
+Force all audio output to a specific codec (e.g., aac). Used by the
+\fBuniversal\fR profile.
+.TP
+.BR \-\-audio\-lossless\-passthrough
+Allow lossless audio codecs (TrueHD, DTS-HD MA, FLAC) to stream-copy through
+without transcoding. Enabled by \fBdv\-archival\fR and \fBhdr10\-hq\fR profiles.
+.SH SUBTITLE OPTIONS
+.TP
+.BR \-\-no\-subtitles
+Exclude all subtitles from the output.
+.TP
+.BR \-\-sub\-lang\-pref " " \fILIST\fR
+Preferred subtitle languages, comma-separated (e.g., eng,spa). Default: eng.
+.TP
+.BR \-\-no\-sub\-sdh
+Exclude SDH/HI subtitle tracks.
+.TP
+.BR \-\-sub\-burn\-forced
+Burn forced subtitles into the video stream for guaranteed display on all
+players. Enabled by \fBatv\-directplay\-hq\fR and \fBuniversal\fR profiles.
+.TP
+.BR \-\-sub\-export\-external
+Export non-burned subtitles as external .srt files alongside the output.
+Enabled by the \fBuniversal\fR profile.
+.TP
+.BR \-\-no\-ocr
+Disable PGS-to-SRT OCR. PGS bitmap subtitles will be dropped from MP4 output
+(MP4 cannot carry PGS).
+.TP
+.BR \-\-ocr\-tool " " \fITOOL\fR
+OCR tool for PGS subtitle conversion. Default: sub2srt.
+.TP
+.BR \-\-ocr\-lang " " \fILANG\fR
+OCR language. Default: eng.
+.SH OUTPUT OPTIONS
+.TP
+.BR \-\-output\-ext " " mp4|m4v|mov|mkv
+Output container format. Default: mp4. Profiles may change this (e.g.,
+\fBdv\-archival\fR and \fBhdr10\-hq\fR use mkv).
+.TP
+.BR \-\-keep\-chapters ", " \-\-no\-keep\-chapters
+Keep or strip chapter markers. Default: keep. The \fBuniversal\fR profile
+strips chapters.
+.TP
+.BR \-\-strip\-metadata
+Strip non-essential metadata from the output. Enabled by the \fBuniversal\fR
+profile.
+.SH QUICK TEST OPTIONS
+.TP
+.BR \-\-skip\-video
+Skip the video pipeline (cannot produce a valid final output; use for testing
+audio/subtitle logic only).
+.TP
+.BR \-\-skip\-audio
+Skip the audio pipeline entirely.
+.TP
+.BR \-\-skip\-subs
+Skip the subtitle pipeline entirely.
+.SH FFMPEG TUNING OPTIONS
+.TP
+.BR \-\-ffmpeg\-loglevel " " \fILEVEL\fR
+Set ffmpeg log verbosity (e.g., error, warning, info). Default: error.
+.TP
+.BR \-\-ffprobe\-loglevel " " \fILEVEL\fR
+Set ffprobe log verbosity. Default: error.
+.TP
+.BR \-\-no\-hide\-banner
+Show the ffmpeg version banner.
+.TP
+.BR \-\-no\-overwrite
+Do not overwrite existing temp files (ffmpeg \-n behavior).
+.SH CONFIGURATION
+\fBmuxm\fR reads configuration from multiple levels, applied in this order
+(lowest to highest precedence):
+.PP
+.RS
 .nf
-muxm Movie.mkv out.mp4
-muxm --crf 20 -p slow Movie.mkv out.mp4
-muxm --audio-lang-pref eng,spa --sub-lang-pref eng --no-ocr Movie.mkv out.mp4
-muxm --dry-run --skip-video Movie.mkv out.mp4
+Hardcoded defaults
+  \(-> /etc/.muxmrc          (system-wide)
+    \(-> ~/.muxmrc            (user defaults)
+      \(-> ./.muxmrc          (project-specific)
+        \(-> --profile <n>    (format profile)
+          \(-> CLI flags      (highest \(em always wins)
 .fi
+.RE
+.PP
+Config files are sourced as shell scripts. Any variable from Section 4 of the
+script can be set in a config file. CLI flags always take final precedence.
+.PP
+\fBConflict warnings:\fR \fBmuxm\fR detects contradictory flag + profile
+combinations (e.g., \fB\-\-profile dv\-archival \-\-no\-dv\fR) and prints
+warnings. Warnings never block execution \(em the user's CLI flags always win.
+.SH EXIT CODES
+.TP
+.B 0
+Success.
+.TP
+.B 10
+Missing required dependency (ffmpeg, ffprobe, jq).
+.TP
+.B 11
+Invalid input: bad CLI flag, unknown option, missing or unreadable source file,
+invalid output path, too many arguments, or source and output are the same file.
+.TP
+.B 12
+Source file problem: corrupt file, no video streams found, or ffprobe returned
+invalid JSON.
+.TP
+.B 40
+Video pipeline failure: base encode failed, DV RPU extraction failed (with
+fallback disabled).
+.TP
+.B 41
+Mux or output failure: final mux failed, DV RPU injection failed, or output
+file is empty or corrupt.
+.TP
+.B 42
+Pipeline logic error: no encoded video stream available for muxing,
+\fB\-\-skip\-video\fR used in a context that requires video output.
+.TP
+.B 43
+Audio pipeline failure: audio copy or transcode failed.
+.TP
+.B 130
+Interrupted by user (SIGINT / Ctrl+C).
+.TP
+.B 143
+Terminated by signal (SIGTERM).
+.SH EXAMPLES
+.SS Basic encode with defaults
+.nf
+muxm Movie.mkv output.mp4
+muxm --crf 20 -p slow Movie.mkv output.mp4
+.fi
+.SS Using profiles (recommended)
+.nf
+# Apple TV Direct Play \(em one flag does it all
+muxm --profile atv-directplay-hq Movie.mkv
+
+# Archival \(em copy video, keep lossless audio, generate report
+muxm --profile dv-archival Movie.mkv
+
+# Universal compatibility \(em H.264 SDR, AAC stereo
+muxm --profile universal Movie.mkv
+
+# HDR10 high quality with custom CRF
+muxm --profile hdr10-hq --crf 20 Movie.mkv
+.fi
+.SS Overriding profile defaults
+.nf
+# Use hdr10-hq but with a different CRF and no stereo fallback
+muxm --profile hdr10-hq --crf 20 --no-stereo-fallback Movie.mkv
+
+# Use universal but keep chapters
+muxm --profile universal --keep-chapters Movie.mkv
+
+# Use atv-directplay-hq but output to MKV (warns about compatibility)
+muxm --profile atv-directplay-hq --output-ext mkv Movie.mkv
+.fi
+.SS Inspecting and debugging
+.nf
+# See what a profile actually sets
+muxm --profile atv-directplay-hq --print-effective-config
+
+# Dry run to preview the pipeline
+muxm --profile universal --dry-run Movie.mkv
+
+# Keep temp files for post-mortem inspection
+muxm --keep-temp --profile hdr10-hq Movie.mkv
+.fi
+.SS Audio and subtitle control
+.nf
+# Prefer Spanish audio and English subtitles
+muxm --audio-lang-pref spa,eng --sub-lang-pref eng Movie.mkv
+
+# Force a specific audio track (0-based audio index)
+muxm --audio-track 2 Movie.mkv
+
+# Disable OCR for PGS subtitles
+muxm --no-ocr Movie.mkv
+.fi
+.SH ENVIRONMENT
+.TP
+.B DEBUG
+Set to \fB1\fR to enable bash trace output (set \-x) for low-level debugging.
+.TP
+.B TESSDATA_PREFIX
+Path to Tesseract language data directory. Required if using pgsrip for PGS
+subtitle OCR. Typically set to the Homebrew tessdata path.
 .SH FILES
-\fI/etc/.muxmrc\fR, \fI~/.muxmrc\fR, \fI./.muxmrc\fR
+.TP
+\fI/etc/.muxmrc\fR
+System-wide configuration.
+.TP
+\fI~/.muxmrc\fR
+User-level configuration.
+.TP
+\fI./.muxmrc\fR
+Project-specific configuration (current working directory).
 .PP
-CLI flags always override config files.
+Config files are sourced as bash and may set any \fBmuxm\fR variable. CLI flags
+always override config file values.
 .SH DEPENDENCIES
-Required: \fBffmpeg\fR, \fBffprobe\fR, \fBjq\fR.
+.TP
+Required:
+ffmpeg, ffprobe, jq
+.TP
+Recommended (Dolby Vision):
+dovi_tool, mp4box (GPAC)
+.TP
+Optional (PGS subtitle OCR):
+sub2srt or pgsrip, tesseract
 .PP
-Optional: \fBdovi_tool\fR (Dolby Vision; auto-disabled if missing),
-\fBsub2srt\fR or equivalent OCR tool (PGS subtitle conversion).
+Run \fBmuxm \-\-install\-dependencies\fR to check and install all of the above
+via Homebrew and pipx.
 .SH AUTHOR
-Jamey Wicklund (theBluWiz).
+Jamey Wicklund (theBluWiz)
+.SH SEE ALSO
+.BR ffmpeg (1),
+.BR ffprobe (1),
+.BR dovi_tool (1),
+.BR MP4Box (1)
