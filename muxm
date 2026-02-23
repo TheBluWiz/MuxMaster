@@ -203,20 +203,19 @@ _term_print() { printf -- "$@" >&"${TERM_FD:-2}"; }
 
 # ---- Spinner — indeterminate progress indicator ----
 # Usage: some_command & spinner $! "Doing something…"
+# NOTE: spinner NEVER calls wait — it only polls with kill -0.
+#       The caller MUST call wait "$pid" afterward to collect exit status.
 spinner() {
   local pid=$1 msg=$2 i=0
   local -a sym=( '|' '/' '—' $'\\' )
-  # Only draw if connected to a terminal
-  if [[ -t ${TERM_FD:-2} ]]; then
-    while kill -0 "$pid" 2>/dev/null; do
-      _term_print '\r  %s  [ %s ]' "$msg" "${sym[i]}"
-      i=$(( (i+1) % 4 ))
-      sleep 0.2
-    done
-    _term_print '\r  %s  [ done ]\n' "$msg"
-  else
-    wait "$pid" 2>/dev/null || true
-  fi
+  local -i show=1
+  [[ -t ${TERM_FD:-2} ]] || show=0
+  while kill -0 "$pid" 2>/dev/null; do
+    (( show )) && _term_print '\r  %s  [ %s ]' "$msg" "${sym[i]}"
+    i=$(( (i+1) % 4 ))
+    sleep 0.2
+  done
+  (( show )) && _term_print '\r  %s  [ done ]\n' "$msg"
 }
 
 # run_with_spinner CMD_ARRAY_NAME "Message"
@@ -240,9 +239,13 @@ ffmpeg_progress_bar() {
   local pid=$1 pipe=$2 total_secs=$3 label=$4
   local pct=0 bar="" elapsed_us=0
 
-  # Only draw if connected to a terminal and total is known
+  # If we can't show a progress bar (no terminal or unknown duration),
+  # we MUST still drain the named pipe — otherwise ffmpeg blocks forever
+  # trying to open the FIFO for writing with no reader on the other end.
   if [[ ! -t ${TERM_FD:-2} ]] || (( total_secs <= 0 )); then
-    wait "$pid" 2>/dev/null || true
+    cat "$pipe" >/dev/null 2>&1 &
+    spinner "$pid" "$label"
+    wait "$pid" 2>/dev/null
     return $?
   fi
 
@@ -279,16 +282,51 @@ ffmpeg_progress_bar() {
 }
 
 # _get_source_duration_secs — extract source video duration in whole seconds.
+#
+# Three-tier lookup (each tier falls through on null, "N/A", or non-numeric):
+#   1. streams[].duration           — standard per-stream field (MP4, TS)
+#   2. format.duration              — container-level (requires -show_format in cache)
+#   3. streams[].tags.DURATION      — Matroska/MKV tag, format "HH:MM:SS.nnnnnnnnn"
+#
+# Tier 3 is the most reliable for MKV sources: Matroska stores per-track duration
+# in stream tags even when the standard duration field and Segment Duration are absent.
+#
 # Globals: METADATA_CACHE (read)
 _get_source_duration_secs() {
-  local dur
+  local dur=""
+
+  # Tier 1: standard stream-level duration (common in MP4, rare in MKV)
   dur="$(printf '%s\n' "$METADATA_CACHE" | jq -r \
     '[.streams[] | select(.codec_type=="video")] | .[0].duration // empty' 2>/dev/null | head -n1)"
   if [[ "$dur" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    log "Duration source: stream duration = ${dur}s"
     printf '%.0f\n' "$dur"
-  else
-    echo 0
+    return
   fi
+
+  # Tier 2: container/format-level duration (most containers)
+  dur="$(printf '%s\n' "$METADATA_CACHE" | jq -r \
+    '.format.duration // empty' 2>/dev/null | head -n1)"
+  if [[ "$dur" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    log "Duration source: format duration = ${dur}s"
+    printf '%.0f\n' "$dur"
+    return
+  fi
+
+  # Tier 3: Matroska tags — DURATION as "HH:MM:SS.nnnnnnnnn"
+  local tag_dur
+  tag_dur="$(printf '%s\n' "$METADATA_CACHE" | jq -r \
+    '[.streams[] | select(.codec_type=="video")] | .[0].tags.DURATION // empty' 2>/dev/null | head -n1)"
+  if [[ "$tag_dur" =~ ^([0-9]+):([0-9]+):([0-9]+)(\.[0-9]+)?$ ]]; then
+    local h="${BASH_REMATCH[1]}" m="${BASH_REMATCH[2]}" s="${BASH_REMATCH[3]}"
+    dur=$(( 10#$h * 3600 + 10#$m * 60 + 10#$s ))
+    log "Duration source: Matroska tag DURATION = ${tag_dur} → ${dur}s"
+    echo "$dur"
+    return
+  fi
+
+  log "Duration: unable to determine from stream, format, or Matroska tags — progress bar unavailable"
+  echo 0
 }
 
 # Lowercase a string (avoids repeated inline tr calls)
@@ -1404,7 +1442,7 @@ disk_free_warn
 # Cache all stream metadata in one call for performance
 cache_stream_metadata() {
   log "→ Caching stream metadata..."
-  METADATA_CACHE="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -of json "$SRC_ABS" 2>/dev/null)" || {
+  METADATA_CACHE="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_format -show_streams -of json "$SRC_ABS" 2>/dev/null)" || {
     die 12 "Failed to probe source file metadata - file may be corrupt"
   }
   # Validate JSON integrity before downstream helpers rely on it
@@ -1806,8 +1844,11 @@ verify_dv_container_record() {
         dvp_hint=":dvp=${DV_SRC_PROFILE}.${DV_SRC_COMPAT_ID}"
       fi
 
-      if "$MP4BOX_CMD" -add "${V_MIXED}${dvp_hint}" \
-           -new "$dv_video_mp4" >"$WORKDIR/dovi_mux_mp4box.log" 2>&1 && [[ -s "$dv_video_mp4" ]]; then
+      "$MP4BOX_CMD" -add "${V_MIXED}${dvp_hint}" \
+           -new "$dv_video_mp4" >"$WORKDIR/dovi_mux_mp4box.log" 2>&1 &
+      local mp4box_fb_pid=$!
+      spinner "$mp4box_fb_pid" "DV fallback: muxing with mp4box"
+      if wait "$mp4box_fb_pid" 2>/dev/null && [[ -s "$dv_video_mp4" ]]; then
         local mux_probe
         mux_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
                      stream_side_data -select_streams v:0 "$dv_video_mp4" 2>&1)" || true
@@ -1835,7 +1876,10 @@ verify_dv_container_record() {
       remux_cmd+=(-movflags +faststart)
       remux_cmd+=(-f "$MUX_FORMAT" "$dv_final")
 
-      if ffmpeg "${remux_cmd[@]}" 2>"$WORKDIR/dv_remux.err" && [[ -s "$dv_final" ]]; then
+      ffmpeg "${remux_cmd[@]}" 2>"$WORKDIR/dv_remux.err" &
+      local remux_fb_pid=$!
+      spinner "$remux_fb_pid" "DV fallback: remuxing with dvcC"
+      if wait "$remux_fb_pid" 2>/dev/null && [[ -s "$dv_final" ]]; then
         local final_probe
         final_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
                        stream_side_data -select_streams v:0 "$dv_final" 2>&1)" || true
@@ -1977,9 +2021,15 @@ run_video_pipeline() {
           note "→ Validating DV RPU integrity in source (copy path)…"
           # Quick RPU extraction to validate (piped, no temp file needed)
           local rpu_check="$WORKDIR/rpu_copy_check.bin"
-          if ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c copy \
-               -bsf:v hevc_mp4toannexb -f hevc - 2>/dev/null \
-             | dovi_tool extract-rpu - -o "$rpu_check" >/dev/null 2>&1 && [[ -s "$rpu_check" ]]; then
+          (
+            set +eE  # Prevent ERR trap in subshell
+            ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c copy \
+                 -bsf:v hevc_mp4toannexb -f hevc - 2>/dev/null \
+               | dovi_tool extract-rpu - -o "$rpu_check" >/dev/null 2>&1
+          ) &
+          local rpu_val_pid=$!
+          spinner "$rpu_val_pid" "Validating DV RPU integrity"
+          if wait "$rpu_val_pid" 2>/dev/null && [[ -s "$rpu_check" ]]; then
             if _validate_dv_rpu "$rpu_check"; then
               note "DV RPU integrity verified for copy path."
               report_add "dv_copy_rpu_check" "passed"
@@ -2254,7 +2304,10 @@ run_video_pipeline() {
         report_add "dv_compat_id_mismatch" "source=4(HLG) → output=1(PQ)"
       fi
 
-      if dovi_tool convert --rpu-in "$RPU_P7" --rpu-out "$RPU_P81" >"$WORKDIR/rpu_convert.log" 2>&1 && [[ -s "$RPU_P81" ]]; then
+      dovi_tool convert --rpu-in "$RPU_P7" --rpu-out "$RPU_P81" >"$WORKDIR/rpu_convert.log" 2>&1 &
+      local rpu_conv_pid=$!
+      spinner "$rpu_conv_pid" "Converting DV RPU (P${DV_SRC_PROFILE} → P8.1)"
+      if wait "$rpu_conv_pid" 2>/dev/null && [[ -s "$RPU_P81" ]]; then
         cp -f "$RPU_P81" "$RPU_FINAL"
         note "DV profile converted (P${DV_SRC_PROFILE} → P8.1)"
         report_add "dv_rpu_action" "converted P${DV_SRC_PROFILE} → P8.1"
@@ -2385,8 +2438,11 @@ run_video_pipeline() {
         dvp_hint=":dvp=${DV_SRC_PROFILE}.${DV_SRC_COMPAT_ID}"
       fi
 
-      if "$MP4BOX_CMD" -add "${V_MIXED}${dvp_hint}" \
-           -new "$dv_prewrap" >"$WORKDIR/dv_prewrap_mp4box.log" 2>&1 && [[ -s "$dv_prewrap" ]]; then
+      "$MP4BOX_CMD" -add "${V_MIXED}${dvp_hint}" \
+           -new "$dv_prewrap" >"$WORKDIR/dv_prewrap_mp4box.log" 2>&1 &
+      local pw_mp4box_pid=$!
+      spinner "$pw_mp4box_pid" "Pre-wrapping DV video (mp4box)"
+      if wait "$pw_mp4box_pid" 2>/dev/null && [[ -s "$dv_prewrap" ]]; then
         local pw_probe
         pw_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
                      stream_side_data -select_streams v:0 "$dv_prewrap" 2>&1)" || true
@@ -2411,13 +2467,16 @@ run_video_pipeline() {
     # would corrupt the stream.
     if (( ! prewrap_ok )); then
       rm -f "$dv_prewrap" 2>/dev/null || true
-      if ffmpeg "${FFMPEG_FLAGS[@]}" \
+      ffmpeg "${FFMPEG_FLAGS[@]}" \
            -i "$V_MIXED" \
            -c:v copy \
            -strict unofficial \
            -tag:v dvh1 \
            -movflags +faststart \
-           -f mp4 "$dv_prewrap" >"$WORKDIR/dv_prewrap.log" 2>&1 && [[ -s "$dv_prewrap" ]]; then
+           -f mp4 "$dv_prewrap" >"$WORKDIR/dv_prewrap.log" 2>&1 &
+      local pw_ff_pid=$!
+      spinner "$pw_ff_pid" "Pre-wrapping DV video (ffmpeg fallback)"
+      if wait "$pw_ff_pid" 2>/dev/null && [[ -s "$dv_prewrap" ]]; then
         local pw_probe2
         pw_probe2="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
                       stream_side_data -select_streams v:0 "$dv_prewrap" 2>&1)" || true
@@ -2946,7 +3005,10 @@ _prepare_sub_to_srt(){
 
   case "$codec" in
     subrip|srt)
-      if ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:s:"$idx" -c copy "$srt" 2>"$WORKDIR/sub_${idx}.err"; then
+      ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:s:"$idx" -c copy "$srt" 2>"$WORKDIR/sub_${idx}.err" &
+      local sub_pid=$!
+      spinner "$sub_pid" "Extracting subtitle #${idx} (SRT copy)"
+      if wait "$sub_pid" 2>/dev/null; then
         echo "$srt"
         return 0
       fi
@@ -2954,7 +3016,10 @@ _prepare_sub_to_srt(){
       ;;
       
     ass|ssa|webvtt|vtt)
-      if ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:s:"$idx" "$srt" 2>"$WORKDIR/sub_${idx}.err"; then
+      ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:s:"$idx" "$srt" 2>"$WORKDIR/sub_${idx}.err" &
+      local sub_pid=$!
+      spinner "$sub_pid" "Converting subtitle #${idx} (${codec} → SRT)"
+      if wait "$sub_pid" 2>/dev/null; then
         echo "$srt"
         return 0
       fi
@@ -2969,7 +3034,10 @@ _prepare_sub_to_srt(){
       fi
 
       sup="$WORKDIR/sub.${idx}.sup"
-      if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:s:"$idx" -c:s copy "$sup" 2>"$WORKDIR/sub_${idx}_extract.err"; then
+      ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:s:"$idx" -c:s copy "$sup" 2>"$WORKDIR/sub_${idx}_extract.err" &
+      local sup_pid=$!
+      spinner "$sup_pid" "Extracting PGS subtitle #${idx} to SUP"
+      if ! wait "$sup_pid" 2>/dev/null; then
         warn "Failed extracting PGS #$idx to .sup — skipping. See: $WORKDIR/sub_${idx}_extract.err"
         echo ""
         return 0
@@ -2980,16 +3048,24 @@ _prepare_sub_to_srt(){
       # Try vobsub conversion if muxer is available
       if ffmpeg_has_muxer vobsub; then
         vob_base="$WORKDIR/sub.${idx}.vob"
-        if ! ffmpeg "${FFMPEG_FLAGS[@]}" -i "$sup" -map 0:s:0 -c:s dvdsub -f vobsub "$vob_base" 2>"$WORKDIR/sub_${idx}_vobsub.err"; then
+        ffmpeg "${FFMPEG_FLAGS[@]}" -i "$sup" -map 0:s:0 -c:s dvdsub -f vobsub "$vob_base" 2>"$WORKDIR/sub_${idx}_vobsub.err" &
+        local vob_pid=$!
+        spinner "$vob_pid" "Converting PGS #${idx} to VobSub"
+        if ! wait "$vob_pid" 2>/dev/null; then
           warn "PGS→VobSub conversion failed for #$idx. See: $WORKDIR/sub_${idx}_vobsub.err"
           echo ""
           return 0
         fi
 
         # Run OCR tool on VobSub .idx
-        "$SUB_OCR_TOOL" "${vob_base}.idx" >"$WORKDIR/sub_${idx}_ocr.log" 2>&1 \
-          || "$SUB_OCR_TOOL" -l "$SUB_OCR_LANG" "${vob_base}.idx" >"$WORKDIR/sub_${idx}_ocr.log" 2>&1 \
-          || true
+        (
+          "$SUB_OCR_TOOL" "${vob_base}.idx" >"$WORKDIR/sub_${idx}_ocr.log" 2>&1 \
+            || "$SUB_OCR_TOOL" -l "$SUB_OCR_LANG" "${vob_base}.idx" >"$WORKDIR/sub_${idx}_ocr.log" 2>&1 \
+            || true
+        ) &
+        local ocr_pid=$!
+        spinner "$ocr_pid" "Running OCR on subtitle #${idx}"
+        wait "$ocr_pid" 2>/dev/null || true
         if [[ -s "${vob_base}.srt" ]]; then
           mv -f "${vob_base}.srt" "$srt" || true
         fi
@@ -3003,9 +3079,14 @@ _prepare_sub_to_srt(){
       fi
 
       # Fallback: try OCR tool directly on .sup
-      "$SUB_OCR_TOOL" "$sup" >"$WORKDIR/sub_${idx}_ocr_sup.log" 2>&1 \
-        || "$SUB_OCR_TOOL" -l "$SUB_OCR_LANG" "$sup" >"$WORKDIR/sub_${idx}_ocr_sup.log" 2>&1 \
-        || true
+      (
+        "$SUB_OCR_TOOL" "$sup" >"$WORKDIR/sub_${idx}_ocr_sup.log" 2>&1 \
+          || "$SUB_OCR_TOOL" -l "$SUB_OCR_LANG" "$sup" >"$WORKDIR/sub_${idx}_ocr_sup.log" 2>&1 \
+          || true
+      ) &
+      local ocr_sup_pid=$!
+      spinner "$ocr_sup_pid" "Running OCR on subtitle #${idx} (SUP)"
+      wait "$ocr_sup_pid" 2>/dev/null || true
       # Check common output locations for the SRT
       if [[ -s "${sup%.sup}.srt" ]]; then
         mv -f "${sup%.sup}.srt" "$srt" || true
