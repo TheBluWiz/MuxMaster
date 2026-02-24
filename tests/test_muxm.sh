@@ -41,22 +41,20 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ---- Helpers ----
-log()  { printf "${BLUE}  → %s${NC}\n" "$*"; }
-pass() { PASS=$((PASS + 1)); printf "${GREEN}  ✅ PASS: %s${NC}\n" "$*"; }
-fail() { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "${RED}  ❌ FAIL: %s${NC}\n" "$*"; }
-skip() { SKIP=$((SKIP + 1)); printf "${YELLOW}  ⏭  SKIP: %s${NC}\n" "$*"; }
-section() { printf "\n${BOLD}━━━ %s ━━━${NC}\n" "$*"; }
+log()  { printf "%b  → %s%b\n" "$BLUE" "$*" "$NC"; }
+pass() { PASS=$((PASS + 1)); printf "%b  ✅ PASS: %s%b\n" "$GREEN" "$*" "$NC"; }
+fail() { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "%b  ❌ FAIL: %s%b\n" "$RED" "$*" "$NC"; }
+skip() { SKIP=$((SKIP + 1)); printf "%b  ⏭  SKIP: %s%b\n" "$YELLOW" "$*" "$NC"; }
+section() { printf "\n%b━━━ %s ━━━%b\n" "$BOLD" "$*" "$NC"; }
 
 # Run muxm and capture exit code (don't let set -e kill us)
 run_muxm() { "$MUXM" "$@" 2>&1 || true; }
-run_muxm_code() { "$MUXM" "$@" 2>&1; echo "EXIT:$?"; }
-
 # Assert exit code
 assert_exit() {
   local expected="$1" label="$2"
   shift 2
-  local output
-  output="$("$MUXM" "$@" 2>&1)" && local code=$? || local code=$?
+  local output code
+  output="$("$MUXM" "$@" 2>&1)" && code=$? || code=$?
   if [[ "$code" -eq "$expected" ]]; then
     pass "$label (exit $code)"
   else
@@ -73,26 +71,6 @@ assert_contains() {
   else
     fail "$label — output missing: '$needle'"
     (( VERBOSE )) && echo "    Output: ${haystack:0:300}"
-  fi
-}
-
-# Assert output does NOT contain string
-assert_not_contains() {
-  local needle="$1" label="$2" haystack="$3"
-  if echo "$haystack" | grep -qiF "$needle"; then
-    fail "$label — output unexpectedly contained: '$needle'"
-  else
-    pass "$label"
-  fi
-}
-
-# Assert file exists
-assert_file() {
-  local path="$1" label="$2"
-  if [[ -f "$path" ]]; then
-    pass "$label"
-  else
-    fail "$label — file not found: $path"
   fi
 }
 
@@ -762,7 +740,11 @@ test_profile_e2e() {
   if [[ -f "$outfile" && -s "$outfile" ]]; then
     pass "streaming profile: output produced"
     local ext="${outfile##*.}"
-    [[ "$ext" == "mp4" ]] && pass "streaming: correct extension (.mp4)" || fail "streaming: wrong ext .$ext"
+    if [[ "$ext" == "mp4" ]]; then
+      pass "streaming: correct extension (.mp4)"
+    else
+      fail "streaming: wrong ext .$ext"
+    fi
   else
     fail "streaming profile: no output"
   fi
@@ -787,7 +769,11 @@ test_profile_e2e() {
     pass "universal profile: output produced"
     local vcodec
     vcodec="$(ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of csv=p=0 "$outfile" 2>/dev/null)"
-    [[ "$vcodec" == "h264" ]] && pass "universal: H.264 codec" || fail "universal: expected h264, got $vcodec"
+    if [[ "$vcodec" == "h264" ]]; then
+      pass "universal: H.264 codec"
+    else
+      fail "universal: expected h264, got $vcodec"
+    fi
   else
     fail "universal profile: no output"
   fi
@@ -832,15 +818,15 @@ run_suites() {
 summary() {
   section "Test Summary"
   local total=$((PASS + FAIL + SKIP))
-  printf "  ${GREEN}Passed:${NC}  %d\n" "$PASS"
-  printf "  ${RED}Failed:${NC}  %d\n" "$FAIL"
-  printf "  ${YELLOW}Skipped:${NC} %d\n" "$SKIP"
+  printf "  %bPassed:%b  %d\n" "$GREEN" "$NC" "$PASS"
+  printf "  %bFailed:%b  %d\n" "$RED" "$NC" "$FAIL"
+  printf "  %bSkipped:%b %d\n" "$YELLOW" "$NC" "$SKIP"
   printf "  Total:   %d\n" "$total"
 
   if [[ ${#ERRORS[@]} -gt 0 ]]; then
-    printf "\n${RED}${BOLD}Failed Tests:${NC}\n"
+    printf "\n%b%bFailed Tests:%b\n" "$RED" "$BOLD" "$NC"
     for err in "${ERRORS[@]}"; do
-      printf "  ${RED}• %s${NC}\n" "$err"
+      printf "  %b• %s%b\n" "$RED" "$err" "$NC"
     done
   fi
 
@@ -851,10 +837,10 @@ summary() {
   fi
 
   if (( FAIL > 0 )); then
-    printf "\n${RED}${BOLD}RESULT: FAIL${NC}\n"
+    printf "\n%b%bRESULT: FAIL%b\n" "$RED" "$BOLD" "$NC"
     exit 1
   else
-    printf "\n${GREEN}${BOLD}RESULT: ALL PASSED${NC}\n"
+    printf "\n%b%bRESULT: ALL PASSED%b\n" "$GREEN" "$BOLD" "$NC"
     exit 0
   fi
 }
