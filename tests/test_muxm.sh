@@ -47,14 +47,14 @@ fail() { FAIL=$((FAIL + 1)); ERRORS+=("$*"); printf "%b  ❌ FAIL: %s%b\n" "$RED
 skip() { SKIP=$((SKIP + 1)); printf "%b  ⏭  SKIP: %s%b\n" "$YELLOW" "$*" "$NC"; }
 section() { printf "\n%b━━━ %s ━━━%b\n" "$BOLD" "$*" "$NC"; }
 
-# Run muxm and capture exit code (don't let set -e kill us)
-run_muxm() { "$MUXM" "$@" 2>&1 || true; }
+# Run muxm from TESTDIR to avoid picking up .muxmrc from the user's PWD
+run_muxm() { (cd "$TESTDIR" && "$MUXM" "$@" 2>&1) || true; }
 # Assert exit code
 assert_exit() {
   local expected="$1" label="$2"
   shift 2
   local output code
-  output="$("$MUXM" "$@" 2>&1)" && code=$? || code=$?
+  output="$(cd "$TESTDIR" && "$MUXM" "$@" 2>&1)" && code=$? || code=$?
   if [[ "$code" -eq "$expected" ]]; then
     pass "$label (exit $code)"
   else
@@ -66,7 +66,7 @@ assert_exit() {
 # Assert output contains string
 assert_contains() {
   local needle="$1" label="$2" haystack="$3"
-  if echo "$haystack" | grep -qiF "$needle"; then
+  if echo "$haystack" | grep -qiF -- "$needle"; then
     pass "$label"
   else
     fail "$label — output missing: '$needle'"
@@ -299,7 +299,7 @@ test_cli() {
   assert_exit 11 "Too many args exits 11" a.mkv b.mp4 c.mp4
 
   # Source = output prevention
-  out="$("$MUXM" --output-ext mkv "$TESTDIR/basic_sdr_subs.mkv" "$TESTDIR/basic_sdr_subs.mkv" 2>&1)" || true
+  out="$(cd "$TESTDIR" && "$MUXM" --output-ext mkv "$TESTDIR/basic_sdr_subs.mkv" "$TESTDIR/basic_sdr_subs.mkv" 2>&1)" || true
   assert_contains "same file" "Source=output prevented" "$out"
 }
 
@@ -323,34 +323,38 @@ test_config() {
   assert_contains "25" "CLI --crf overrides profile CRF" "$out"
 
   # Profile from config file (project-level)
-  cat > "$cfg_dir/.muxmrc" <<'EOF'
+  local cfg_profile_dir="$TESTDIR/config_profile_test"
+  mkdir -p "$cfg_profile_dir"
+  cat > "$cfg_profile_dir/.muxmrc" <<'EOF'
 PROFILE_NAME="animation"
 EOF
-  # We'd need to cd into cfg_dir for this to work; test conceptually
+  # Verify config file is picked up when running from that directory
+  out="$(cd "$cfg_profile_dir" && "$MUXM" --print-effective-config 2>&1)" || true
+  assert_contains "animation" "Config file PROFILE_NAME loaded" "$out"
   log "Config file profile override tested via --print-effective-config"
 
-  # --create-config
-  out="$(run_muxm --create-config project streaming 2>&1)" || true
-  # This writes to $PWD/.muxmrc, so run from a temp dir
-  pushd "$cfg_dir" >/dev/null
+  # --create-config (use a clean directory so no pre-existing .muxmrc)
+  local cfg_create_dir="$TESTDIR/config_create_test"
+  mkdir -p "$cfg_create_dir"
+  pushd "$cfg_create_dir" >/dev/null
   out="$("$MUXM" --create-config project streaming 2>&1)" || true
   popd >/dev/null
-  if [[ -f "$cfg_dir/.muxmrc" ]]; then
+  if [[ -f "$cfg_create_dir/.muxmrc" ]]; then
     pass "--create-config creates .muxmrc"
     # Check contents
     local cfg_content
-    cfg_content="$(cat "$cfg_dir/.muxmrc")"
+    cfg_content="$(cat "$cfg_create_dir/.muxmrc")"
     assert_contains "PROFILE_NAME" "Config contains PROFILE_NAME" "$cfg_content"
     assert_contains "streaming" "Config contains profile name" "$cfg_content"
     assert_contains "CRF_VALUE" "Config contains CRF_VALUE" "$cfg_content"
 
     # --create-config refuses overwrite
-    out="$(cd "$cfg_dir" && "$MUXM" --create-config project streaming 2>&1)" || true
+    out="$(cd "$cfg_create_dir" && "$MUXM" --create-config project streaming 2>&1)" || true
     assert_contains "already exists" "--create-config refuses overwrite" "$out"
 
     # --force-create-config overwrites
-    out="$(cd "$cfg_dir" && "$MUXM" --force-create-config project animation 2>&1)" || true
-    cfg_content="$(cat "$cfg_dir/.muxmrc")"
+    out="$(cd "$cfg_create_dir" && "$MUXM" --force-create-config project animation 2>&1)" || true
+    cfg_content="$(cat "$cfg_create_dir/.muxmrc")"
     assert_contains "animation" "--force-create-config overwrites with new profile" "$cfg_content"
   else
     fail "--create-config did not create .muxmrc"
@@ -706,7 +710,7 @@ test_edge() {
   # Empty file
   touch "$TESTDIR/empty.mkv"
   local out
-  out="$("$MUXM" "$TESTDIR/empty.mkv" 2>&1)" || true
+  out="$(cd "$TESTDIR" && "$MUXM" "$TESTDIR/empty.mkv" 2>&1)" || true
   assert_contains "empty" "Empty file rejected" "$out"
 
   # File with spaces in name
@@ -715,7 +719,7 @@ test_edge() {
   assert_contains "DRY-RUN" "Filename with spaces handled" "$out"
 
   # Control characters in output extension are rejected
-  out="$("$MUXM" --output-ext "mp4;" "$TESTDIR/basic_sdr_subs.mkv" 2>&1)" || true
+  out="$(cd "$TESTDIR" && "$MUXM" --output-ext "mp4;" "$TESTDIR/basic_sdr_subs.mkv" 2>&1)" || true
   assert_contains "Invalid" "Injection in --output-ext rejected" "$out"
 
   # OCR tool injection prevention
@@ -723,7 +727,7 @@ test_edge() {
   assert_contains "disallowed" "OCR tool injection prevented" "$out"
 
   # --skip-video error (can't produce output)
-  out="$("$MUXM" --skip-video "$TESTDIR/basic_sdr_subs.mkv" 2>&1)" || true
+  out="$(cd "$TESTDIR" && "$MUXM" --skip-video "$TESTDIR/basic_sdr_subs.mkv" 2>&1)" || true
   # This should either error or produce a warning
   log "--skip-video behavior validated"
 }
