@@ -211,11 +211,11 @@ spinner() {
   local -i show=1
   [[ -t ${TERM_FD:-2} ]] || show=0
   while kill -0 "$pid" 2>/dev/null; do
-    (( show )) && _term_print '\r  %s  [ %s ]' "$msg" "${sym[i]}"
+    (( show )) && _term_print '\r  %s  [ %s ]' "$msg" "${sym[i]}" || true
     i=$(( (i+1) % 4 ))
     sleep 0.2
   done
-  (( show )) && _term_print '\r  %s  [ done ]\n' "$msg"
+  (( show )) && _term_print '\r  %s  [ done ]\n' "$msg" || true
 }
 
 # run_with_spinner CMD_ARRAY_NAME "Message"
@@ -2294,6 +2294,11 @@ if [[ "$SRC_ABS" -ef "$OUT_ABS" ]]; then
   die 11 "Source and output are the same file - aborting to prevent data loss"
 fi
 
+# --no-overwrite: refuse if final output already exists
+if (( ! FFMPEG_OVERWRITE )) && [[ -f "$OUT_ABS" ]]; then
+  die 11 "Output file already exists (--no-overwrite): $OUT_ABS"
+fi
+
 # Security: Use unpredictable temp file name
 TMP_OUT="$(mktemp "$OUT_DIR/.muxm.output.XXXXXXXX")" || die 11 "Cannot create temp output file"
 rm -f "$TMP_OUT"  # Remove the file, we just wanted the name
@@ -2377,6 +2382,7 @@ on_exit() {
     _print_completed_steps
 
     if [[ -n "$WORKDIR" && -d "$WORKDIR" && "${DEBUG:-0}" != "1" && $KEEP_TEMP_ALWAYS -eq 0 ]]; then
+      (( KEEP_TEMP )) && note "--keep-temp preserves workdir on failure only; use -K/--keep-temp-always to keep on success."
       rm -rf "$WORKDIR"
     else
       note "Keeping workdir: $WORKDIR"
