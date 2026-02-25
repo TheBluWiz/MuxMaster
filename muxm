@@ -927,11 +927,40 @@ HEADER
   echo "# Export non-forced subtitles as external .srt files alongside output"
   _V SUB_EXPORT_EXTERNAL
   echo ""
+  # Detect available OCR tools on this machine
+  local _detected_ocr_tool=""
+  local _has_tesseract=0
+  command -v tesseract >/dev/null 2>&1 && _has_tesseract=1
+  if command -v pgsrip >/dev/null 2>&1 && (( _has_tesseract )); then
+    _detected_ocr_tool="pgsrip"
+  elif command -v sub2srt >/dev/null 2>&1; then
+    _detected_ocr_tool="sub2srt"
+  elif command -v pgsrip >/dev/null 2>&1; then
+    # pgsrip found but tesseract missing — note it but still select it;
+    # the runtime OCR-validation check (Section 8) will warn if tesseract
+    # is still absent at encode time.
+    _detected_ocr_tool="pgsrip"
+  fi
+
   echo "# Enable OCR for bitmap subtitles (PGS/VobSub → SRT)"
-  printf '#SUB_ENABLE_OCR=1\n'
+  echo "# MP4 cannot carry PGS bitmaps; OCR converts them to text-based SRT."
+  echo "#   1 = attempt OCR  |  0 = drop bitmap subtitles that can't be embedded"
+  if [[ -n "$_detected_ocr_tool" ]]; then
+    printf 'SUB_ENABLE_OCR=1\n'
+  else
+    printf '#SUB_ENABLE_OCR=1\n'
+  fi
   echo ""
-  echo "# OCR tool for bitmap → text subtitle conversion: \"sub2srt\" or \"pgsrip\""
-  printf '#SUB_OCR_TOOL=sub2srt\n'
+  echo "# OCR tool for bitmap → text subtitle conversion"
+  echo "# Supported: \"sub2srt\", \"pgsrip\""
+  echo "# pgsrip requires: pgsrip (pipx) + tesseract. Install via --install-dependencies."
+  if [[ -n "$_detected_ocr_tool" ]]; then
+    printf '# Auto-detected: %s found on this machine at config-generation time.\n' "$_detected_ocr_tool"
+    printf 'SUB_OCR_TOOL=%s\n' "$_detected_ocr_tool"
+  else
+    printf '# No OCR tool detected. Install pgsrip or sub2srt and regenerate, or uncomment manually.\n'
+    printf '#SUB_OCR_TOOL=sub2srt\n'
+  fi
   echo ""
   echo "# OCR language for Tesseract (ISO 639-3, e.g., eng, fra, deu)"
   printf '#SUB_OCR_LANG=eng\n'
@@ -1050,6 +1079,20 @@ _create_config() {
   printf '   Profile-specific variables are uncommented and active.\n'
   printf '   All other variables are commented — uncomment to customize.\n'
   printf '   CLI flags always override config-file values.\n'
+  printf '\n'
+
+  # Report detected subtitle OCR tools
+  local _det_ocr=""
+  if command -v pgsrip >/dev/null 2>&1; then _det_ocr="pgsrip"; fi
+  if command -v sub2srt >/dev/null 2>&1; then _det_ocr="${_det_ocr:+$_det_ocr, }sub2srt"; fi
+  if [[ -n "$_det_ocr" ]]; then
+    printf '   🔍 Detected OCR tools: %s\n' "$_det_ocr"
+    printf '      SUB_ENABLE_OCR and SUB_OCR_TOOL set automatically.\n'
+  else
+    printf '   ⚠️  No subtitle OCR tools detected (pgsrip, sub2srt).\n'
+    printf '      PGS/bitmap subtitles will be dropped unless you install one.\n'
+    printf '      Run: muxm --install-dependencies\n'
+  fi
   exit 0
 }
 
@@ -2525,6 +2568,11 @@ V_SRC_ES="$WORKDIR/video_src.es"
 RPU_P7="$WORKDIR/rpu_p7.bin"
 RPU_P81="$WORKDIR/rpu_p81.bin"
 RPU_FINAL="$WORKDIR/rpu_final.bin"
+
+# Initial values — run_video_pipeline() reassigns V_BASE and V_MIXED at runtime
+# based on whether DV injection is needed:
+#   DV path:     .hevc raw ES (dovi_tool requires raw elementary streams)
+#   Non-DV path: .mkv container (preserves timestamps for matroska final mux)
 V_BASE="$WORKDIR/video_base.hevc"
 V_MIXED="$WORKDIR/video_mixed.hevc"
 
@@ -2638,27 +2686,53 @@ run_video_pipeline() {
     fi
   fi
 
-  log "→ Preparing raw video elementary stream…"
-  
-  if (( DRY_RUN )); then
-    : > "$V_SRC_ES" 2>/dev/null || true
-    mark_done "Demux raw ES → video_src.es (dry-run)"
+  # Determine intermediate format: raw ES is needed only when DV RPU injection
+  # is possible (HEVC codec + DV source + DV enabled). Otherwise, use a container
+  # (matroska) to preserve timestamps that the Matroska final muxer requires.
+  # Raw ES files lack packet pts/dts, which the mp4 muxer can reconstruct from
+  # HEVC VUI/SPS parameters but the matroska muxer cannot — causing mux failures
+  # for any MKV output path.
+  local -i v_needs_raw_es=0
+  if [[ "$VIDEO_CODEC" == "libx265" ]] && (( IS_DV && ! DISABLE_DV )); then
+    v_needs_raw_es=1
+  fi
+
+  if (( v_needs_raw_es )); then
+    V_BASE="$WORKDIR/video_base.hevc"
+    V_MIXED="$WORKDIR/video_mixed.hevc"
   else
-    # Extract HEVC elementary stream for DV RPU extraction.
-    # -bsf:v hevc_mp4toannexb ensures proper conversion from hvc1/hev1
-    # length-prefixed NAL units to Annex B start codes, which preserves
-    # DV RPU NAL units that dovi_tool requires for extraction.
-    ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c copy -bsf:v hevc_mp4toannexb -f hevc "$V_SRC_ES" 2>"$WORKDIR/demux.err" &
-    local demux_pid=$!
-    spinner "$demux_pid" "Demuxing video elementary stream"
-    if ! wait "$demux_pid" 2>/dev/null; then
-      local codec
-      codec="$(_probe_field codec_name)"
-      warn "Could not demux raw ES - source codec: ${codec:-unknown}. DV extraction may be skipped."
-      warn "See: $WORKDIR/demux.err for details"
+    V_BASE="$WORKDIR/video_base.mkv"
+    V_MIXED="$WORKDIR/video_mixed.mkv"
+  fi
+
+  # Demux raw HEVC ES for DV RPU extraction (only when DV injection is possible).
+  # Skipped for non-HEVC sources and when DV is disabled — the ES is only consumed
+  # by dovi_tool extract-rpu later in the pipeline.
+  if (( v_needs_raw_es )); then
+    log "→ Preparing raw video elementary stream…"
+
+    if (( DRY_RUN )); then
       : > "$V_SRC_ES" 2>/dev/null || true
+      mark_done "Demux raw ES → video_src.es (dry-run)"
+    else
+      # Extract HEVC elementary stream for DV RPU extraction.
+      # -bsf:v hevc_mp4toannexb ensures proper conversion from hvc1/hev1
+      # length-prefixed NAL units to Annex B start codes, which preserves
+      # DV RPU NAL units that dovi_tool requires for extraction.
+      ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0 -c copy -bsf:v hevc_mp4toannexb -f hevc "$V_SRC_ES" 2>"$WORKDIR/demux.err" &
+      local demux_pid=$!
+      spinner "$demux_pid" "Demuxing video elementary stream"
+      if ! wait "$demux_pid" 2>/dev/null; then
+        local codec
+        codec="$(_probe_field codec_name)"
+        warn "Could not demux raw ES - source codec: ${codec:-unknown}. DV extraction may be skipped."
+        warn "See: $WORKDIR/demux.err for details"
+        : > "$V_SRC_ES" 2>/dev/null || true
+      fi
+      mark_done "Demux raw ES → video_src.es"
     fi
-    mark_done "Demux raw ES → video_src.es"
+  else
+    note "Skipping ES demux (DV injection not applicable for this encode)."
   fi
 
   # Build encode command based on VIDEO_CODEC and PROFILE_DESC
@@ -2735,7 +2809,11 @@ run_video_pipeline() {
   else
     local -a ff_cmd=("${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:v:0)
     [[ -n "$vf_str" ]] && ff_cmd+=(-vf "$vf_str")
-    ff_cmd+=("${encode_args[@]}" "${thread_args[@]}" -an -sn -dn -f hevc "$V_BASE")
+    if (( v_needs_raw_es )); then
+      ff_cmd+=("${encode_args[@]}" "${thread_args[@]}" -an -sn -dn -f hevc "$V_BASE")
+    else
+      ff_cmd+=("${encode_args[@]}" "${thread_args[@]}" -an -sn -dn -f matroska "$V_BASE")
+    fi
 
     local total_secs
     total_secs="$(_get_source_duration_secs)"
@@ -3847,8 +3925,11 @@ build_subtitle_plan(){
     fi
   fi
 
-  # Fallback: try direct-mapping a text subtitle if no SRTs prepared
-  if [[ -z "$SRT_FORCED" && -z "$SRT_FULL" && -z "$SRT_SDH" ]]; then
+  # Fallback: try direct-mapping a text subtitle if no SRTs prepared.
+  # Only attempt this if at least one subtitle category is enabled — when all
+  # SUB_INCLUDE_* flags are 0 (--no-subtitles), skip the fallback entirely.
+  if [[ -z "$SRT_FORCED" && -z "$SRT_FULL" && -z "$SRT_SDH" ]] \
+     && (( SUB_INCLUDE_FORCED || SUB_INCLUDE_FULL || SUB_INCLUDE_SDH )); then
     DIRECT_SUB_RELIDX="$(_pick_direct_text_sub_relidx)"
     if [[ -n "$DIRECT_SUB_RELIDX" ]]; then
       SRT_DIRECT_MAP=1
@@ -3857,6 +3938,8 @@ build_subtitle_plan(){
       SRT_DIRECT_MAP=0
       note "[Subs] No usable subtitles prepared. Proceeding without subtitles."
     fi
+  else
+    SRT_DIRECT_MAP=0
   fi
 }
 
