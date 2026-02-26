@@ -150,7 +150,7 @@ If any stage fails, `muxm` logs the failure, cleans up incomplete temp files, an
 
 ### Compatibility
 
-`muxm` requires Bash 4.0+ and runs on macOS (10.15 Catalina or later) and modern Linux distributions (Ubuntu 20.04+, Fedora 33+, Debian 11+, Arch). It is tested primarily on macOS with Homebrew-installed ffmpeg builds.
+`muxm` requires Bash 4.3+ and runs on macOS (10.15 Catalina or later) and modern Linux distributions (Ubuntu 20.04+, Fedora 33+, Debian 11+, Arch). It is tested primarily on macOS with Homebrew-installed ffmpeg builds.
 
 ### Quick Start
 

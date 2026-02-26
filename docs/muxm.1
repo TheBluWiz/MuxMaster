@@ -63,12 +63,6 @@ Plan steps without encoding/muxing (creates placeholders only).
 .BR \-\-print\-effective\-config
 Show the resolved configuration after all sources merge, then exit.
 .TP
-.BR \-\-setup
-Run full first\-time setup: installs dependencies, the manual page, and
-tab completion in a single command. Equivalent to running
-\fB\-\-install\-dependencies\fR, \fB\-\-install\-man\fR, and
-\fB\-\-install\-completions\fR in sequence.
-.TP
 .BR \-\-install\-dependencies
 Check and install required/optional tools via Homebrew and pipx.
 .TP
@@ -87,6 +81,12 @@ Install bash/zsh tab\-completion to \fI~/.muxm/\fR and add a
 .BR \-\-uninstall\-completions
 Remove the tab\-completion file from \fI~/.muxm/\fR and clean
 the \fBsource\fR lines from shell RC files.
+.TP
+.BR \-\-setup
+Run full first\-time setup: installs dependencies via Homebrew/pipx,
+the manual page, and tab completion in a single command. Equivalent to
+running \fB\-\-install\-dependencies\fR, \fB\-\-install\-man\fR, and
+\fB\-\-install\-completions\fR in sequence.
 .TP
 .BR \-\-create\-config " " \fISCOPE\fR " " [\fIPROFILE\fR]
 Generate a \fI.muxmrc\fR config file at the location specified by \fISCOPE\fR
@@ -279,8 +279,8 @@ Generate a ~/.muxmrc pre\-filled with streaming profile defaults. Edit to
 taste; CLI flags still override everything.
 .TP
 .B muxm \-\-setup
-Full first\-time setup: install dependencies, the manual page, and tab
-completion all at once.
+Full first\-time setup: install all dependencies, the manual page, and
+tab completion in one command.
 .TP
 .B muxm \-\-install\-dependencies
 Check for and install all required/optional tools (ffmpeg, dovi_tool,
@@ -296,6 +296,10 @@ Install bash/zsh tab completion. Adds a source line to your shell RC files.
 .PP
 Configuration files use shell variable syntax. CLI flags always override
 config files. Profiles override config files but are overridden by CLI flags.
+.PP
+\fI~/.muxm/muxm\-completion.bash\fR
+.PP
+Tab\-completion script installed by \fB\-\-install\-completions\fR.
 .SH DEPENDENCIES
 .TP
 .B Required
