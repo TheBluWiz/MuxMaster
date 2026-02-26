@@ -290,6 +290,21 @@ CHAP
     "$TESTDIR/multi_lang_audio.mkv"
   pass "multi_lang_audio.mkv created"
 
+  # 8b) Commentary detection fixture: two 5.1 EAC3 English tracks, one is "Director's Commentary"
+  log "Creating multi_audio_commentary.mkv (feature + commentary)"
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=magenta:s=320x240:r=24:d=2" \
+    -f lavfi -i "sine=frequency=440:duration=2" \
+    -f lavfi -i "sine=frequency=550:duration=2" \
+    -c:v libx264 -preset ultrafast -crf 28 \
+    -map 0:v -map 1:a -map 2:a \
+    -c:a:0 eac3 -b:a:0 448k -ac:a:0 6 \
+    -c:a:1 eac3 -b:a:1 448k -ac:a:1 6 \
+    -metadata:s:a:0 language=eng -metadata:s:a:0 title="Director's Commentary" \
+    -metadata:s:a:1 language=eng -metadata:s:a:1 title="Main Feature" \
+    "$TESTDIR/multi_audio_commentary.mkv"
+  pass "multi_audio_commentary.mkv created"
+
   # 9) File with rich metadata (encoder, title, etc.) for strip-metadata tests
   log "Creating rich_metadata.mkv (with extra metadata tags)"
   ffmpeg -hide_banner -loglevel error -y \
@@ -866,7 +881,7 @@ test_audio() {
     if [[ "$alang" == "spa" ]]; then
       pass "--audio-lang-pref spa: Spanish audio selected"
     else
-      log "--audio-lang-pref spa: got lang='$alang' (selection may depend on scoring)"
+      fail "--audio-lang-pref spa: expected spa, got lang='$alang'"
     fi
   else
     fail "--audio-lang-pref spa: no output"
@@ -900,6 +915,26 @@ test_audio() {
 
   out="$(run_muxm --no-audio-lossless-passthrough --print-effective-config)"
   assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 0" "--no-audio-lossless-passthrough: flag cleared" "$out"
+
+  # --- Commentary track detection ---
+  outfile="$TESTDIR/audio_commentary_detect.mp4"
+  log "Testing commentary track deprioritization..."
+  local commentary_out
+  commentary_out="$(run_muxm --no-stereo-fallback --crf 28 --preset ultrafast \
+    "$TESTDIR/multi_audio_commentary.mkv" "$outfile" 2>&1)"
+  if [[ -f "$outfile" && -s "$outfile" ]]; then
+    pass "Commentary detection: output produced"
+    # Track 0 is "Director's Commentary", track 1 is "Main Feature" — both 5.1 EAC3 eng.
+    # Scoring should pick track 1 (Main Feature) due to commentary penalty on track 0.
+    # Verify via muxm's selection log (title tags may not survive muxing to output).
+    if echo "$commentary_out" | grep -q "Selected track #1"; then
+      pass "Commentary detection: main feature track selected over commentary"
+    else
+      fail "Commentary detection: expected track #1 selected, got: $(echo "$commentary_out" | grep 'Selected track')"
+    fi
+  else
+    fail "Commentary detection: no output"
+  fi
 }
 
 # === Suite: Subtitle Pipeline ===

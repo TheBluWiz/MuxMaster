@@ -144,12 +144,20 @@
 #AUDIO_TRACK_OVERRIDE=
 
 # Scoring weights (advanced):
+#   Language bonus is weighted higher than channel count because selecting
+#   the wrong language is a worse outcome than fewer channels.
+#   Reduce AUDIO_SCORE_LANG_BONUS to ~25 if you always want the highest-
+#   channel track regardless of language.
 #   Channels multiplier: score += channels * MULTIPLIER
 #   Surround bonus: added if channels >= 6
-#   Language bonus: added if language matches list above
+#   Language bonus: added if language matches AUDIO_LANG_PREF
 #AUDIO_SCORE_CHANNEL_MULTIPLIER=20
 #AUDIO_SCORE_SURROUND_BONUS=30
-#AUDIO_SCORE_LANG_BONUS_ENG=25
+#AUDIO_SCORE_LANG_BONUS=150
+
+# Penalty applied to commentary / audio-description tracks (detected by title tag).
+# Set to 0 to disable commentary detection.
+#AUDIO_SCORE_COMMENTARY_PENALTY=200
 
 
 # =========================
@@ -238,7 +246,7 @@
 # OCR tool for bitmap → text subtitle conversion
 # Supported: "sub2srt", "pgsrip"
 # pgsrip requires: pgsrip (pipx) + tesseract. Install via --install-dependencies.
-#SUB_OCR_TOOL=pgsrip
+#SUB_OCR_TOOL=sub2srt
 
 # OCR language for Tesseract (ISO 639-3, e.g., eng, fra, deu)
 #SUB_OCR_LANG=eng

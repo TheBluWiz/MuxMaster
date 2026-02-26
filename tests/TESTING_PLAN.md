@@ -157,6 +157,7 @@ The test harness (`tests/test_muxm.sh`) generates synthetic test media — short
 | 70 | `--stereo-bitrate 192k` | Config shows 192k in effective config | ✅ |
 | 71 | `--audio-lossless-passthrough` | AUDIO_LOSSLESS_PASSTHROUGH = 1 in config | ✅ |
 | 72 | `--no-audio-lossless-passthrough` | AUDIO_LOSSLESS_PASSTHROUGH = 0 in config | ✅ |
+| 73 | Commentary track deprioritized | Main feature selected over commentary (same codec/ch/lang) | ✅ |
 
 ### 1.9 Subtitle Pipeline (suite: `subs`)
 
@@ -277,6 +278,7 @@ These tests require real media files, specialized hardware, or subjective qualit
 | M20 | `--audio-force-codec aac` | Source with EAC3 5.1 | All audio transcoded to AAC |
 | M21 | E-AC-3 bitrate accuracy | `--profile atv-directplay-hq` with 7.1 source | Output EAC3 at ~768kbps (check with `ffprobe`) |
 | M22 | Stereo downmix quality | Play the stereo fallback track | Centered dialogue, reasonable dynamic range |
+| M22b | Commentary detection | Source with feature + commentary tracks (same codec/ch/lang) | Main feature selected; commentary deprioritized in score log |
 
 ### 2.5 Subtitle Pipeline (Advanced)
 
@@ -437,7 +439,7 @@ jobs:
 | Metadata stripping | ✅ Full | — | Strip and preserve verified with ffprobe |
 | Dolby Vision | ❌ None | Full DV pipeline (M1–M7) | Requires real DV source + dovi_tool + MP4Box |
 | Tone-mapping quality | ❌ None | Visual evaluation (M13–M15) | Requires HDR source + human judgment |
-| Audio scoring | ✅ Partial | Complex multi-track (M16–M22) | Auto-selection, track override, language pref, force-codec tested; subjective quality not covered |
+| Audio scoring | ✅ Partial | Complex multi-track (M16–M22) | Auto-selection, track override, language pref, force-codec, commentary detection tested; subjective quality not covered |
 | Audio quality | ❌ None | Listening test (M22) | Subjective |
 | Subtitle pipeline | ✅ Partial | PGS OCR, burn-in, styling (M23–M29) | Config flags, external export, and track counts verified; OCR and visual burn-in require real media |
 | Subtitle OCR | ❌ None | PGS → SRT (M23) | Requires pgsrip/tesseract + PGS source |
@@ -452,6 +454,6 @@ jobs:
 | Playback verification | ❌ None | Device testing (M46–M51) | Requires target hardware |
 
 **Priority for expanding automation:**
-1. Audio scoring validation (verify scoring algorithm selects correct track with complex multi-track sources)
-2. Subtitle burn-in detection (check for video filter applied in dry-run ffmpeg command)
-3. Skip-if-ideal full roundtrip (generate ideal file matching a profile, verify skip behavior)
+1. Subtitle burn-in detection (check for video filter applied in dry-run ffmpeg command)
+2. Skip-if-ideal full roundtrip (generate ideal file matching a profile, verify skip behavior)
+3. Audio scoring edge cases (multi-language surround vs preferred-language stereo with real Blu-ray sources)

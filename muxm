@@ -102,7 +102,8 @@ AUDIO_LANG_PREF="eng"                 # comma-separated list
 AUDIO_CODEC_PREFERENCE="eac3,ac3,aac,alac,other"
 declare -i AUDIO_SCORE_CHANNEL_MULTIPLIER=20
 declare -i AUDIO_SCORE_SURROUND_BONUS=30
-declare -i AUDIO_SCORE_LANG_BONUS_ENG=25
+declare -i AUDIO_SCORE_LANG_BONUS=150
+declare -i AUDIO_SCORE_COMMENTARY_PENALTY=200
 
 # ---- Audio transcode policy
 STEREO_BITRATE="192k"
@@ -492,6 +493,13 @@ _muxm_try_source(){
 _muxm_try_source /etc/.muxmrc
 _muxm_try_source "$HOME/.muxmrc"
 _muxm_try_source "./.muxmrc"
+
+# Deprecation bridge: AUDIO_SCORE_LANG_BONUS_ENG → AUDIO_SCORE_LANG_BONUS (v1.1)
+if [[ -n "${AUDIO_SCORE_LANG_BONUS_ENG:-}" ]]; then
+  AUDIO_SCORE_LANG_BONUS="$AUDIO_SCORE_LANG_BONUS_ENG"
+  # shellcheck disable=SC2016
+  printf '⚠️  Deprecated: AUDIO_SCORE_LANG_BONUS_ENG → rename to AUDIO_SCORE_LANG_BONUS in your .muxmrc\n' >&2
+fi
 
 # ===== Section 7: Dependency installer ========================================================
 # Invoked via --install-dependencies. Checks for all tools required by muxm and
@@ -1113,19 +1121,36 @@ tools via Homebrew and pipx.
 Success.
 .TP
 .B 1
-General error.
+General error (config write failure, dependency check failure, unhandled runtime error).
+.TP
+.B 10
+Missing required tool (ffmpeg, ffprobe, or jq not found).
 .TP
 .B 11
-Invalid arguments or unknown profile.
+Invalid arguments, unknown option or profile, bad input/output path, or security
+check failure (control characters in filename, source/output collision).
 .TP
 .B 12
-Source file contains no video streams.
+Source file unusable: no video streams, corrupt metadata, or ffprobe JSON parse failure.
+.TP
+.B 40
+Video encode or Dolby Vision RPU extraction/validation failure (with fallback disabled).
+.TP
+.B 41
+DV RPU injection failure, intermediate file validation failure, or final mux failure.
 .TP
 .B 42
-Pipeline error (video processing failure).
+Video pipeline structural error (e.g., \-\-skip\-video with no alternative, missing
+or corrupt encoded video stream).
 .TP
 .B 43
 Audio transcode or copy failure.
+.TP
+.B 130
+Interrupted by user (SIGINT / Ctrl\-C).
+.TP
+.B 143
+Terminated by signal (SIGTERM).
 .SH AUTHOR
 Jamey Wicklund (theBluWiz).
 MANPAGE_EOF
@@ -1731,6 +1756,19 @@ HEADER
   echo ""
   echo "# Force a specific audio track by index (0-based). Leave empty for auto."
   printf '#AUDIO_TRACK_OVERRIDE=\n'
+  echo ""
+  echo "# Scoring weights (advanced):"
+  echo "#   Language bonus is weighted higher than channel count because selecting"
+  echo "#   the wrong language is a worse outcome than fewer channels."
+  echo "#   Reduce AUDIO_SCORE_LANG_BONUS to ~25 if you always want the highest-"
+  echo "#   channel track regardless of language."
+  printf '#AUDIO_SCORE_CHANNEL_MULTIPLIER=20\n'
+  printf '#AUDIO_SCORE_SURROUND_BONUS=30\n'
+  printf '#AUDIO_SCORE_LANG_BONUS=150\n'
+  echo ""
+  echo "# Penalty applied to commentary / audio-description tracks (detected by title tag)."
+  echo "# Set to 0 to disable commentary detection."
+  printf '#AUDIO_SCORE_COMMENTARY_PENALTY=200\n'
   echo ""
 
   echo ""
@@ -2618,6 +2656,10 @@ Effective config (post config-files + profile + CLI):
   [Audio — Selection]
   AUDIO_LANG_PREF           = $AUDIO_LANG_PREF
   AUDIO_TRACK_OVERRIDE      = ${AUDIO_TRACK_OVERRIDE:-<none>}
+  AUDIO_SCORE_LANG_BONUS    = $AUDIO_SCORE_LANG_BONUS
+  AUDIO_SCORE_CHANNEL_MULTIPLIER = $AUDIO_SCORE_CHANNEL_MULTIPLIER
+  AUDIO_SCORE_SURROUND_BONUS = $AUDIO_SCORE_SURROUND_BONUS
+  AUDIO_SCORE_COMMENTARY_PENALTY = $AUDIO_SCORE_COMMENTARY_PENALTY
 
   [Audio — Transcode / Policy]
   ADD_STEREO_IF_MULTICH     = $ADD_STEREO_IF_MULTICH
@@ -4114,7 +4156,9 @@ _audio_title(){
 }
 
 # Return ordinal position of codec in AUDIO_CODEC_PREFERENCE list (0 = best).
-# Returns 99 if codec is not in the list (treated as lowest preference).
+# Returns 10 for unlisted codecs — low preference but not a hard penalty.
+# This avoids crushing valid but uncommon codecs (e.g., Opus, FLAC) with
+# the ~97-point cliff that rank 99 would create.
 # Args: $1 — codec name (lowercased)
 # Globals: AUDIO_CODEC_PREFERENCE (read)
 _audio_codec_rank(){
@@ -4127,7 +4171,35 @@ _audio_codec_rank(){
     if [[ "$item" == "$codec" ]]; then echo "$i"; return 0; fi
     i=$(( i + 1 ))
   done
-  echo "99"
+  echo "10"
+}
+
+# Check if a language tag matches any entry in AUDIO_LANG_PREF.
+# Returns 0 (true) if the tag matches, 1 otherwise.
+# Args: $1 — language tag (lowercased, e.g., "eng", "spa", "und")
+# Globals: AUDIO_LANG_PREF (read)
+_audio_lang_matches(){
+  local lang="$1" pref
+  IFS=',' read -r -a prefs <<< "$AUDIO_LANG_PREF"
+  for pref in "${prefs[@]}"; do
+    pref="$(_lower "${pref// /}")"
+    [[ -z "$pref" ]] && continue
+    [[ "$lang" == "$pref" ]] && return 0
+  done
+  return 1
+}
+
+# Check if an audio stream's title tag suggests commentary or descriptive audio.
+# Matches common English and international keywords in the title.
+# Returns 0 (true) if commentary/descriptive, 1 otherwise.
+# Args: $1 — title string (will be lowercased internally)
+_audio_is_commentary(){
+  local title
+  title="$(_lower "$1")"
+  [[ -z "$title" ]] && return 1
+  # shellcheck disable=SC2254
+  [[ "$title" =~ (commentary|director.?s?.*commentary|director.?s?.*cut|comentario|kommentar|descriptive|audio.description|visually.impaired) ]] && return 0
+  return 1
 }
 
 # _audio_stream_info — Fetch all scoring-relevant fields for one audio stream
@@ -4144,16 +4216,18 @@ _audio_stream_info(){
 # Audio stream scoring algorithm for automatic track selection.
 #
 # Factors (highest weight first):
-#   1. Channel count        — ch × AUDIO_SCORE_CHANNEL_MULTIPLIER (20)
-#      More channels = higher fidelity; 7.1 scores higher than 5.1.
-#   2. Surround bonus       — +AUDIO_SCORE_SURROUND_BONUS (30) if ≥ 6ch
-#      Discrete jump to prefer surround over stereo.
-#   3. Language preference   — +AUDIO_SCORE_LANG_BONUS_ENG (25) if English
+#   1. Language preference   — +AUDIO_SCORE_LANG_BONUS (150) if language matches AUDIO_LANG_PREF
 #      Ensures preferred language wins over higher-channel foreign tracks.
+#   2. Channel count         — ch × AUDIO_SCORE_CHANNEL_MULTIPLIER (20)
+#      More channels = higher fidelity; 7.1 scores higher than 5.1.
+#   3. Surround bonus        — +AUDIO_SCORE_SURROUND_BONUS (30) if ≥ 6ch
+#      Discrete jump to prefer surround over stereo.
 #   4. Codec preference      — (120 − rank) from AUDIO_CODEC_PREFERENCE list
 #      eac3 > ac3 > aac > alac > other by default.
 #   5. Bitrate (tie-break)   — br / 50000
 #      Small bonus for higher-bitrate tracks when all else is equal.
+#   6. Commentary penalty    — −AUDIO_SCORE_COMMENTARY_PENALTY (200) if title matches
+#      Demotes commentary/descriptive tracks so the main feature wins.
 #
 # Returns: score|idx|codec|channels|lang|title
 _score_audio_stream(){
@@ -4173,14 +4247,14 @@ _score_audio_stream(){
   rank="$(_audio_codec_rank "$codec")"
 
   score=0
-  # Channel count matters most
+  # Language bonus for preferred language(s) — strongest signal
+  if _audio_lang_matches "$lang"; then
+    score=$(( score + AUDIO_SCORE_LANG_BONUS ))
+  fi
+  # Channel count
   score=$(( score + ch * AUDIO_SCORE_CHANNEL_MULTIPLIER ))
   # Surround bonus (>=6ch)
   (( ch >= 6 )) && score=$(( score + AUDIO_SCORE_SURROUND_BONUS ))
-  # Language bonus for preferred language
-  if [[ "$lang" == "eng" ]]; then
-    score=$(( score + AUDIO_SCORE_LANG_BONUS_ENG ))
-  fi
   # Codec preference: better rank -> higher score
   local inv=$(( 120 - rank ))
   (( inv < 0 )) && inv=0
@@ -4189,6 +4263,11 @@ _score_audio_stream(){
   # Bitrate small tie-breaker (scaled)
   if (( br > 0 )); then
     score=$(( score + (br / 50000) ))
+  fi
+
+  # Commentary/descriptive track penalty
+  if _audio_is_commentary "$title"; then
+    score=$(( score - AUDIO_SCORE_COMMENTARY_PENALTY ))
   fi
 
   printf "%s|%s|%s|%s|%s|%s\n" "$score" "$idx" "$codec" "$ch" "$lang" "${title:-}"
@@ -4218,15 +4297,34 @@ select_best_audio(){
   fi
 
   # Score all tracks and select best
+  local -a score_lines=()
   for (( i=0; i<n; i++ )); do
     local line score
     line="$(_score_audio_stream "$i")"
+    score_lines+=("$line")
     score="${line%%|*}"
     if [[ "$score" =~ ^-?[0-9]+$ ]] && (( score > best_score )); then
       best_score="$score"
       best_line="$line"
     fi
   done
+
+  # Log score breakdown when multiple tracks exist (aids debugging)
+  if (( n >= 2 )); then
+    local best_idx
+    best_idx="${best_line#*|}"; best_idx="${best_idx%%|*}"
+    local score_summary=""
+    for (( i=0; i<n; i++ )); do
+      local sl="${score_lines[$i]}"
+      local s_score s_idx s_codec s_ch s_lang s_title
+      # shellcheck disable=SC2034  # s_title completes the IFS destructure
+      IFS='|' read -r s_score s_idx s_codec s_ch s_lang s_title <<< "$sl"
+      local marker=""
+      [[ "$s_idx" == "$best_idx" ]] && marker=" ★"
+      score_summary+="#${s_idx}: ${s_codec} ${s_ch}ch [${s_lang}] = ${s_score}${marker}  "
+    done
+    log "• Score: ${score_summary% }"
+  fi
 
   # Extract index from best_line (format: score|idx|codec|ch|lang|title)
   echo "${best_line#*|}" | cut -d'|' -f1
@@ -4329,6 +4427,7 @@ run_audio_pipeline(){
     
     pretty="#$i: $_c ${_ch_i}ch [$_l]"
     [[ -n "$_t" ]] && pretty="$pretty — $_t"
+    _audio_is_commentary "$_t" && pretty="$pretty [commentary]"
     (( _br_i > 0 )) && pretty="$pretty, $((_br_i/1000))kbps"
     log "  $pretty"
   done
