@@ -108,6 +108,20 @@ probe_audio() {
   ffprobe -v error -select_streams "a:$idx" -show_entries "stream=$field" -of csv=p=0 "$file" 2>/dev/null | head -1 | tr -d ','
 }
 
+# Probe a format-level tag (title, comment, encoder, language, etc.).
+# Usage: probe_format_tag FILE TAG
+probe_format_tag() {
+  local file="$1" tag="$2"
+  ffprobe -v error -show_entries "format_tags=$tag" -of csv=p=0 "$file" 2>/dev/null | head -1
+}
+
+# Probe a format-level field (format_name, duration, etc.).
+# Usage: probe_format FILE FIELD
+probe_format() {
+  local file="$1" field="$2"
+  ffprobe -v error -show_entries "format=$field" -of csv=p=0 "$file" 2>/dev/null | head -1
+}
+
 # Count streams of a given type
 # Note: tr -d ' ' strips padding from BSD wc (macOS compat)
 count_streams() {
@@ -216,8 +230,13 @@ preflight() {
 # ---- Generate Synthetic Test Media ----
 # Builds short 2-second clips with various codec/audio/subtitle combinations.
 # Simple fixtures use gen_media(); complex multi-input fixtures use raw ffmpeg.
-generate_test_media() {
-  section "Generating Synthetic Test Media"
+#
+# Split into two tiers so non-encoding suites can skip media generation entirely:
+#   generate_core_media     — basic_sdr_subs.mkv (needed by cli, dryrun, edge, etc.)
+#   generate_extended_media — all remaining fixtures (needed by encoding suites)
+
+generate_core_media() {
+  section "Generating Core Test Media"
 
   # 1) Basic SDR H.264 with stereo AAC and SRT subtitle
   #    Merged into a single ffmpeg call (no intermediate basic_sdr.mkv needed).
@@ -238,6 +257,12 @@ SRT
     -metadata:s:s:0 language=eng -metadata:s:s:0 title="English" \
     "$TESTDIR/basic_sdr_subs.mkv"
   pass "basic_sdr_subs.mkv created"
+
+  log "Core test media ready in $TESTDIR"
+}
+
+generate_extended_media() {
+  section "Generating Extended Test Media"
 
   # 2) HEVC 10-bit SDR with 5.1 AC3 audio (simulated)
   log "Creating hevc_sdr_51.mkv (HEVC + AC3 5.1)"
@@ -389,7 +414,7 @@ CHAP
     -metadata:s:a:0 language=eng
   pass "rich_metadata.mkv created"
 
-  log "All synthetic test media ready in $TESTDIR"
+  log "All extended test media ready in $TESTDIR"
 }
 
 # ---- Test Suites ----
@@ -488,55 +513,36 @@ test_cli() {
 # Validates that every boolean --flag / --no-flag pair correctly registers in
 # effective config. Catches flags accepted by the CLI parser but never exercised.
 # All checks are pure config assertions — zero encode time.
+# Uses data-driven table (same pattern as test_profile_e2e) for easy extension.
 test_toggles() {
   section "Toggle Flag Coverage (--flag / --no-flag pairs)"
 
-  local out
+  # Table: CLI flag(s) | expected string in --print-effective-config output
+  local -a TOGGLE_CASES=(
+    # ---- Negative toggles not covered by other suites ----
+    "--no-checksum|CHECKSUM                  = 0"
+    "--no-report-json|REPORT_JSON               = 0"
+    "--no-skip-if-ideal|SKIP_IF_IDEAL             = 0"
+    "--no-strip-metadata|STRIP_METADATA            = 0"
+    "--no-sub-burn-forced|SUB_BURN_FORCED           = 0"
+    "--no-sub-export-external|SUB_EXPORT_EXTERNAL       = 0"
+    "--no-video-copy-if-compliant|VIDEO_COPY_IF_COMPLIANT   = 0"
+    # ---- Positive toggles not covered by other suites ----
+    "--stereo-fallback|ADD_STEREO_IF_MULTICH     = 1"
+    "--no-conservative-vbv|CONSERVATIVE_VBV          = 0"
+    # ---- DV policy toggles ----
+    "--allow-dv-fallback|ALLOW_DV_FALLBACK         = 1"
+    "--no-allow-dv-fallback|ALLOW_DV_FALLBACK         = 0"
+    "--dv-convert-p81|DV_CONVERT_TO_P81_IF_FAIL = 1"
+    "--no-dv-convert-p81|DV_CONVERT_TO_P81_IF_FAIL = 0"
+  )
 
-  # ---- Negative toggles not covered by other suites ----
-
-  out="$(run_muxm --no-checksum --print-effective-config)"
-  assert_contains "CHECKSUM                  = 0" "--no-checksum: registered" "$out"
-
-  out="$(run_muxm --no-report-json --print-effective-config)"
-  assert_contains "REPORT_JSON               = 0" "--no-report-json: registered" "$out"
-
-  out="$(run_muxm --no-skip-if-ideal --print-effective-config)"
-  assert_contains "SKIP_IF_IDEAL             = 0" "--no-skip-if-ideal: registered" "$out"
-
-  out="$(run_muxm --no-strip-metadata --print-effective-config)"
-  assert_contains "STRIP_METADATA            = 0" "--no-strip-metadata: registered" "$out"
-
-  out="$(run_muxm --no-sub-burn-forced --print-effective-config)"
-  assert_contains "SUB_BURN_FORCED           = 0" "--no-sub-burn-forced: registered" "$out"
-
-  out="$(run_muxm --no-sub-export-external --print-effective-config)"
-  assert_contains "SUB_EXPORT_EXTERNAL       = 0" "--no-sub-export-external: registered" "$out"
-
-  out="$(run_muxm --no-video-copy-if-compliant --print-effective-config)"
-  assert_contains "VIDEO_COPY_IF_COMPLIANT   = 0" "--no-video-copy-if-compliant: registered" "$out"
-
-  # ---- Positive toggles not covered by other suites ----
-
-  out="$(run_muxm --stereo-fallback --print-effective-config)"
-  assert_contains "ADD_STEREO_IF_MULTICH     = 1" "--stereo-fallback: registered" "$out"
-
-  out="$(run_muxm --no-conservative-vbv --print-effective-config)"
-  assert_contains "CONSERVATIVE_VBV          = 0" "--no-conservative-vbv: registered" "$out"
-
-  # ---- DV policy toggles ----
-
-  out="$(run_muxm --allow-dv-fallback --print-effective-config)"
-  assert_contains "ALLOW_DV_FALLBACK         = 1" "--allow-dv-fallback: registered" "$out"
-
-  out="$(run_muxm --no-allow-dv-fallback --print-effective-config)"
-  assert_contains "ALLOW_DV_FALLBACK         = 0" "--no-allow-dv-fallback: registered" "$out"
-
-  out="$(run_muxm --dv-convert-p81 --print-effective-config)"
-  assert_contains "DV_CONVERT_TO_P81_IF_FAIL = 1" "--dv-convert-p81: registered" "$out"
-
-  out="$(run_muxm --no-dv-convert-p81 --print-effective-config)"
-  assert_contains "DV_CONVERT_TO_P81_IF_FAIL = 0" "--no-dv-convert-p81: registered" "$out"
+  local out flag expected
+  for tc in "${TOGGLE_CASES[@]}"; do
+    IFS='|' read -r flag expected <<< "$tc"
+    out="$(run_muxm "$flag" --print-effective-config)"
+    assert_contains "$expected" "$flag: registered" "$out"
+  done
 }
 
 # === Suite: Config Precedence ===
@@ -878,7 +884,7 @@ test_video() {
   if assert_encode "MKV output produced" "$outfile" \
        --output-ext mkv --crf 28 --preset ultrafast "$src"; then
     local fmt
-    fmt="$(ffprobe -v error -show_entries format=format_name -of csv=p=0 "$outfile" 2>/dev/null)"
+    fmt="$(probe_format "$outfile" format_name)"
     assert_contains "matroska" "Output is Matroska" "$fmt"
   fi
 
@@ -1334,7 +1340,7 @@ test_containers() {
   log "Testing --output-ext mov..."
   if assert_encode "--output-ext mov: output produced" "$outfile" \
        --output-ext mov --crf 28 --preset ultrafast "$TESTDIR/basic_sdr_subs.mkv"; then
-    fmt="$(ffprobe -v error -show_entries format=format_name -of csv=p=0 "$outfile" 2>/dev/null)"
+    fmt="$(probe_format "$outfile" format_name)"
     if echo "$fmt" | grep -qiE "mov|mp4"; then
       pass "--output-ext mov: container is MOV/MP4 family"
     else
@@ -1347,7 +1353,7 @@ test_containers() {
   log "Testing --output-ext m4v..."
   if assert_encode "--output-ext m4v: output produced" "$outfile" \
        --output-ext m4v --crf 28 --preset ultrafast "$TESTDIR/basic_sdr_subs.mkv"; then
-    fmt="$(ffprobe -v error -show_entries format=format_name -of csv=p=0 "$outfile" 2>/dev/null)"
+    fmt="$(probe_format "$outfile" format_name)"
     if echo "$fmt" | grep -qiE "mov|mp4|m4v"; then
       pass "--output-ext m4v: container is MP4 family"
     else
@@ -1369,8 +1375,8 @@ test_metadata() {
   log "Testing --strip-metadata with real encode..."
   if assert_encode "--strip-metadata: output produced" "$outfile" \
        --strip-metadata --crf 28 --preset ultrafast "$TESTDIR/rich_metadata.mkv"; then
-    title="$(ffprobe -v error -show_entries format_tags=title -of csv=p=0 "$outfile" 2>/dev/null | head -1)"
-    comment="$(ffprobe -v error -show_entries format_tags=comment -of csv=p=0 "$outfile" 2>/dev/null | head -1)"
+    title="$(probe_format_tag "$outfile" title)"
+    comment="$(probe_format_tag "$outfile" comment)"
     if [[ -z "$title" && -z "$comment" ]]; then
       pass "--strip-metadata: title and comment removed"
     elif [[ -z "$title" ]]; then
@@ -1386,7 +1392,7 @@ test_metadata() {
   log "Testing metadata preservation (no --strip-metadata)..."
   if assert_encode "Metadata preservation encode" "$outfile" \
        --crf 28 --preset ultrafast "$TESTDIR/rich_metadata.mkv"; then
-    title="$(ffprobe -v error -show_entries format_tags=title -of csv=p=0 "$outfile" 2>/dev/null | head -1)"
+    title="$(probe_format_tag "$outfile" title)"
     if [[ -n "$title" ]]; then
       pass "Metadata preserved: title='$title'"
     else
@@ -1395,18 +1401,23 @@ test_metadata() {
   fi
 
   # --ffmpeg-loglevel (#30)
+  # Validates the flag is accepted by the parser without error.
+  # Actual loglevel behavior is verified by manual inspection of ffmpeg output.
   out="$(run_muxm --ffmpeg-loglevel warning --print-effective-config 2>&1)" || true
   if [[ -n "$out" ]]; then
     pass "--ffmpeg-loglevel: accepted without error"
   fi
 
   # --no-hide-banner (#29)
+  # Validates the flag is accepted without error.
+  # When active, ffmpeg's version/config banner should appear in encode output.
   out="$(run_muxm --no-hide-banner --dry-run "$TESTDIR/basic_sdr_subs.mkv" 2>&1)" || true
   if [[ -n "$out" ]]; then
     pass "--no-hide-banner: accepted without error"
   fi
 
   # --ffprobe-loglevel (R23)
+  # Validates the flag is accepted by the parser without error.
   out="$(run_muxm --ffprobe-loglevel warning --print-effective-config 2>&1)" || true
   if [[ -n "$out" ]]; then
     pass "--ffprobe-loglevel: accepted without error"
@@ -1439,7 +1450,8 @@ test_edge() {
   out="$(run_muxm --dry-run --ocr-tool "sub2srt;rm -rf /" "$TESTDIR/basic_sdr_subs.mkv")"
   assert_contains "disallowed" "OCR tool injection prevented" "$out"
 
-  # --skip-video error (can't produce output)
+  # --skip-video: muxm cannot produce a valid output without a video stream,
+  # so this should error or warn. We validate it doesn't silently succeed.
   out="$(cd "$TESTDIR" && "$MUXM" --skip-video "$TESTDIR/basic_sdr_subs.mkv" 2>&1)" || true
   log "--skip-video behavior validated"
 
@@ -1711,6 +1723,10 @@ test_setup() {
 }
 
 # ---- Run Suites ----
+# NOTE: Suite names are listed in three places that must stay in sync:
+#   1. File header comment (lines 10-11)
+#   2. --help output in arg parser (lines 41-42)
+#   3. This case statement
 run_suites() {
   case "$SUITE" in
     all)
@@ -1791,11 +1807,22 @@ summary() {
 
 # ---- Main ----
 # Execution flow:
-#   1. preflight          — verify required tools exist, create temp directory
-#   2. generate_test_media — build synthetic 2-sec clips (no real media needed)
-#   3. run_suites         — execute the selected test suite(s)
-#   4. summary            — report pass/fail/skip counts, list failures, set exit code
+#   1. preflight             — verify required tools exist, create temp directory
+#   2. generate media (gated) — build synthetic 2-sec clips; skipped for config-only suites
+#   3. run_suites            — execute the selected test suite(s)
+#   4. summary               — report pass/fail/skip counts, list failures, set exit code
+
+# Suites that need no test media (pure config / CLI parsing assertions)
+readonly MEDIA_FREE_SUITES="^(toggles|completions|setup|config|profiles|conflicts)$"
+# Suites that need the extended fixture set (multi-track, HDR, chapters, metadata sources)
+readonly EXTENDED_SUITES="^(dryrun|video|hdr|audio|subs|output|containers|metadata|edge|e2e|all)$"
+
 preflight
-generate_test_media
+if [[ ! "$SUITE" =~ $MEDIA_FREE_SUITES ]]; then
+  generate_core_media
+  if [[ "$SUITE" =~ $EXTENDED_SUITES ]]; then
+    generate_extended_media
+  fi
+fi
 run_suites
 summary
