@@ -21,7 +21,8 @@ muxm --profile atv-directplay-hq movie.mkv
 - [Configuration](#configuration)
 - [Also Includes](#alsoincludes)
 - [License](#license)
-- [Contributing](#contributing)
+- [Bug Reports](#bugreports)
+- [Contact](#contact)
 - [Author](#author)
 
 ---
@@ -330,13 +331,19 @@ Any business, government, or organizational use requires a paid license.
 
 Full license text available in [LICENSE.md](./LICENSE.md)
 
-## 🤝 Contributing <a id="contributing"></a>
+## 🐛 Bug Reports <a id="bugreports"></a>
 
-Bug reports, feature requests, and documentation improvements are welcome — please open an issue on GitHub first to discuss the change before submitting a pull request.
+Found a bug? Please open an issue on GitHub. Include the output of `muxm --version`, the profile and flags you used, and any relevant log output. A `--dry-run` dump or `--report-json` output is especially helpful.
 
-All code contributions must be approved by the maintainer. By submitting a pull request, you agree that your contribution is licensed under the same terms as the project (see [LICENSE.md](./LICENSE.md)) and that the maintainer retains the right to include it in both the freeware and commercially licensed distributions of MuxMaster. If you have questions about this, open an issue and ask — it's a short conversation, not a legal process.
+This is a solo-maintained project and I'm not accepting outside code contributions at this time.
+
+## 📬 Contact <a id="contact"></a>
+
+If you're using MuxMaster, I'd genuinely love to hear about it — what's working, what's not, what workflows you're using it for. This is a solo project and real-world feedback shapes what gets built next.
+
+- **Bug reports** → GitHub Issues
+- **Everything else** (feedback, licensing, questions) → [thebluwiz@thoughtspace.place](mailto:thebluwiz@thoughtspace.place)
 
 ## 👤 Author <a id="author"></a>
 
-Maintainer: Jamey Wicklund (theBluWiz)
-Email: [thebluwiz@thoughtspace.place](mailto:thebluwiz@thoughtspace.place)
+Jamey Wicklund (theBluWiz)

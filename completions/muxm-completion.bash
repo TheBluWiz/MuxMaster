@@ -17,25 +17,25 @@ _muxm_completions() {
     # ---- Flags that take a specific set of values ----
     case "$prev" in
         --profile)
-            mapfile -t COMPREPLY < <(compgen -W "dv-archival hdr10-hq atv-directplay-hq streaming animation universal" -- "$cur")
+            COMPREPLY=( $(compgen -W "dv-archival hdr10-hq atv-directplay-hq streaming animation universal" -- "$cur") )
             return ;;
         --video-codec)
-            mapfile -t COMPREPLY < <(compgen -W "libx265 libx264" -- "$cur")
+            COMPREPLY=( $(compgen -W "libx265 libx264" -- "$cur") )
             return ;;
         --output-ext)
-            mapfile -t COMPREPLY < <(compgen -W "mp4 mkv m4v mov" -- "$cur")
+            COMPREPLY=( $(compgen -W "mp4 mkv m4v mov" -- "$cur") )
             return ;;
         -p|--preset)
-            mapfile -t COMPREPLY < <(compgen -W "ultrafast superfast veryfast faster fast medium slow slower veryslow placebo" -- "$cur")
+            COMPREPLY=( $(compgen -W "ultrafast superfast veryfast faster fast medium slow slower veryslow placebo" -- "$cur") )
             return ;;
         --ocr-tool)
-            mapfile -t COMPREPLY < <(compgen -W "pgsrip sub2srt" -- "$cur")
+            COMPREPLY=( $(compgen -W "pgsrip sub2srt" -- "$cur") )
             return ;;
         --ffmpeg-loglevel|--ffprobe-loglevel)
-            mapfile -t COMPREPLY < <(compgen -W "quiet panic fatal error warning info verbose debug trace" -- "$cur")
+            COMPREPLY=( $(compgen -W "quiet panic fatal error warning info verbose debug trace" -- "$cur") )
             return ;;
         --create-config|--force-create-config)
-            mapfile -t COMPREPLY < <(compgen -W "system user project" -- "$cur")
+            COMPREPLY=( $(compgen -W "system user project" -- "$cur") )
             return ;;
 
         # Flags that take a free-form value — offer no completion, fall through to files
@@ -50,7 +50,7 @@ _muxm_completions() {
     if (( COMP_CWORD >= 3 )); then
         local pprev="${COMP_WORDS[COMP_CWORD-2]}"
         if [[ "$pprev" == "--create-config" || "$pprev" == "--force-create-config" ]]; then
-            mapfile -t COMPREPLY < <(compgen -W "dv-archival hdr10-hq atv-directplay-hq streaming animation universal" -- "$cur")
+            COMPREPLY=( $(compgen -W "dv-archival hdr10-hq atv-directplay-hq streaming animation universal" -- "$cur") )
             return
         fi
     fi
@@ -97,21 +97,21 @@ _muxm_completions() {
             --ffmpeg-loglevel --ffprobe-loglevel --no-hide-banner
             --threads
         "
-        mapfile -t COMPREPLY < <(compgen -W "$flags" -- "$cur")
+        COMPREPLY=( $(compgen -W "$flags" -- "$cur") )
         return
     fi
 
     # ---- Default: complete with media files ----
-    mapfile -t COMPREPLY < <(compgen -f -X '!*.@(mkv|mp4|m4v|mov|avi|ts|wmv|flv|webm)' -- "$cur")
+    COMPREPLY=( $(compgen -f -X '!*.@(mkv|mp4|m4v|mov|avi|ts|wmv|flv|webm)' -- "$cur") )
     # Also allow directories for navigation
-    mapfile -t -O "${#COMPREPLY[@]}" COMPREPLY < <(compgen -d -- "$cur")
+    COMPREPLY+=( $(compgen -d -- "$cur") )
 }
 
-complete -o filenames -o bashdefault -F _muxm_completions muxm
-
 # ---- Zsh compatibility ----
-# If running in zsh, enable bash completion emulation
+# If running in zsh, enable bash completion emulation BEFORE calling `complete`.
+# Without this, the unconditional `complete` below would error in zsh.
 if [[ -n "${ZSH_VERSION:-}" ]]; then
     autoload -Uz bashcompinit && bashcompinit
-    complete -o filenames -o bashdefault -F _muxm_completions muxm
 fi
+
+complete -o filenames -o bashdefault -F _muxm_completions muxm

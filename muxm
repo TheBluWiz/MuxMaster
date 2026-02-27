@@ -1366,14 +1366,14 @@ _muxm_completions() {
     COMPREPLY+=( $(compgen -d -- "$cur") )
 }
 
-complete -o filenames -o bashdefault -F _muxm_completions muxm
-
 # ---- Zsh compatibility ----
-# If running in zsh, enable bash completion emulation
+# If running in zsh, enable bash completion emulation BEFORE calling `complete`.
+# Without this, the unconditional `complete` below would error in zsh.
 if [[ -n "${ZSH_VERSION:-}" ]]; then
     autoload -Uz bashcompinit && bashcompinit
-    complete -o filenames -o bashdefault -F _muxm_completions muxm
 fi
+
+complete -o filenames -o bashdefault -F _muxm_completions muxm
 COMPLETIONS_EOF
 }
 # <<< end embedded completion script >>>
@@ -1398,7 +1398,11 @@ _install_completions(){
   say "=== ${APP_NAME} v${VERSION} — Completion Installer ==="
   echo ""
 
-  # Create directory
+  # Create directory (handle stale file from earlier installs)
+  if [[ -e "$comp_dir" && ! -d "$comp_dir" ]]; then
+    printf '  ⚠️  %s exists as a file — replacing with directory\n' "$comp_dir"
+    rm -f "$comp_dir"
+  fi
   if [[ ! -d "$comp_dir" ]]; then
     printf '  📁 Creating %s\n' "$comp_dir"
     mkdir -p "$comp_dir"
