@@ -10,10 +10,13 @@
 #
 # Requires:
 #   - ffmpeg, ffprobe
-#   - dovi_tool (optional for Dolby Vision RPU extraction/injection; script will fallback)
+#   - jq
 #
-# Optional (for PGS subtitle OCR):
-#   - sub2srt (or another OCR tool you set via --ocr-tool)
+# Optional (auto-disabled if missing):
+#   - dovi_tool — Dolby Vision RPU extraction/injection
+#   - MP4Box (gpac) — DV container signaling verification
+#   - sub2srt or pgsrip — PGS bitmap subtitle OCR to SRT (--ocr-tool)
+#   - bc — fractional frame-rate display
 #
 # Notes:
 #   - MP4 cannot carry PGS bitmap subtitles. If OCR can't produce SRT, subtitles are omitted.

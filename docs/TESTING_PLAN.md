@@ -1,7 +1,7 @@
 # MuxMaster (muxm) Testing Plan
 
 **Version:** v1.0.0  
-**Date:** 2026-02-26  
+**Date:** 2026-03-02  
 **Scope:** Comprehensive feature coverage — automated test harness + manual testing checklist
 
 ---
@@ -20,16 +20,16 @@ muxm has grown to include 6 format profiles, 60+ CLI flags, layered configuratio
 ### Running the Automated Tests
 
 ```bash
-# Full suite
-./test_muxm.sh --muxm ./muxm
+# Full suite (from project root)
+./tests/test_muxm.sh --muxm ./muxm
 
 # Specific suite
-./test_muxm.sh --muxm ./muxm --suite cli
-./test_muxm.sh --muxm ./muxm --suite profiles
-./test_muxm.sh --muxm ./muxm --suite e2e
+./tests/test_muxm.sh --muxm ./muxm --suite cli
+./tests/test_muxm.sh --muxm ./muxm --suite profiles
+./tests/test_muxm.sh --muxm ./muxm --suite e2e
 
 # Verbose (shows output on failures)
-./test_muxm.sh --muxm ./muxm --verbose
+./tests/test_muxm.sh --muxm ./muxm --verbose
 
 # Available suites: all, cli, toggles, completions, setup, config, profiles,
 #                   conflicts, dryrun, video, hdr, audio, subs, output,

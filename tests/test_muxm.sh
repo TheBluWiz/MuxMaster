@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  muxm Test Harness v2.0
+#  muxm Test Harness v1.0.0
 #  Automated testing for MuxMaster — generates synthetic media and validates
 #  CLI parsing, config precedence, profile behavior, and pipeline outputs.
 #
