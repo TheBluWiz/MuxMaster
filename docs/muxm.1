@@ -257,7 +257,8 @@ Do not overwrite existing intermediate files (ffmpeg overwrites by default).
 .SH EXAMPLES
 .TP
 .B muxm Movie.mkv
-Encode with defaults (HEVC, CRF 18, MP4). Output name is derived from input.
+Encode with no\-profile defaults (HEVC, CRF 18, MP4). Output name is
+derived from input. Use \fB\-\-profile\fR for device\-optimized settings.
 .TP
 .B muxm \-\-profile atv\-directplay\-hq Movie.mkv
 Encode for Apple TV direct play with Dolby Vision P8.1, E\-AC\-3 surround,
@@ -316,6 +317,10 @@ Install bash/zsh tab completion. Adds a source line to your shell RC files.
 .PP
 Configuration files use shell variable syntax. CLI flags always override
 config files. Profiles override config files but are overridden by CLI flags.
+.PP
+\fI~/.muxm/muxm\-completion.bash\fR
+.PP
+Tab\-completion script installed by \fB\-\-install\-completions\fR.
 .SH DEPENDENCIES
 .TP
 .B Required
@@ -343,18 +348,35 @@ tools via Homebrew and pipx.
 Success.
 .TP
 .B 1
-General error.
+General error (config write failure, dependency check failure, unhandled runtime error).
+.TP
+.B 10
+Missing required tool (ffmpeg, ffprobe, or jq not found).
 .TP
 .B 11
-Invalid arguments or unknown profile.
+Invalid arguments, unknown option or profile, bad input/output path, or security
+check failure (control characters in filename, source/output collision).
 .TP
 .B 12
-Source file contains no video streams.
+Source file unusable: no video streams, corrupt metadata, or ffprobe JSON parse failure.
+.TP
+.B 40
+Video encode or Dolby Vision RPU extraction/validation failure (with fallback disabled).
+.TP
+.B 41
+DV RPU injection failure, intermediate file validation failure, or final mux failure.
 .TP
 .B 42
-Pipeline error (video processing failure).
+Video pipeline structural error (e.g., \-\-skip\-video with no alternative, missing
+or corrupt encoded video stream).
 .TP
 .B 43
 Audio transcode or copy failure.
+.TP
+.B 130
+Interrupted by user (SIGINT / Ctrl\-C).
+.TP
+.B 143
+Terminated by signal (SIGTERM).
 .SH AUTHOR
 Jamey Wicklund (theBluWiz).

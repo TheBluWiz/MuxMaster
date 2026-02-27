@@ -858,6 +858,12 @@ Plan steps without encoding/muxing (creates placeholders only).
 .BR \-\-print\-effective\-config
 Show the resolved configuration after all sources merge, then exit.
 .TP
+.BR \-\-setup
+Run full first\-time setup: installs dependencies, the manual page, and
+tab completion in a single command. Equivalent to running
+\fB\-\-install\-dependencies\fR, \fB\-\-install\-man\fR, and
+\fB\-\-install\-completions\fR in sequence.
+.TP
 .BR \-\-install\-dependencies
 Check and install required/optional tools via Homebrew and pipx.
 .TP
@@ -876,12 +882,6 @@ Install bash/zsh tab\-completion to \fI~/.muxm/\fR and add a
 .BR \-\-uninstall\-completions
 Remove the tab\-completion file from \fI~/.muxm/\fR and clean
 the \fBsource\fR lines from shell RC files.
-.TP
-.BR \-\-setup
-Run full first\-time setup: installs dependencies via Homebrew/pipx,
-the manual page, and tab completion in a single command. Equivalent to
-running \fB\-\-install\-dependencies\fR, \fB\-\-install\-man\fR, and
-\fB\-\-install\-completions\fR in sequence.
 .TP
 .BR \-\-create\-config " " \fISCOPE\fR " " [\fIPROFILE\fR]
 Generate a \fI.muxmrc\fR config file at the location specified by \fISCOPE\fR
@@ -962,6 +962,26 @@ Enable/disable automatic AAC stereo track when primary >2ch.
 .TP
 .BR \-\-stereo\-bitrate " " \fIRATE\fR
 Stereo track bitrate (e.g., 192k).
+.SS Audio Track Selection
+When multiple audio streams exist, muxm scores each track and selects the highest.
+Factors (in order of weight): language match against
+.BR AUDIO_LANG_PREF ,
+channel count, surround bonus (\[>=]6ch), codec preference order, and bitrate
+(tie\-break). Tracks whose title contains "commentary", "descriptive", or
+similar keywords receive a penalty
+.RB ( AUDIO_SCORE_COMMENTARY_PENALTY ).
+.PP
+Scoring weights are configurable via
+.IR .muxmrc :
+.BR AUDIO_SCORE_LANG_BONUS " (default 150),"
+.BR AUDIO_SCORE_CHANNEL_MULTIPLIER " (default 20),"
+.BR AUDIO_SCORE_SURROUND_BONUS " (default 30),"
+.BR AUDIO_SCORE_COMMENTARY_PENALTY " (default 200)."
+.PP
+Language preference is the strongest signal by default, ensuring that a
+preferred\-language stereo track beats a foreign surround track. Reduce
+.B AUDIO_SCORE_LANG_BONUS
+to ~25 to prefer higher channel counts regardless of language.
 .SH SUBTITLE OPTIONS
 .TP
 .BR \-\-no\-subtitles
@@ -1032,7 +1052,8 @@ Do not overwrite existing intermediate files (ffmpeg overwrites by default).
 .SH EXAMPLES
 .TP
 .B muxm Movie.mkv
-Encode with defaults (HEVC, CRF 18, MP4). Output name is derived from input.
+Encode with no\-profile defaults (HEVC, CRF 18, MP4). Output name is
+derived from input. Use \fB\-\-profile\fR for device\-optimized settings.
 .TP
 .B muxm \-\-profile atv\-directplay\-hq Movie.mkv
 Encode for Apple TV direct play with Dolby Vision P8.1, E\-AC\-3 surround,
@@ -1074,8 +1095,8 @@ Generate a ~/.muxmrc pre\-filled with streaming profile defaults. Edit to
 taste; CLI flags still override everything.
 .TP
 .B muxm \-\-setup
-Full first\-time setup: install all dependencies, the manual page, and
-tab completion in one command.
+Full first\-time setup: install dependencies, the manual page, and tab
+completion all at once.
 .TP
 .B muxm \-\-install\-dependencies
 Check for and install all required/optional tools (ffmpeg, dovi_tool,

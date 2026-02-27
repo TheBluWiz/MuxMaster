@@ -1,4 +1,4 @@
-# MuxMaster™ Freeware License v1.1
+# MuxMaster™ Freeware License v1.0.0
 
 Copyright © 2025–2026 Jamey Wicklund (theBluWiz). All rights reserved.
 

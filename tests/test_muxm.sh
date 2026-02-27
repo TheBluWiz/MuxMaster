@@ -7,7 +7,7 @@
 #  Usage:
 #    ./test_muxm.sh [--muxm /path/to/muxm] [--suite SUITE] [--verbose]
 #
-#  Suites: all, cli, toggles, completions, config, profiles, conflicts, dryrun, video, audio, subs,
+#  Suites: all, cli, toggles, completions, setup, config, profiles, conflicts, dryrun, video, audio, subs,
 #          output, edge, e2e, hdr, containers, metadata
 #  Default: all
 # =============================================================================

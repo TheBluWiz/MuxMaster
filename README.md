@@ -5,8 +5,8 @@
 **MuxMaster** (`muxm`) — a single-command video repacking and encoding utility that handles Dolby Vision, HDR10, audio track selection, subtitle processing, and container muxing so you don't have to. Pick a profile, point it at a file, and get a properly encoded output without memorizing ffmpeg flags.
 
 ```bash
-# Install dependencies (macOS/Linux)
-muxm --install-dependencies
+# First-time setup (macOS/Linux)
+muxm --setup
 
 # Encode for Apple TV Direct Play — that's it
 muxm --profile atv-directplay-hq movie.mkv
@@ -36,7 +36,7 @@ You can solve all of this with raw ffmpeg, but the command will be 15+ flags lon
 
 **Tdarr** solves the batch-processing and automation problem well, especially at library scale. But it requires a server, a database, a web UI, and Node.js — it's infrastructure. If you want to process a single file, or a handful of files, with precise control over DV handling, audio track selection, and subtitle policy, Tdarr's plugin system means writing JavaScript to configure what `muxm` handles with a single `--profile` flag. Tdarr is a media library manager; MuxMaster is a per-file encoding tool that aims to make every decision correctly so you don't have to inspect the output.
 
-MuxMaster sits in the gap between "I know ffmpeg well enough to do this manually" and "I need a server-based automation platform." It's a single Bash script with no runtime dependencies beyond ffmpeg and jq, it understands Dolby Vision at the RPU level, and its profile system encodes the tribal knowledge of what actually works on real hardware into repeatable, overridable presets.
+MuxMaster sits in the gap between "I know ffmpeg well enough to do this manually" and "I need a server-based automation platform." It's a single Bash script with only two required dependencies (ffmpeg and jq) and optional tooling for Dolby Vision and subtitle OCR. It understands Dolby Vision at the RPU level, and its profile system encodes the tribal knowledge of what actually works on real hardware into repeatable, overridable presets.
 
 Configuration is where the design philosophy comes together. Most CLI tools expect you to read the source code to learn which variables exist, then hand-build a dotfile from scratch. `muxm --create-config` generates a complete, commented config file pre-seeded with a real profile's values — you start from a working baseline and customize, not from a blank page. Configs cascade through three tiers (system, user, project) so an encoding team can lock organization defaults in `/etc/.muxmrc` while individuals override their preferred CRF or audio settings in `~/.muxmrc` and specific project directories can pin a streaming profile. And `--print-effective-config` shows you the fully resolved result of all those layers *before* you commit to an encode, so you always know exactly what's about to happen.
 
@@ -155,10 +155,10 @@ If any stage fails, `muxm` logs the failure, cleans up incomplete temp files, an
 ### Quick Start
 
 ```bash
-git clone https://github.com/theBluWiz/muxmaster.git
-cd muxmaster
+git clone https://github.com/TheBluWiz/muxm.git
+cd muxm
 chmod +x muxm
-muxm --install-dependencies     # installs ffmpeg, jq, dovi_tool, etc.
+muxm --setup                    # installs dependencies, man page, and tab completion
 muxm --profile atv-directplay-hq movie.mkv
 ```
 
@@ -183,15 +183,21 @@ sudo cp muxm /usr/local/bin/muxm
 ### Setup Helpers
 
 ```bash
-# Install the man page so `man muxm` works
+# First-time setup: dependencies, man page, and tab completion
+muxm --setup
+
+# Or run individually:
+muxm --install-dependencies
 muxm --install-man
+muxm --install-completions
 
 # Generate a config file pre-filled with a profile's defaults
 muxm --create-config user atv-directplay-hq   # ~/.muxmrc
 muxm --create-config project streaming         # ./.muxmrc
 
-# Remove the installed man page
+# Remove installed components
 muxm --uninstall-man
+muxm --uninstall-completions
 ```
 
 ---
@@ -223,6 +229,16 @@ muxm [options] <source> [target.mp4]
 | `--strip-metadata` | Strip non-essential metadata |
 | `--skip-if-ideal` | Skip processing if source matches target |
 | `--print-effective-config` | Show resolved config after config file imports |
+
+### Setup & Management
+
+| Flag | Description |
+|---|---|
+| `--setup` | Full first-time setup: dependencies, man page, and tab completion |
+| `--install-dependencies` | Install required and optional tools via Homebrew/pipx |
+| `--install-man` | Install the `muxm(1)` manual page |
+| `--install-completions` | Install bash/zsh tab completion |
+| `--create-config SCOPE [PROFILE]` | Generate a `.muxmrc` config file (`system`, `user`, or `project`) |
 
 Run `muxm --help` for the full flag reference.
 
@@ -302,6 +318,8 @@ Beyond profiles and the core encoding pipeline, `muxm` ships with a set of opera
 - **Checksum Verification** – Optionally writes a SHA-256 checksum file for the output to verify integrity after transfer or archival.
 
 - **Man Page** – `muxm --install-man` installs a full `muxm(1)` manual page with complete flag reference, profile documentation, and examples accessible via `man muxm`.
+
+- **Tab Completion** – `muxm --install-completions` installs bash/zsh tab completion for all flags, profiles, presets, and config scopes. Completes media file extensions when providing input files.
 
 ---
 
