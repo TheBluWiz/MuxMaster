@@ -14,7 +14,7 @@ muxm has grown to include 6 format profiles, 60+ CLI flags, layered configuratio
 
 | File | Purpose |
 |------|---------|
-| `test_muxm.sh` | Automated test harness — generates synthetic media, runs ~160 assertions |
+| `test_muxm.sh` | Automated test harness — generates synthetic media, runs ~165 assertions |
 | This document | Manual testing procedures for features that require real media or subjective verification |
 
 ### Running the Automated Tests
@@ -68,6 +68,8 @@ The test harness (`test_muxm.sh`) generates synthetic test media — short 2-sec
 | 15 | `-l` alias | `-l 5.1` → LEVEL_VALUE = 5.1 in effective config | ✅ |
 | 16 | `-k` alias | `-k` → KEEP_TEMP = 1 in effective config | ✅ |
 | 17 | `-K` alias | `-K` → KEEP_TEMP_ALWAYS = 1 in effective config | ✅ |
+| 17a | VALID_PROFILES ↔ `--help` | Every profile in VALID_PROFILES constant appears in `--help` output | ✅ |
+| 17b | VALID_PROFILES ↔ completions | Every profile in VALID_PROFILES appears in installed completion script | ✅ |
 
 ### 1.2 Toggle Flag Coverage (suite: `toggles`)
 
@@ -494,7 +496,38 @@ jobs:
         run: ./test_muxm.sh --muxm ./muxm --suite profiles
       - name: Run full e2e
         run: ./test_muxm.sh --muxm ./muxm --suite e2e
+      - name: Locale regression (LANG=C)
+        run: LANG=C LC_ALL=C ./test_muxm.sh --muxm ./muxm --suite all
 ```
+
+### Locale Regression Testing
+
+All locale-sensitive operations in `muxm` have been audited (see comment block in
+Section 1 of the script). The script is locale-safe by design:
+
+| Category | Count | Status | Notes |
+|----------|-------|--------|-------|
+| `_lower()` via `tr` | 1 | ✅ Guarded | `LC_ALL=C` prefix already present |
+| `${var,,}` (Bash builtin) | 19 | ✅ Safe | Locale-independent for ASCII input |
+| `grep -i` with ASCII patterns | 20 | ✅ Safe | Patterns are pure ASCII (DOVI, dolby, etc.) |
+| `=~` with `[0-9]` ranges | 21 | ✅ Safe | POSIX-defined, locale-independent |
+| `=~` with `[a-zA-Z0-9]` | 1 | ✅ Safe | OCR tool sanitization (reject-list; conservative direction) |
+| `sort` | 0 | ✅ N/A | — |
+| `printf` locale formatting | 0 | ✅ N/A | — |
+| `tr -d ' '` | 1 | ✅ Safe | Stripping ASCII space only |
+
+**Running the locale test:**
+
+```bash
+# Full suite under C locale (should produce identical results to default locale)
+LANG=C LC_ALL=C ./test_muxm.sh --muxm ./muxm --suite all
+
+# Quick smoke test (fast suites only)
+LANG=C LC_ALL=C ./test_muxm.sh --muxm ./muxm --suite cli
+```
+
+If any tests fail under `LANG=C` that pass under the default locale, investigate
+whether the failing `tr`/`grep`/`sed`/`sort` call needs a `LC_ALL=C` prefix.
 
 ---
 
@@ -526,6 +559,8 @@ jobs:
 | Output features | ✅ Full | — | Chapters, checksum (with validation), JSON report (6 key checks), keep-temp all tested |
 | Edge cases & security | ✅ Full | — | Includes permissions, double-dash terminator, auto-generated output path |
 | E2E profiles | ✅ Full | — | All 6 profiles validated with real encodes |
+| VALID_PROFILES drift | ✅ Full | — | Cross-reference test verifies --help and installed completions match canonical constant |
+| Locale regression | ✅ Full | — | Static audit complete; CI step: `LANG=C LC_ALL=C ./test_muxm.sh` |
 | Error recovery | ❌ None | SIGINT, disk full (M33–M38) | Requires manual intervention |
 | Cross-platform | ❌ None | macOS + Linux (M39–M42) | Requires both platforms |
 | Playback verification | ❌ None | Device testing (M43–M48) | Requires target hardware |

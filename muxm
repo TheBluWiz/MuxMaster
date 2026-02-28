@@ -10,13 +10,10 @@
 #
 # Requires:
 #   - ffmpeg, ffprobe
-#   - jq
+#   - dovi_tool (optional for Dolby Vision RPU extraction/injection; script will fallback)
 #
-# Optional (auto-disabled if missing):
-#   - dovi_tool — Dolby Vision RPU extraction/injection
-#   - MP4Box (gpac) — DV container signaling verification
-#   - sub2srt or pgsrip — PGS bitmap subtitle OCR to SRT (--ocr-tool)
-#   - bc — fractional frame-rate display
+# Optional (for PGS subtitle OCR):
+#   - sub2srt (or another OCR tool you set via --ocr-tool)
 #
 # Notes:
 #   - MP4 cannot carry PGS bitmap subtitles. If OCR can't produce SRT, subtitles are omitted.
@@ -28,6 +25,19 @@
 set -eEuo pipefail
 if shopt -q inherit_errexit 2>/dev/null; then shopt -s inherit_errexit; fi
 [[ "${DEBUG:-0}" == "1" ]] && set -x
+# Note: noclobber is deliberately omitted. The script intentionally overwrites
+# intermediate temp files using > redirection throughout the pipeline stages.
+# noclobber would break this pattern.
+#
+# Locale safety (audited 2026-02-27):
+#   - _lower() uses LC_ALL=C for tr '[:upper:]' '[:lower:]'
+#   - Hot paths use ${var,,} (Bash builtin, locale-independent for ASCII)
+#   - All grep -i patterns are pure ASCII (DOVI, dolby, profile, RPU, etc.)
+#   - All =~ [0-9] ranges are POSIX-safe regardless of locale
+#   - The [a-zA-Z0-9] range in OCR tool sanitization is a security reject-list
+#     (conservative direction under exotic locales)
+#   - No sort, no locale-sensitive printf formatting
+#   Validated by: LANG=C LC_ALL=C ./test_muxm.sh --suite all
 
 # ---- Bash version guard ----
 # Namerefs (local -n), declare -i arrays, and other features require bash 4.3+.
@@ -42,6 +52,17 @@ fi
 readonly APP_NAME="MuxMaster"
 readonly CLI_NAME="muxm"
 readonly VERSION="1.0.0"
+
+# Canonical list of valid profile names (space-separated for compgen/iteration).
+# All profile validation, error messages, completions, and config generators
+# should reference this constant — never hardcode the list elsewhere.
+readonly VALID_PROFILES="dv-archival hdr10-hq atv-directplay-hq streaming animation universal"
+
+# _valid_profiles_display — return the profile list comma-separated for user-facing messages.
+_valid_profiles_display(){ echo "${VALID_PROFILES// /, }"; }
+
+# _is_valid_profile — return 0 if $1 is a recognised profile name, 1 otherwise.
+_is_valid_profile(){ [[ " $VALID_PROFILES " == *" $1 "* ]]; }
 
 # ===== Section 3: Globals =====================================================================
 declare -a COMPLETED_STEPS=()
@@ -65,6 +86,10 @@ DV_SRC_COMPAT_ID=""      # BL signal compatibility ID (1=PQ/HDR10, 2=SDR, 4=HLG)
 DV_SRC_BL_PRESENT=""     # Base layer present flag
 DV_SRC_EL_PRESENT=""     # Enhancement layer present flag
 MP4BOX_CMD=""            # Path to mp4box/MP4Box binary (detected at runtime)
+
+# Grep pattern for detecting DOVI container-level metadata (dvcC/dvvC box) in
+# ffprobe output. Used by verify_dv_container_record and pre-wrap checks.
+readonly DV_CONTAINER_PATTERN='DOVI configuration record|dv_profile|dv_version'
 
 # JSON report accumulator (for dv-archival reporting)
 declare -a REPORT_ENTRIES=()
@@ -337,8 +362,9 @@ _get_source_duration_secs() {
   echo 0
 }
 
-# Lowercase a string (avoids repeated inline tr calls)
-_lower(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+# Lowercase a string. For non-hot-path use where readability is preferred.
+# Hot paths (per-stream loops in Sections 27–28) use ${var,,} directly to avoid fork overhead.
+_lower(){ printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'; }
 
 # _jq_cache — Run jq against the cached METADATA_CACHE JSON.
 # Absorbs stderr (jq errors) so callers don't need to redirect individually.
@@ -362,12 +388,30 @@ on_error(){
   EXIT_CODE="${EXIT_CODE:-$status}"
   FAIL_MSG="Command failed at line $lineno: $cmd (exit $status)"
   printf "❌ ERROR: %s\n" "$FAIL_MSG" >&2
+  # Note: This trap does not call exit directly. Under set -e, the shell
+  # exits after the ERR trap returns, which triggers the EXIT trap (on_exit)
+  # where FAILED/EXIT_CODE/FAIL_MSG are used for cleanup and reporting.
 }
 
 mark_done(){ COMPLETED_STEPS+=("$1"); }
 
 need(){
   command -v "$1" >/dev/null 2>&1 || die 10 "Missing required tool: $1"
+}
+
+# Detect mp4box binary (name varies: MP4Box on macOS Homebrew, mp4box on Linux).
+# Sets global MP4BOX_CMD to the found binary name, or empty string if not found.
+# Returns: 0 if found, 1 if not found
+_detect_mp4box(){
+  if command -v MP4Box >/dev/null 2>&1; then
+    MP4BOX_CMD="MP4Box"
+  elif command -v mp4box >/dev/null 2>&1; then
+    MP4BOX_CMD="mp4box"
+  else
+    MP4BOX_CMD=""
+    return 1
+  fi
+  return 0
 }
 
 # Improved realpath that handles non-existent files on all platforms
@@ -549,13 +593,11 @@ _dep_check_only(){
 
   say "Dolby Vision pipeline (recommended):"
   _check_tool dovi_tool
-  # mp4box: check both names
+  # mp4box: binary name varies by platform (MP4Box vs mp4box)
   total=$(( total + 1 ))
   printf "  %-14s" "mp4box"
-  if command -v MP4Box >/dev/null 2>&1 || command -v mp4box >/dev/null 2>&1; then
-    local _mp4box_path
-    _mp4box_path="$(command -v MP4Box 2>/dev/null || command -v mp4box 2>/dev/null)"
-    printf "✅ found (%s)\n" "$_mp4box_path"
+  if _detect_mp4box; then
+    printf "✅ found (%s)\n" "$(command -v "$MP4BOX_CMD")"
     found=$(( found + 1 ))
   else
     printf "❌ not found\n"
@@ -700,18 +742,16 @@ _dep_install_dependencies(){
 
   say "Dolby Vision pipeline (recommended):"
   _brew_ensure dovi_tool dovi_tool
-  # mp4box: binary name varies — check both MP4Box and mp4box
+  # mp4box: binary name varies by platform (MP4Box vs mp4box)
   total=$(( total + 1 ))
   printf "  %-14s" "mp4box"
-  if command -v MP4Box >/dev/null 2>&1 || command -v mp4box >/dev/null 2>&1; then
-    local _mp4box_path
-    _mp4box_path="$(command -v MP4Box 2>/dev/null || command -v mp4box 2>/dev/null)"
-    printf "✅ already installed (%s)\n" "$_mp4box_path"
+  if _detect_mp4box; then
+    printf "✅ already installed (%s)\n" "$(command -v "$MP4BOX_CMD")"
     skipped=$(( skipped + 1 ))
   else
     printf "⏳ installing via brew (gpac)...\n"
     if brew install gpac 2>&1 | sed 's/^/    /'; then
-      if command -v MP4Box >/dev/null 2>&1 || command -v mp4box >/dev/null 2>&1; then
+      if _detect_mp4box; then
         printf "  %-14s✅ installed successfully\n" "mp4box"
         installed=$(( installed + 1 ))
       else
@@ -1266,7 +1306,7 @@ unset _arg
 
 # <<< embedded completion script >>>
 _completions_emit(){
-  cat <<'COMPLETIONS_EOF'
+  sed "s/__MUXM_PROFILES__/$VALID_PROFILES/g" <<'COMPLETIONS_EOF'
 # =============================================================================
 #  muxm — Bash/Zsh tab completion  (installed by muxm --install-completions)
 # =============================================================================
@@ -1279,7 +1319,7 @@ _muxm_completions() {
     # ---- Flags that take a specific set of values ----
     case "$prev" in
         --profile)
-            COMPREPLY=( $(compgen -W "dv-archival hdr10-hq atv-directplay-hq streaming animation universal" -- "$cur") )
+            COMPREPLY=( $(compgen -W "__MUXM_PROFILES__" -- "$cur") )
             return ;;
         --video-codec)
             COMPREPLY=( $(compgen -W "libx265 libx264" -- "$cur") )
@@ -1312,7 +1352,7 @@ _muxm_completions() {
     if (( COMP_CWORD >= 3 )); then
         local pprev="${COMP_WORDS[COMP_CWORD-2]}"
         if [[ "$pprev" == "--create-config" || "$pprev" == "--force-create-config" ]]; then
-            COMPREPLY=( $(compgen -W "dv-archival hdr10-hq atv-directplay-hq streaming animation universal" -- "$cur") )
+            COMPREPLY=( $(compgen -W "__MUXM_PROFILES__" -- "$cur") )
             return
         fi
     fi
@@ -1683,7 +1723,7 @@ HEADER
   echo "# ========================="
   echo ""
   echo "# Default profile to apply. CLI --profile overrides this value."
-  echo "# Valid profiles: dv-archival, hdr10-hq, atv-directplay-hq, streaming, animation, universal"
+  echo "# Valid profiles: $(_valid_profiles_display)"
   echo "# Profiles set many variables at once; CLI flags still override individual values."
   printf 'PROFILE_NAME="%s"\n' "$profile"
   echo ""
@@ -1971,14 +2011,11 @@ _create_config() {
   esac
 
   # Validate profile
-  case "$profile" in
-    dv-archival|hdr10-hq|atv-directplay-hq|streaming|animation|universal) ;;
-    *)
-      printf '❌ ERROR: Unknown profile: %s\n' "$profile" >&2
-      printf '   Valid profiles: dv-archival, hdr10-hq, atv-directplay-hq, streaming, animation, universal\n' >&2
-      exit 11
-      ;;
-  esac
+  if ! _is_valid_profile "$profile"; then
+    printf '❌ ERROR: Unknown profile: %s\n' "$profile" >&2
+    printf '   Valid profiles: %s\n' "$(_valid_profiles_display)" >&2
+    exit 11
+  fi
 
   # Check for existing file (refuse unless --force-create-config)
   if [[ -f "$target_path" ]] && (( ! force )); then
@@ -2058,7 +2095,7 @@ while (( _i < ${#_prescan_args[@]} )); do
       _PROFILE_SOURCE="cli"
       _i=$((_i + 2))
     else
-      die 11 "--profile requires a profile name (dv-archival, hdr10-hq, atv-directplay-hq, streaming, animation, universal)"
+      die 11 "--profile requires a profile name ($(_valid_profiles_display))"
     fi
   else
     _filtered_args+=("${_prescan_args[$_i]}")
@@ -2269,7 +2306,7 @@ apply_profile() {
     universal)           apply_profile_universal ;;
     *)
       printf "❌ ERROR: Unknown profile: %s\n" "$PROFILE_NAME" >&2
-      printf "   Valid profiles: dv-archival, hdr10-hq, atv-directplay-hq, streaming, animation, universal\n" >&2
+      printf "   Valid profiles: %s\n" "$(_valid_profiles_display)" >&2
       exit 11
       ;;
   esac
@@ -2740,6 +2777,7 @@ EOF
 need ffmpeg
 need ffprobe
 need jq
+need bc
 if (( ! DISABLE_DV )); then
   if ! command -v dovi_tool >/dev/null 2>&1; then
     warn "dovi_tool not found — Dolby Vision handling will be disabled."
@@ -2755,11 +2793,7 @@ fi
 # RPU NAL units natively and writes correct DV container metadata.
 # Binary name varies by platform: MP4Box (macOS homebrew) vs mp4box (Linux).
 if (( ! DISABLE_DV )); then
-  if command -v MP4Box >/dev/null 2>&1; then
-    MP4BOX_CMD="MP4Box"
-  elif command -v mp4box >/dev/null 2>&1; then
-    MP4BOX_CMD="mp4box"
-  else
+  if ! _detect_mp4box; then
     warn "mp4box (GPAC) not found — DV container signaling (dvcC box) may fail."
     warn "  Install: brew install gpac (macOS) or apt install gpac (Linux)"
   fi
@@ -2878,6 +2912,9 @@ LOGFILE="$WORKDIR/muxm.$(date +%Y%m%d-%H%M%S).log"
 # FD 3 is preserved as a "raw terminal" descriptor BEFORE the redirect. This
 # allows spinner/progress-bar code to write \r-based updates directly to the
 # terminal without polluting the log file with ANSI cursor movements.
+#
+# Lifecycle: FD 3 is opened here and closed in on_exit() (Section 19) during
+# cleanup, completing the descriptor lifecycle.
 #
 # After this section:
 #   stdout/stderr → tee → log file + terminal
@@ -3384,7 +3421,7 @@ verify_dv_container_record() {
   out_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
                stream_side_data -select_streams v:0 "$TMP_OUT" 2>&1)" || true
 
-  if printf '%s\n' "$out_probe" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
+  if printf '%s\n' "$out_probe" | grep -qiE "$DV_CONTAINER_PATTERN"; then
     note "✅ DOVI configuration record confirmed in output container."
     report_add "dv_container_record" "present"
     return 0
@@ -3418,7 +3455,7 @@ verify_dv_container_record() {
         mux_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
                      stream_side_data -select_streams v:0 "$dv_video_mp4" 2>&1)" || true
 
-        if printf '%s\n' "$mux_probe" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
+        if printf '%s\n' "$mux_probe" | grep -qiE "$DV_CONTAINER_PATTERN"; then
           fallback_ok=1
         else
           warn "mp4box fallback muxed OK but dvcC not detected. See: $WORKDIR/dovi_mux_mp4box.log"
@@ -3449,7 +3486,7 @@ verify_dv_container_record() {
         final_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
                        stream_side_data -select_streams v:0 "$dv_final" 2>&1)" || true
 
-        if printf '%s\n' "$final_probe" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
+        if printf '%s\n' "$final_probe" | grep -qiE "$DV_CONTAINER_PATTERN"; then
           mv -f "$dv_final" "$TMP_OUT"
           note "✅ DV container fallback succeeded (mp4box) — DOVI configuration record added."
           report_add "dv_container_record" "added via mp4box fallback"
@@ -3724,7 +3761,7 @@ run_video_pipeline() {
     escaped_srt="${escaped_srt//$_sq/\\$_sq}"    # single quote
     escaped_srt="${escaped_srt//\[/\\[}"         # opening bracket
     escaped_srt="${escaped_srt//\]/\\]}"         # closing bracket
-    vf_filters+=("subtitles='${escaped_srt}'")
+    vf_filters+=("subtitles=${escaped_srt}")
     note "→ Burning forced subtitles into video stream"
     report_add "sub_burn_forced" "true"
   elif (( SUB_BURN_FORCED )); then
@@ -4066,7 +4103,7 @@ run_video_pipeline() {
         pw_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
                      stream_side_data -select_streams v:0 "$dv_prewrap" 2>&1)" || true
 
-        if printf '%s\n' "$pw_probe" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
+        if printf '%s\n' "$pw_probe" | grep -qiE "$DV_CONTAINER_PATTERN"; then
           V_DV_MP4="$dv_prewrap"
           prewrap_ok=1
           note "✅ DV pre-wrap succeeded (mp4box) — dvcC box present."
@@ -4100,7 +4137,7 @@ run_video_pipeline() {
         pw_probe2="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
                       stream_side_data -select_streams v:0 "$dv_prewrap" 2>&1)" || true
 
-        if printf '%s\n' "$pw_probe2" | grep -qiE 'DOVI configuration record|dv_profile|dv_version'; then
+        if printf '%s\n' "$pw_probe2" | grep -qiE "$DV_CONTAINER_PATTERN"; then
           V_DV_MP4="$dv_prewrap"
           prewrap_ok=1
           note "✅ DV pre-wrap succeeded (ffmpeg direct) — dvcC box present."
@@ -4123,6 +4160,12 @@ run_video_pipeline() {
 }
 
 # ===== Section 27: Audio selection & pipeline =================================================
+# Note on variable scope: Several variables in run_audio_pipeline are declared
+# 'local' for documentation purposes (they're "owned" by that function) but are
+# read by downstream functions and mux_final. In Bash, local variables are visible
+# to all functions called from the declaring function. Key variables consumed
+# downstream: A_PRIMARY_LANG, A_PRIMARY_TITLE, A_PRIMARY_CHANNELS, A_STEREO_LANG,
+# A_PRIMARY, AAC_STEREO, HAS_AUDIO.
 # Count audio streams in source file
 # Returns: Integer count (0 if none)
 # Globals: METADATA_CACHE
@@ -4153,7 +4196,7 @@ _audio_tag(){
 # Args: $1 — audio stream index
 _audio_lang(){
   local lang
-  lang="$(_lower "$(_audio_tag "$1" language)")"
+  lang="$(_audio_tag "$1" language)"; lang="${lang,,}"
   [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
   echo "$lang"
 }
@@ -4180,7 +4223,7 @@ _audio_bitrate(){
 # Args: $1 — audio stream index
 _audio_codec(){
   local c
-  c="$(_lower "$(_audio_field "$1" codec_name)")"
+  c="$(_audio_field "$1" codec_name)"; c="${c,,}"
   [[ -z "$c" ]] && c="unknown"
   echo "$c"
 }
@@ -4191,6 +4234,26 @@ _audio_title(){
   _audio_tag "$1" title
 }
 
+# Map channel count to a human-readable label.
+# Args: $1 — channel count, $2 — style: "long" (capitalized + Surround) or "short" (compact, default)
+# Output: e.g., long: "5.1 Surround", short: "5.1"
+_channel_label(){
+  local ch="${1:-0}" style="${2:-short}"
+  if [[ "$style" == "long" ]]; then
+    case "$ch" in
+      1) echo "Mono" ;;         2) echo "Stereo" ;;
+      6) echo "5.1 Surround" ;; 8) echo "7.1 Surround" ;;
+      *) echo "${ch}ch" ;;
+    esac
+  else
+    case "$ch" in
+      1) echo "mono" ;;   2) echo "stereo" ;;
+      6) echo "5.1" ;;    8) echo "7.1" ;;
+      *) echo "${ch}ch" ;;
+    esac
+  fi
+}
+
 # Build a human-readable audio stream title from codec and channel count.
 # Args: $1 — codec name, $2 — channel count
 # Output: e.g., "5.1 Surround (E-AC-3)" or "Stereo (AAC)"
@@ -4198,16 +4261,10 @@ _audio_descriptive_title() {
   local codec="$1" ch="${2:-0}"
 
   local ch_label
-  case "$ch" in
-    1) ch_label="Mono" ;;
-    2) ch_label="Stereo" ;;
-    6) ch_label="5.1 Surround" ;;
-    8) ch_label="7.1 Surround" ;;
-    *) ch_label="${ch}ch" ;;
-  esac
+  ch_label="$(_channel_label "$ch" long)"
 
-  local codec_display
-  case "$(_lower "$codec")" in
+  local codec_display codec_lc="${codec,,}"
+  case "$codec_lc" in
     eac3)      codec_display="E-AC-3" ;;
     ac3)       codec_display="AC-3" ;;
     aac)       codec_display="AAC" ;;
@@ -4217,7 +4274,7 @@ _audio_descriptive_title() {
     alac)      codec_display="ALAC" ;;
     opus)      codec_display="Opus" ;;
     pcm_*)     codec_display="PCM" ;;
-    *)         codec_display="$(_lower "$codec")" ;;
+    *)         codec_display="$codec_lc" ;;
   esac
 
   echo "${ch_label} (${codec_display})"
@@ -4233,7 +4290,7 @@ _audio_codec_rank(){
   local codec="$1" list="$AUDIO_CODEC_PREFERENCE" item i=0
   IFS=',' read -r -a arr <<<"$list"
   for item in "${arr[@]}"; do
-    item="$(_lower "$item")"
+    item="${item,,}"
     item="${item// /}"   # strip spaces
     [[ -z "$item" ]] && continue
     if [[ "$item" == "$codec" ]]; then echo "$i"; return 0; fi
@@ -4250,7 +4307,7 @@ _audio_lang_matches(){
   local lang="$1" pref
   IFS=',' read -r -a prefs <<< "$AUDIO_LANG_PREF"
   for pref in "${prefs[@]}"; do
-    pref="$(_lower "${pref// /}")"
+    pref="${pref// /}"; pref="${pref,,}"
     [[ -z "$pref" ]] && continue
     [[ "$lang" == "$pref" ]] && return 0
   done
@@ -4262,8 +4319,7 @@ _audio_lang_matches(){
 # Returns 0 (true) if commentary/descriptive, 1 otherwise.
 # Args: $1 — title string (will be lowercased internally)
 _audio_is_commentary(){
-  local title
-  title="$(_lower "$1")"
+  local title="${1,,}"
   [[ -z "$title" ]] && return 1
   # shellcheck disable=SC2254
   [[ "$title" =~ (commentary|director.?s?.*commentary|director.?s?.*cut|comentario|kommentar|descriptive|audio.description|visually.impaired) ]] && return 0
@@ -4306,8 +4362,8 @@ _score_audio_stream(){
   info="$(_audio_stream_info "$idx")"
   IFS='|' read -r codec ch lang br title <<< "$info"
 
-  codec="$(_lower "$codec")"
-  lang="$(_lower "$lang")"
+  codec="${codec,,}"
+  lang="${lang,,}"
   [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
   [[ -z "$ch" || ! "$ch" =~ ^[0-9]+$ ]] && ch=0
   [[ -z "$br" || ! "$br" =~ ^[0-9]+$ ]] && br=0
@@ -4488,8 +4544,8 @@ run_audio_pipeline(){
     local _ainfo _c _ch_i _l _br_i _t pretty
     _ainfo="$(_audio_stream_info "$i")"
     IFS='|' read -r _c _ch_i _l _br_i _t <<< "$_ainfo"
-    _c="$(_lower "$_c")"
-    _l="$(_lower "$_l")"
+    _c="${_c,,}"
+    _l="${_l,,}"
     [[ -z "$_l" ]] && _l="$TAG_LANGUAGE_DEFAULT"
     [[ -z "$_br_i" || ! "$_br_i" =~ ^[0-9]+$ ]] && _br_i=0
     
@@ -4540,6 +4596,7 @@ run_audio_pipeline(){
 
   local do_copy=0 tgt_codec="" tgt_br=""
 
+  # Step 1: Forced codec override via AUDIO_FORCE_CODEC (--audio-force-codec)
   if [[ -n "${AUDIO_FORCE_CODEC:-}" ]]; then
     # Force codec: always transcode to target
     tgt_codec="$AUDIO_FORCE_CODEC"
@@ -4555,6 +4612,7 @@ run_audio_pipeline(){
       note "Force transcoding audio: $codec → $tgt_codec (${effective_ch}ch, ${tgt_br})"
       report_add "audio_action" "transcode to $tgt_codec"
     fi
+  # Step 2: Lossless passthrough (if enabled and codec is lossless)
   elif (( AUDIO_LOSSLESS_PASSTHROUGH )) && audio_is_lossless "$codec"; then
     if audio_lossless_muxable "$codec"; then
       do_copy=1
@@ -4566,10 +4624,12 @@ run_audio_pipeline(){
       note "Lossless $codec can't mux into $MUX_FORMAT — transcoding to $tgt_codec."
       report_add "audio_action" "transcode (lossless $codec incompatible with $MUX_FORMAT)"
     fi
+  # Step 3: Direct-play-copyable codec (aac, alac, ac3, eac3) → copy
   elif audio_is_direct_play_copyable "$codec" && (( effective_ch == ch )); then
     do_copy=1
     note "Direct Play audio codec detected ($codec). Copying without conversion."
     report_add "audio_action" "copy ($codec direct-play compatible)"
+  # Step 4: Fallback → transcode to eac3 (surround) or aac (stereo)
   else
     read -r tgt_codec tgt_br <<< "$(audio_transcode_target "$effective_ch")"
     note "Transcoding audio: $codec → $tgt_codec (channels=${effective_ch}ch, bitrate=$tgt_br)"
@@ -4703,7 +4763,7 @@ _sp_sub_dispo_forced(){
 # Args: $1 — subtitle stream index
 _sp_sub_lang(){
   local lang
-  lang="$(_lower "$(_sp_sub_tag "$1" language)")"
+  lang="$(_sp_sub_tag "$1" language)"; lang="${lang,,}"
   [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
   echo "$lang"
 }
@@ -4713,8 +4773,7 @@ _sp_sub_lang(){
 # Args: $1 — title string to test
 # Returns: 0 if match, 1 otherwise
 _is_forced_title(){
-  local t
-  t="$(_lower "$1")"
+  local t="${1,,}"
   [[ "$t" =~ forced|signs|foreign ]]
 }
 
@@ -4723,8 +4782,7 @@ _is_forced_title(){
 # Args: $1 — title string to test
 # Returns: 0 if match, 1 otherwise
 _is_sdh_title(){
-  local t
-  t="$(_lower "$1")"
+  local t="${1,,}"
   [[ "$t" =~ (^|[^a-z])(sdh|hi)([^a-z]|$)|hearing|impaired|cc|caption ]]
 }
 
@@ -4747,8 +4805,8 @@ describe_sub_stream(){
   info="$(_sub_stream_info "$i")"
   IFS='|' read -r codec lang title forced <<< "$info"
 
-  codec="$(_lower "$codec")"
-  lang="$(_lower "$lang")"
+  codec="${codec,,}"
+  lang="${lang,,}"
   [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
   
   (( forced )) && flags=" (forced)"
@@ -4781,7 +4839,7 @@ _pick_direct_text_sub_relidx(){
   for i in $(list_sub_indices); do
     lang="$(_sp_sub_lang "$i")"
     [[ ",$SUB_LANG_PREF," == *",$lang,"* ]] || continue
-    codec="$(_lower "$(_sp_sub_field "$i" codec_name)")"
+    codec="$(_sp_sub_field "$i" codec_name)"; codec="${codec,,}"
     if _is_text_sub_codec "$codec"; then
       echo "$i"
       return 0
@@ -4795,7 +4853,7 @@ _pick_direct_text_sub_relidx(){
 # Returns: path to SRT file or empty string if failed
 _prepare_sub_to_srt(){
   local idx="$1" codec srt sup vob_base
-  codec="$(_lower "$(_sp_sub_field "$idx" codec_name)")"
+  codec="$(_sp_sub_field "$idx" codec_name)"; codec="${codec,,}"
   srt="$WORKDIR/sub.${idx}.srt"
 
   if (( DRY_RUN )); then
@@ -5014,14 +5072,18 @@ build_subtitle_plan(){
     local _sinfo _scodec
     _sinfo="$(_sub_stream_info "$i")"
     IFS='|' read -r _scodec lang title forced <<< "$_sinfo"
-    lang="$(_lower "$lang")"
+    lang="${lang,,}"
     [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
 
     [[ ",$SUB_LANG_PREF," == *",$lang,"* ]] || continue
 
     if _is_sdh_title "$title"; then is_sdh=1; else is_sdh=0; fi
 
-    # Categorize subtitle
+    # Categorize subtitle (first-match-wins via continue):
+    # Forced disposition takes precedence over title-based SDH detection.
+    # A track with both forced=1 and "SDH" in its title will be categorized
+    # as forced, not SDH. This is intentional: disposition is authoritative,
+    # title is heuristic.
     if (( SUB_INCLUDE_FORCED )) && { (( forced )) || _is_forced_title "$title"; }; then
       [[ -z "$forced_idx" ]] && forced_idx="$i"
       continue
@@ -5505,13 +5567,7 @@ main() {
           IFS='|' read -r a_codec a_ch a_lang a_br a_title a_layout <<< "$_vinfo"
 
           # Descriptive channel label
-          case "${a_ch:-0}" in
-            1) a_ch_label="mono" ;;
-            2) a_ch_label="stereo" ;;
-            6) a_ch_label="5.1" ;;
-            8) a_ch_label="7.1" ;;
-            *) a_ch_label="${a_ch}ch" ;;
-          esac
+          a_ch_label="$(_channel_label "${a_ch:-0}")"
           # Prefer channel_layout if available and more descriptive
           [[ -n "$a_layout" && "$a_layout" != "unknown" ]] && a_ch_label="$a_layout"
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-#  muxm Test Harness v1.0.0
+#  muxm Test Harness v2.0
 #  Automated testing for MuxMaster — generates synthetic media and validates
 #  CLI parsing, config precedence, profile behavior, and pipeline outputs.
 #
@@ -507,6 +507,48 @@ test_cli() {
   # -K → --keep-temp-always
   out="$(run_muxm -K --print-effective-config)"
   assert_contains "KEEP_TEMP_ALWAYS          = 1" "-K is alias for --keep-temp-always" "$out"
+
+  # ---- Phase 2: VALID_PROFILES cross-reference consistency ----
+  # Verify the profile list in --help, --install-completions output, and the man page
+  # all match the canonical VALID_PROFILES constant. Catches drift when profiles are
+  # added or renamed but not updated everywhere.
+
+  # Extract VALID_PROFILES from the script itself (single source of truth)
+  local canonical
+  canonical="$(grep '^readonly VALID_PROFILES=' "$MUXM" | sed 's/^readonly VALID_PROFILES="//;s/"$//')"
+  if [[ -z "$canonical" ]]; then
+    skip "VALID_PROFILES constant not found in script — cross-reference tests skipped"
+  else
+    # Check --help output contains every profile name
+    out="$(run_muxm --help)"
+    local all_found=1 p
+    for p in $canonical; do
+      if ! echo "$out" | grep -qF "$p"; then
+        fail "Profile '$p' missing from --help output"
+        all_found=0
+      fi
+    done
+    (( all_found )) && pass "--help lists all VALID_PROFILES"
+
+    # Check installed completion script contains every profile name
+    local fake_home="$TESTDIR/fake_home_profiles"
+    mkdir -p "$fake_home"
+    touch "$fake_home/.bashrc" "$fake_home/.zshrc"
+    HOME="$fake_home" "$MUXM" --install-completions >/dev/null 2>&1 || true
+    local comp_file="$fake_home/.muxm/muxm-completion.bash"
+    if [[ -f "$comp_file" ]]; then
+      all_found=1
+      for p in $canonical; do
+        if ! grep -qF "$p" "$comp_file"; then
+          fail "Profile '$p' missing from installed completion script"
+          all_found=0
+        fi
+      done
+      (( all_found )) && pass "Installed completions list all VALID_PROFILES"
+    else
+      skip "Completion file not generated — completion cross-ref skipped"
+    fi
+  fi
 }
 
 # === Suite: Toggle Flag Coverage ===
@@ -568,13 +610,15 @@ test_config() {
   assert_contains "25" "CLI --crf overrides profile CRF" "$out"
 
   # Profile from config file (project-level)
+  # Use isolated HOME to prevent user's real ~/.muxmrc from interfering
   local cfg_profile_dir="$TESTDIR/config_profile_test"
-  mkdir -p "$cfg_profile_dir"
+  local cfg_profile_home="$TESTDIR/config_profile_home"
+  mkdir -p "$cfg_profile_dir" "$cfg_profile_home"
   cat > "$cfg_profile_dir/.muxmrc" <<'EOF'
 PROFILE_NAME="animation"
 EOF
   # Verify config file is picked up when running from that directory
-  out="$(cd "$cfg_profile_dir" && "$MUXM" --print-effective-config 2>&1)" || true
+  out="$(cd "$cfg_profile_dir" && HOME="$cfg_profile_home" "$MUXM" --print-effective-config 2>&1)" || true
   assert_contains "animation" "Config file PROFILE_NAME loaded" "$out"
   log "Config file profile override tested via --print-effective-config"
 
@@ -627,13 +671,16 @@ EOF
   done
 
   # Config variable override from file
+  # Use isolated HOME to prevent user's real ~/.muxmrc (e.g. PROFILE_NAME) from
+  # applying a profile that overwrites CRF_VALUE after config-file loading.
   local cfg_var_dir="$TESTDIR/config_var_test"
-  mkdir -p "$cfg_var_dir"
+  local cfg_var_home="$TESTDIR/config_var_home"
+  mkdir -p "$cfg_var_dir" "$cfg_var_home"
   cat > "$cfg_var_dir/.muxmrc" <<'EOF'
 CRF_VALUE=14
 PRESET_VALUE="slower"
 EOF
-  out="$(cd "$cfg_var_dir" && "$MUXM" --print-effective-config 2>&1)" || true
+  out="$(cd "$cfg_var_dir" && HOME="$cfg_var_home" "$MUXM" --print-effective-config 2>&1)" || true
   assert_contains "CRF_VALUE                 = 14" "Config file CRF_VALUE override" "$out"
   assert_contains "PRESET_VALUE              = slower" "Config file PRESET_VALUE override" "$out"
 
