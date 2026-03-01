@@ -1285,6 +1285,8 @@ begins with a hyphen:
 \fBffmpeg\fR, \fBffprobe\fR \(em core encoding and media inspection.
 .br
 \fBjq\fR \(em JSON parsing for stream metadata and reporting.
+.br
+\fBbc\fR \(em arithmetic for file\-size display and fractional frame\-rate verification.
 .TP
 .B Optional
 \fBdovi_tool\fR \(em Dolby Vision RPU extraction/injection. DV handling is
@@ -1292,8 +1294,6 @@ automatically disabled if missing.
 .br
 \fBMP4Box\fR (gpac) \(em DV container\-level signaling verification.
 Detected at runtime as \fBmp4box\fR or \fBMP4Box\fR.
-.br
-\fBbc\fR \(em fractional frame\-rate display in output verification.
 .br
 \fBsub2srt\fR or \fBpgsrip\fR \(em PGS bitmap subtitle OCR to SRT.
 Configurable via \fB\-\-ocr\-tool\fR.

@@ -19,7 +19,7 @@ muxm --profile atv-directplay-hq movie.mkv
 - [Installation](#installation)
 - [Usage](#usage)
 - [Configuration](#configuration)
-- [Also Includes](#alsoincludes)
+- [Additional Features](#additionalfeatures)
 - [License](#license)
 - [Bug Reports](#bugreports)
 - [Contact](#contact)
@@ -174,11 +174,11 @@ sudo cp muxm /usr/local/bin/muxm
 **Required:**
 - **ffmpeg** and **ffprobe** – core encoding and media inspection
 - **jq** – JSON parsing for stream metadata and reporting
+- **bc** – arithmetic evaluation for frame-rate and bitrate calculations
 
 **Optional (auto-disabled if missing):**
 - **dovi_tool** – Dolby Vision RPU extraction/injection; DV handling is automatically disabled if missing
 - **MP4Box** (gpac) – DV container-level signaling verification
-- **bc** – fractional frame-rate display in output verification
 - **sub2srt** or **pgsrip** – PGS bitmap subtitle OCR to SRT (configurable via `--ocr-tool`)
 
 ### Setup Helpers
@@ -223,10 +223,14 @@ muxm [options] <source> [target.mp4]
 | `-p, --preset NAME` | x265 encoder preset (e.g., `slow`, `medium`) |
 | `--video-codec libx265\|libx264` | Video encoder |
 | `--tonemap` | Tone-map HDR to SDR |
+| `--audio-lang-pref LANGS` | Audio language preference (comma-separated, e.g., `eng,jpn`) |
 | `--audio-force-codec CODEC` | Force all audio to a specific codec |
 | `--audio-lossless-passthrough` | Allow lossless codecs to pass through |
+| `--sub-lang-pref LANGS` | Subtitle language preference (comma-separated) |
 | `--sub-burn-forced` | Burn forced subtitles into video |
 | `--output-ext mp4\|mkv\|m4v\|mov` | Output container |
+| `--report-json` | Generate a JSON report alongside the output file |
+| `--checksum` | Write a SHA-256 checksum file for the output |
 | `--strip-metadata` | Strip non-essential metadata |
 | `--skip-if-ideal` | Skip processing if source matches target |
 | `--print-effective-config` | Show resolved config after config file imports |
@@ -239,6 +243,8 @@ muxm [options] <source> [target.mp4]
 | `--install-dependencies` | Install required and optional tools via Homebrew/pipx |
 | `--install-man` | Install the `muxm(1)` manual page |
 | `--install-completions` | Install bash/zsh tab completion |
+| `--uninstall-man` | Remove the installed manual page |
+| `--uninstall-completions` | Remove installed tab completion |
 | `--create-config SCOPE [PROFILE]` | Generate a `.muxmrc` config file (`system`, `user`, or `project`) |
 
 Run `muxm --help` for the full flag reference.
@@ -304,7 +310,7 @@ Every variable is displayed grouped by section, with the active profile name and
 
 ---
 
-## 📋 Also Includes <a id="alsoincludes"></a>
+## 📋 Additional Features <a id="additionalfeatures"></a>
 
 Beyond profiles and the core encoding pipeline, `muxm` ships with a set of operational features that make it safer and easier to use in practice:
 
@@ -331,19 +337,25 @@ Any business, government, or organizational use requires a paid license.
 
 Full license text available in [LICENSE.md](./LICENSE.md)
 
+---
+
 ## 🐛 Bug Reports <a id="bugreports"></a>
 
 Found a bug? Please open an issue on GitHub. Include the output of `muxm --version`, the profile and flags you used, and any relevant log output. A `--dry-run` dump or `--report-json` output is especially helpful.
 
 This is a solo-maintained project and I'm not accepting outside code contributions at this time.
 
+---
+
 ## 📬 Contact <a id="contact"></a>
 
-If you're using MuxMaster, I'd genuinely love to hear about it — what's working, what's not, what workflows you're using it for. This is a solo project and real-world feedback shapes what gets built next.
+If you're using MuxMaster, I'd love to hear about it — what's working, what's not, what workflows you're using it for. This is a solo project and real-world feedback shapes what gets built next.
 
 - **Bug reports** → GitHub Issues
 - **Everything else** (feedback, licensing, questions) → [thebluwiz@thoughtspace.place](mailto:thebluwiz@thoughtspace.place)
 
+---
+
 ## 👤 Author <a id="author"></a>
 
-Jamey Wicklund (theBluWiz)
+Jamey Wicklund ([@TheBluWiz](https://github.com/TheBluWiz))

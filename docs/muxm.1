@@ -1,9 +1,9 @@
-.TH MUXM 1 "2026-03-02" "MuxMaster v1.0.0" "User Commands"
+.TH MUXM 1 "2026-04-01" "MuxMaster v1.0.0" "User Commands"
 .SH NAME
 muxm \- Universal DV/HLG/HDR10/SDR video encoder/muxer with format profiles
 .SH SYNOPSIS
 .B muxm
-[\fIoptions\fR] \fIsource\fR [\fItarget\fR]
+[\fIoptions\fR] [\fB\-\-\fR] \fIsource\fR [\fItarget\fR]
 .SH DESCRIPTION
 MuxMaster converts and muxes video for various playback targets including
 Apple TV direct play, Plex/Jellyfin streaming, archival storage, animation
@@ -15,6 +15,15 @@ PGS\(->SRT OCR.
 Configuration layers (lowest to highest precedence):
 .PP
 Defaults \(-> /etc/.muxmrc \(-> ~/.muxmrc \(-> ./.muxmrc \(-> \-\-profile \(-> CLI flags
+.PP
+.B muxm
+requires
+.B bash 4.3
+or later. macOS ships bash\ 3.2; install a modern version
+(e.g.,
+.BR "brew install bash" )
+and ensure it appears first in
+.BR PATH .
 .SH FORMAT PROFILES
 Profiles are named presets that configure muxm for a specific use case in a
 single flag. Every setting a profile changes can be individually overridden
@@ -168,6 +177,10 @@ Enable/disable automatic AAC stereo track when primary >2ch.
 .TP
 .BR \-\-stereo\-bitrate " " \fIRATE\fR
 Stereo track bitrate (e.g., 192k).
+.TP
+.BR \-\-audio\-titles " , " \-\-no\-audio\-titles
+Generate/suppress descriptive titles for audio streams
+(e.g., \(lq5.1 Surround (E\-AC\-3)\(rq). Default: enabled.
 .SS Audio Track Selection
 When multiple audio streams exist, muxm scores each track and selects the highest.
 Factors (in order of weight): language match against
@@ -314,20 +327,128 @@ Install this manual page so \fBman muxm\fR works.
 .B muxm \-\-install\-completions
 Install bash/zsh tab completion. Adds a source line to your shell RC files.
 .SH FILES
-\fI/etc/.muxmrc\fR, \fI~/.muxmrc\fR, \fI./.muxmrc\fR
+.TP
+\fI/etc/.muxmrc\fR
+System\-wide configuration (sourced first).
+.TP
+\fI~/.muxmrc\fR
+Per\-user configuration (sourced second).
+.TP
+\fI./.muxmrc\fR
+Per\-project configuration (sourced last, from
+.BR $PWD ).
 .PP
-Configuration files use shell variable syntax. CLI flags always override
-config files. Profiles override config files but are overridden by CLI flags.
-.PP
+Configuration files use shell variable syntax and are sourced as bash
+scripts. CLI flags always override config files. Profiles override
+config files but are overridden by CLI flags.
+.TP
 \fI~/.muxm/muxm\-completion.bash\fR
-.PP
 Tab\-completion script installed by \fB\-\-install\-completions\fR.
+.SH CONFIGURATION
+All behavior can be tuned via shell variables set in
+.I .muxmrc
+files. Run
+.B muxm \-\-create\-config user
+to generate a fully\-commented template at
+.I ~/.muxmrc
+with every variable documented and preset for a chosen profile.
+Variables set by the selected profile are uncommented; all others are
+commented with their defaults.
+.PP
+Major variable groups:
+.TP
+.B Video
+.BR CRF_VALUE ", " PRESET_VALUE ", " VIDEO_CODEC ", " X265_PARAMS_BASE ", "
+.BR LEVEL_VALUE ", " CONSERVATIVE_VBV ", " FORCE_CHROMA_420 ", "
+.BR SDR_USE_10BIT_IF_SRC_10BIT ", " HDR_TARGET_PIXFMT ", "
+.BR TONEMAP_HDR_TO_SDR ", " TONEMAP_FILTER .
+.TP
+.B Dolby Vision
+.BR DISABLE_DV ", " ALLOW_DV_FALLBACK ", " DV_CONVERT_TO_P81_IF_FAIL .
+.TP
+.B Audio
+.BR AUDIO_LANG_PREF ", " AUDIO_CODEC_PREFERENCE ", "
+.BR AUDIO_TRACK_OVERRIDE ", " AUDIO_FORCE_CODEC ", "
+.BR MAX_AUDIO_CHANNELS ", " ADD_STEREO_IF_MULTICH ", "
+.BR STEREO_BITRATE ", " EAC3_BITRATE_5_1 ", " EAC3_BITRATE_7_1 ", "
+.BR AUDIO_LOSSLESS_PASSTHROUGH ", " INCLUDE_AUDIO_TITLES .
+.TP
+.B Audio scoring
+.BR AUDIO_SCORE_LANG_BONUS ", " AUDIO_SCORE_CHANNEL_MULTIPLIER ", "
+.BR AUDIO_SCORE_SURROUND_BONUS ", " AUDIO_SCORE_COMMENTARY_PENALTY .
+.TP
+.B Subtitles
+.BR SUB_LANG_PREF ", " SUB_INCLUDE_FORCED ", " SUB_INCLUDE_FULL ", "
+.BR SUB_INCLUDE_SDH ", " SUB_MAX_TRACKS ", " SUB_BURN_FORCED ", "
+.BR SUB_EXPORT_EXTERNAL ", " SUB_ENABLE_OCR ", " SUB_OCR_TOOL ", "
+.BR SUB_OCR_LANG .
+.TP
+.B Output / operational
+.BR OUTPUT_EXT ", " KEEP_CHAPTERS ", " STRIP_METADATA ", "
+.BR SKIP_IF_IDEAL ", " REPORT_JSON ", " CHECKSUM ", "
+.BR DISK_FREE_WARN_GB " (default\ 5; warn when free space is below this many GB),"
+.BR TAG_LANGUAGE_DEFAULT .
+.TP
+.B ffmpeg / ffprobe
+.BR FFMPEG_LOGLEVEL ", " FFPROBE_LOGLEVEL ", " FFMPEG_HIDE_BANNER ", "
+.BR FFMPEG_OVERWRITE ", " THREADS .
+.TP
+.B VBV guardrails
+.BR LEVEL_VBV_4_1_MAXRATE ", " LEVEL_VBV_4_1_BUFSIZE ", "
+.BR LEVEL_VBV_5_0_MAXRATE ", " LEVEL_VBV_5_0_BUFSIZE ", "
+.BR LEVEL_VBV_5_1_MAXRATE ", " LEVEL_VBV_5_1_BUFSIZE ", "
+.BR LEVEL_VBV_5_2_MAXRATE ", " LEVEL_VBV_5_2_BUFSIZE .
+.PP
+Use
+.B \-\-print\-effective\-config
+to inspect the fully\-resolved configuration after all layers merge.
+.SH ENVIRONMENT
+.TP
+.B DEBUG
+Set to
+.B 1
+to enable bash trace output
+.RB ( "set \-x" )
+and suppress automatic temp\-directory cleanup. Useful for diagnosing
+pipeline failures.
+.TP
+.B TESSDATA_PREFIX
+Path to Tesseract OCR language data. Required by
+.B pgsrip
+for PGS subtitle OCR. Typically set to the Homebrew tessdata directory
+(e.g.,
+.IR /opt/homebrew/share/tessdata ).
+Run
+.B muxm \-\-install\-dependencies
+to check and configure.
+.SH NOTES
+.SS Security: .muxmrc sourcing
+Configuration files are sourced as shell scripts and can execute
+arbitrary code. The project\-level
+.I ./.muxmrc
+is sourced from
+.BR $PWD ,
+so a malicious file placed in a directory you
+.B cd
+into could run arbitrary commands. This follows the same trust model as
+.BR Makefile ", " .envrc " (direnv),"
+and similar developer tooling. Only source project\-level configs in
+directories you trust.
+.SS Double\-dash separator
+Use
+.B \-\-
+to mark the end of options. This is necessary when the source filename
+begins with a hyphen:
+.IP
+.B muxm \-\-profile streaming \-\- \-unusual\-name.mkv
 .SH DEPENDENCIES
 .TP
 .B Required
 \fBffmpeg\fR, \fBffprobe\fR \(em core encoding and media inspection.
 .br
 \fBjq\fR \(em JSON parsing for stream metadata and reporting.
+.br
+\fBbc\fR \(em arithmetic for file\-size display and fractional frame\-rate verification.
 .TP
 .B Optional
 \fBdovi_tool\fR \(em Dolby Vision RPU extraction/injection. DV handling is
@@ -335,8 +456,6 @@ automatically disabled if missing.
 .br
 \fBMP4Box\fR (gpac) \(em DV container\-level signaling verification.
 Detected at runtime as \fBmp4box\fR or \fBMP4Box\fR.
-.br
-\fBbc\fR \(em fractional frame\-rate display in output verification.
 .br
 \fBsub2srt\fR or \fBpgsrip\fR \(em PGS bitmap subtitle OCR to SRT.
 Configurable via \fB\-\-ocr\-tool\fR.
@@ -379,5 +498,20 @@ Interrupted by user (SIGINT / Ctrl\-C).
 .TP
 .B 143
 Terminated by signal (SIGTERM).
+.SH SEE ALSO
+.BR ffmpeg (1),
+.BR ffprobe (1),
+.BR dovi_tool (1),
+.BR jq (1),
+.BR MP4Box (1)
+.SH BUGS
+Report bugs at
+.UR https://github.com/theBluWiz/muxm/issues
+.UE .
+.SH COPYRIGHT
+Copyright \(co 2025\(en2026 Jamey Wicklund (theBluWiz).
+.PP
+MuxMaster\(tm Freeware License v1.0.0 \(em
+\(lqDo what you want, just don't pretend I warranty the universe.\(rq
 .SH AUTHOR
 Jamey Wicklund (theBluWiz).
