@@ -1048,14 +1048,27 @@ test_video() {
   out="$(run_muxm --level 5.1 --print-effective-config)"
   assert_contains "LEVEL_VALUE               = 5.1" "--level 5.1: config registered" "$out"
 
-  # --level VBV injection via dry-run (R21)
-  # When CONSERVATIVE_VBV=1 (default) and --level is a known tier, the dry-run
-  # output should include vbv-maxrate and vbv-bufsize in the x265 params.
-  out="$(run_muxm --dry-run --level 5.1 "$TESTDIR/hevc_sdr_51.mkv")"
+  # --level VBV injection (R21)
+  # When CONSERVATIVE_VBV=1 (default) and --level is a known tier, the encode
+  # should include vbv-maxrate and vbv-bufsize in the x265 params.
+  # Must use an H.264 source to force x265 re-encoding (an HEVC source may
+  # be video-copied if a profile sets VIDEO_COPY_IF_COMPLIANT=1, skipping x265).
+  local vbv_outfile="$TESTDIR/vid_level_vbv.mp4"
+  log "Encoding with --level 5.1 (VBV injection test)..."
+  out="$(run_muxm --level 5.1 --crf 28 --preset ultrafast --no-video-copy-if-compliant \
+    "$TESTDIR/basic_sdr_subs.mkv" "$vbv_outfile")"
   if echo "$out" | grep -qiE "vbv-maxrate|vbv-bufsize"; then
-    pass "--level 5.1: VBV params injected in dry-run"
+    pass "--level 5.1: VBV params found in terminal output"
   else
-    skip "--level 5.1: VBV keywords not found in dry-run output (may be logged to file)"
+    # Check workdir log file (-K preserves it)
+    local vbv_log
+    vbv_log="$(find "$TESTDIR" -path '*/.muxm.tmp.*/muxm.*.log' 2>/dev/null \
+      | sort | tail -1)"
+    if [[ -n "$vbv_log" && -f "$vbv_log" ]] && grep -qiE "vbv-maxrate|vbv-bufsize" "$vbv_log"; then
+      pass "--level 5.1: VBV params found in workdir log"
+    else
+      skip "--level 5.1: VBV keywords not found in output or workdir log"
+    fi
   fi
 }
 
