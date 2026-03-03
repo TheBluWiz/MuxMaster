@@ -3935,9 +3935,11 @@ run_video_pipeline() {
     # argument form (subtitles=/path) fails on many ffmpeg builds with
     # "No option name near '/path'".  Single quotes are ffmpeg filter-level
     # escaping, protecting the path from the filter graph parser (colons,
-    # commas, etc. are syntactic in that context).  We also copy to /tmp with
-    # a PID-based name to avoid dots in WORKDIR components.
-    _BURN_SRT_FILTER="/tmp/muxm-burn-$$.srt"
+    # commas, etc. are syntactic in that context).  We also copy to a temp
+    # directory with a PID-based name to avoid dots in WORKDIR components.
+    # Uses $TMPDIR (honoured by macOS, systemd, and containerised environments)
+    # with /tmp as the POSIX fallback.
+    _BURN_SRT_FILTER="${TMPDIR:-/tmp}/muxm-burn-$$.srt"
     cp -f "$SRT_FORCED_BURN_PATH" "$_BURN_SRT_FILTER"
     vf_filters+=("subtitles=filename='${_BURN_SRT_FILTER}'")
     note "→ Burning forced subtitles into video stream"
