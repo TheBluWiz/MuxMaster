@@ -23,8 +23,16 @@ FAIL=0
 SKIP=0
 ERRORS=()
 
-# muxm exits 11 for validation/usage errors (bad flags, missing files, invalid values, etc.)
+# muxm exits 11 for validation/usage errors (bad flags, missing files, invalid values, etc.).
+# Exit code 11 is chosen to avoid collision with standard shell/signal codes (1-2, 126-128+N).
 readonly EXIT_VALIDATION=11
+
+# ---- Numbering Convention ----
+# Throughout this file, parenthetical references like (#28), (#50), (R28), (R31)
+# refer to items in the project's requirements/issue tracker:
+#   #N  — GitHub issue or feature ticket number
+#   RN  — Internal requirement ID from the test-plan matrix
+# These cross-references allow tracing each assertion back to its originating spec.
 
 # ---- Colors ----
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'
@@ -60,6 +68,8 @@ section() { printf "\n%b━━━ %s ━━━%b\n" "$BOLD" "$*" "$NC"; }
 run_muxm() { (cd "$TESTDIR" && "$MUXM" -K "$@" 2>&1) || true; }
 # Run muxm from a specific directory with an optional HOME override.
 # Covers cases where tests need a custom PWD (for .muxmrc) or isolated HOME.
+# HOME isolation prevents the real user's ~/.muxmrc from polluting config-precedence
+# tests — without it, a developer's personal config silently changes expected values.
 # Usage: run_muxm_in DIR [muxm flags...]
 #   Set MUXM_HOME before calling to override HOME; defaults to real $HOME.
 run_muxm_in() { local dir="$1"; shift; (cd "$dir" && HOME="${MUXM_HOME:-$HOME}" "$MUXM" -K "$@" 2>&1) || true; }
@@ -249,6 +259,15 @@ preflight() {
 # Split into two tiers so non-encoding suites can skip media generation entirely:
 #   generate_core_media     — basic_sdr_subs.mkv (needed by cli, dryrun, edge, etc.)
 #   generate_extended_media — all remaining fixtures (needed by encoding suites)
+#
+# Fixture naming convention:
+#   basic_sdr_subs.mkv         — minimal: one video, one audio, one subtitle
+#   hevc_sdr_51.mkv            — codec_colorspace_audiochannels
+#   multi_audio.mkv            — multiple tracks of the named stream type
+#   multi_subs_multilang.mkv   — multi-track + multi-language variant
+#   with_chapters.mkv          — has the named metadata feature
+#   rich_metadata.mkv          — has extra format-level tags (title, comment, encoder)
+#   compliant.mp4              — already matches default target spec (for skip-if-ideal)
 
 generate_core_media() {
   section "Generating Core Test Media"
@@ -629,6 +648,11 @@ test_toggles() {
   section "Toggle Flag Coverage (--flag / --no-flag pairs)"
 
   # Table: CLI flag(s) | expected string in --print-effective-config output
+  #
+  # WHY THESE FLAGS: Other suites exercise toggle flags incidentally (e.g. test_audio
+  # tests --audio-lossless-passthrough via real encodes). This suite covers the remaining
+  # flags that would otherwise have zero test coverage — ensuring the CLI parser wires
+  # them to the correct config variable even if no encode suite happens to use them.
   local -a TOGGLE_CASES=(
     # ---- Negative toggles not covered by other suites ----
     "--no-checksum|CHECKSUM                  = 0"
@@ -759,6 +783,9 @@ _test_config_create() {
 
 _test_config_layering() {
   # Tests the full three-layer stack: user (~/.muxmrc) + project (./.muxmrc) + CLI.
+  # muxm loads config in this order (last wins): defaults → user → project → CLI.
+  # Each assertion below targets a specific layer boundary to verify that higher-priority
+  # layers override lower ones while leaving untouched variables intact.
   local out
 
   local layer_home="$TESTDIR/config_layer_home"
@@ -926,6 +953,10 @@ test_profiles() {
 # Validates that muxm emits ⚠ warnings when CLI flags contradict a profile's intent
 # (e.g., --no-dv with dv-archival, --tonemap with hdr10-hq). All checks use
 # --print-effective-config and look for the ⚠ character in output.
+# WHY: Profiles encode domain expertise (e.g., dv-archival preserves Dolby Vision).
+# If a user overrides a profile's key flag, the encode may silently produce a file that
+# violates the profile's contract. Warnings catch this at config time, not after a
+# multi-hour encode.
 test_conflicts() {
   section "Conflict Warnings"
 
@@ -1291,7 +1322,10 @@ test_audio() {
   assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 0" "--no-audio-lossless-passthrough: flag cleared" "$out"
 
   # --- Commentary track detection ---
-  # Needs captured output to verify muxm's selection log, so uses run_muxm directly.
+  # The multi_audio_commentary.mkv fixture has two identically-specced 5.1 EAC3 English
+  # tracks that differ ONLY in their title metadata ("Director's Commentary" vs "Main Feature").
+  # This isolates the commentary penalty in the scoring algorithm — if both tracks score
+  # equally on codec/channels/language, only the title-based penalty distinguishes them.
   outfile="$TESTDIR/audio_commentary_detect.mp4"
   log "Testing commentary track deprioritization..."
   local commentary_out
@@ -1700,6 +1734,9 @@ test_metadata() {
 # Validates defensive behavior: empty files rejected, filenames with spaces handled,
 # shell injection attempts blocked (--output-ext, --ocr-tool), non-readable source
 # and non-writable output directory detected.
+# SECURITY NOTE: The injection tests (--output-ext "mp4;", --ocr-tool "sub2srt;rm -rf /")
+# verify that user-supplied strings are never interpolated into shell commands unsanitized.
+# These are regression tests for real attack vectors in media-processing CLI tools.
 test_edge() {
   section "Edge Cases & Security"
 
@@ -1872,6 +1909,9 @@ test_edge() {
 # ASSUMES: Functions in muxm are defined as "fname() {" at column 0 with the
 #   closing "}" also at column 0.  Will break silently if muxm switches to
 #   "function fname {" style or indents the closing brace.
+# MAINTENANCE: If a function under test calls other muxm helpers, add the
+#   dependency to the `deps` case statement below — otherwise the subshell
+#   will see "command not found" and the test silently passes with empty output.
 muxm_fn() {
   local fn="$1"; shift
   local body
@@ -1897,6 +1937,8 @@ muxm_fn() {
 #   ENV_SETUP — shell code evaluated before the function (variable assignments,
 #               dependency function bodies, readonly constants, etc.).
 #               Use "" if no setup is needed.
+#   Example:  assert_muxm_fn_exit "label" 0 my_fn 'FOO="bar"; BAZ=1' "arg1"
+#             → runs: FOO="bar"; BAZ=1 <newline> <fn body> <newline> my_fn "arg1"
 assert_muxm_fn_exit() {
   local label="$1" expected="$2" fn="$3" env_setup="$4"
   shift 4
@@ -2159,8 +2201,12 @@ test_unit() {
 test_profile_e2e() {
   section "Profile End-to-End Encodes"
 
-  # Table: profile | source | output | ext | codec | extra_muxm_flags
-  # codec="-" means skip codec assertion; empty extra_flags means --preset ultrafast only.
+  # Data-driven encode matrix.  Add a row to test a new profile — no new code needed.
+  # Columns (pipe-delimited):
+  #   profile | source fixture | output filename | expected ext | expected video codec | extra muxm flags
+  # Special values:
+  #   codec="-"        → skip codec assertion (profile doesn't mandate a specific codec)
+  #   extra_flags=""   → only --preset ultrafast is passed (always added by the loop)
   local -a E2E_PROFILES=(
     "streaming|basic_sdr_subs.mkv|e2e_streaming.mp4|mp4|-|--crf 28"
     "animation|multi_subs.mkv|e2e_animation.mkv|mkv|-|--crf 28"
@@ -2456,9 +2502,11 @@ summary() {
 #   3. run_suites            — execute the selected test suite(s)
 #   4. summary               — report pass/fail/skip counts, list failures, set exit code
 
-# Suites that need no test media (pure config / CLI parsing assertions)
+# Media generation is gated by suite to keep fast suites fast.
+# MEDIA_FREE_SUITES: Pure config/CLI/unit tests — no ffmpeg fixtures needed (~2s).
+# Core media: basic_sdr_subs.mkv only — needed by cli, dryrun, edge, etc. (~3s to generate).
+# EXTENDED_SUITES: Full fixture set (multi-track, HDR, chapters, metadata) (~15s to generate).
 readonly MEDIA_FREE_SUITES="^(toggles|completions|setup|config|profiles|conflicts|unit)$"
-# Suites that need the extended fixture set (multi-track, HDR, chapters, metadata sources)
 readonly EXTENDED_SUITES="^(dryrun|video|hdr|audio|subs|output|containers|metadata|edge|e2e|all)$"
 
 preflight
