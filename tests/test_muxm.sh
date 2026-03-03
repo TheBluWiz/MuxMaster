@@ -464,9 +464,12 @@ CHAP
 # Validates --help, --version, no-args usage, and that invalid inputs (bad profile,
 # bad preset, bad codec, bad extension, missing file, too many args, source=output)
 # all produce the correct exit code and error messages.
-test_cli() {
-  section "CLI Parsing & Help"
+# --- test_cli sub-functions ---
+# Each sub-function tests a distinct CLI concern.  They share no local state
+# and can be read (or run) independently.  The parent dispatcher calls them
+# sequentially to preserve the original execution order.
 
+_test_cli_help_version() {
   # --help
   local out
   out="$(run_muxm --help)"
@@ -485,6 +488,10 @@ test_cli() {
 
   # No args → shows usage (exit 0)
   assert_exit 0 "No arguments shows usage"
+}
+
+_test_cli_error_codes() {
+  local out
 
   # Invalid profile
   assert_exit $EXIT_VALIDATION "Invalid profile exits $EXIT_VALIDATION" --profile fake "$TESTDIR/basic_sdr_subs.mkv"
@@ -520,10 +527,12 @@ test_cli() {
     log "--no-overwrite: preliminary encode failed: ${pre_out:0:500}"
     skip "--no-overwrite: initial encode did not produce output"
   fi
+}
 
-  # ---- Phase 1: Short flag aliases ----
+_test_cli_short_aliases() {
   # Verify short flags map to their long-form equivalents. Catches regressions
   # where a refactor drops a short alias from the case statement.
+  local out
 
   # -h → --help
   assert_exit 0 "-h is alias for --help" -h
@@ -548,48 +557,63 @@ test_cli() {
   # -K → --keep-temp-always
   out="$(run_muxm -K --print-effective-config)"
   assert_contains "KEEP_TEMP_ALWAYS          = 1" "-K is alias for --keep-temp-always" "$out"
+}
 
-  # ---- Phase 2: VALID_PROFILES cross-reference consistency ----
+_test_cli_profile_crossref() {
   # Verify the profile list in --help, --install-completions output, and the man page
   # all match the canonical VALID_PROFILES constant. Catches drift when profiles are
   # added or renamed but not updated everywhere.
+  local out
 
   # Extract VALID_PROFILES from the script itself (single source of truth)
   local canonical
   canonical="$(grep '^readonly VALID_PROFILES=' "$MUXM" | sed 's/^readonly VALID_PROFILES="//;s/"$//')"
   if [[ -z "$canonical" ]]; then
     skip "VALID_PROFILES constant not found in script — cross-reference tests skipped"
-  else
-    # Check --help output contains every profile name
-    out="$(run_muxm --help)"
-    local all_found=1 p
+    return
+  fi
+
+  # Check --help output contains every profile name
+  out="$(run_muxm --help)"
+  local all_found=1 p
+  for p in $canonical; do
+    if ! echo "$out" | grep -qF "$p"; then
+      fail "Profile '$p' missing from --help output"
+      all_found=0
+    fi
+  done
+  (( all_found )) && pass "--help lists all VALID_PROFILES"
+
+  # Check installed completion script contains every profile name
+  local fake_home="$TESTDIR/fake_home_profiles"
+  mkdir -p "$fake_home"
+  touch "$fake_home/.bashrc" "$fake_home/.zshrc"
+  HOME="$fake_home" "$MUXM" --install-completions >/dev/null 2>&1 || true
+  local comp_file="$fake_home/.muxm/muxm-completion.bash"
+  if [[ -f "$comp_file" ]]; then
+    all_found=1
     for p in $canonical; do
-      if ! echo "$out" | grep -qF "$p"; then
-        fail "Profile '$p' missing from --help output"
+      if ! grep -qF "$p" "$comp_file"; then
+        fail "Profile '$p' missing from installed completion script"
         all_found=0
       fi
     done
-    (( all_found )) && pass "--help lists all VALID_PROFILES"
-
-    # Check installed completion script contains every profile name
-    local fake_home="$TESTDIR/fake_home_profiles"
-    mkdir -p "$fake_home"
-    touch "$fake_home/.bashrc" "$fake_home/.zshrc"
-    HOME="$fake_home" "$MUXM" --install-completions >/dev/null 2>&1 || true
-    local comp_file="$fake_home/.muxm/muxm-completion.bash"
-    if [[ -f "$comp_file" ]]; then
-      all_found=1
-      for p in $canonical; do
-        if ! grep -qF "$p" "$comp_file"; then
-          fail "Profile '$p' missing from installed completion script"
-          all_found=0
-        fi
-      done
-      (( all_found )) && pass "Installed completions list all VALID_PROFILES"
-    else
-      skip "Completion file not generated — completion cross-ref skipped"
-    fi
+    (( all_found )) && pass "Installed completions list all VALID_PROFILES"
+  else
+    skip "Completion file not generated — completion cross-ref skipped"
   fi
+}
+
+# === Suite: CLI parsing & help ===
+# Validates --help, --version, no-args usage, and that invalid inputs (bad profile,
+# bad preset, bad codec, bad extension, missing file, too many args, source=output)
+# all produce the correct exit code and error messages.
+test_cli() {
+  section "CLI Parsing & Help"
+  _test_cli_help_version
+  _test_cli_error_codes
+  _test_cli_short_aliases
+  _test_cli_profile_crossref
 }
 
 # === Suite: Toggle Flag Coverage ===
@@ -636,12 +660,11 @@ test_toggles() {
 # Validates layered configuration: --print-effective-config output, CLI flags overriding
 # profile defaults, project-level .muxmrc loading, --create-config / --force-create-config
 # file generation, and per-variable overrides from config files.
-test_config() {
-  section "Configuration Precedence"
+# --- test_config sub-functions ---
+# Each sub-function tests a distinct config lifecycle stage.  They execute
+# sequentially within the dispatcher; none depends on state from another.
 
-  local cfg_dir="$TESTDIR/config_test"
-  mkdir -p "$cfg_dir"
-
+_test_config_effective() {
   # Test --print-effective-config with profile
   local out
   out="$(run_muxm --profile streaming --print-effective-config)"
@@ -666,6 +689,24 @@ EOF
   out="$(MUXM_HOME="$cfg_profile_home" run_muxm_in "$cfg_profile_dir" --print-effective-config)"
   assert_contains "animation" "Config file PROFILE_NAME loaded" "$out"
   log "Config file profile override tested via --print-effective-config"
+
+  # Config variable override from file
+  # Use isolated HOME to prevent user's real ~/.muxmrc (e.g. PROFILE_NAME) from
+  # applying a profile that overwrites CRF_VALUE after config-file loading.
+  local cfg_var_dir="$TESTDIR/config_var_test"
+  local cfg_var_home="$TESTDIR/config_var_home"
+  mkdir -p "$cfg_var_dir" "$cfg_var_home"
+  cat > "$cfg_var_dir/.muxmrc" <<'EOF'
+CRF_VALUE=14
+PRESET_VALUE="slower"
+EOF
+  out="$(MUXM_HOME="$cfg_var_home" run_muxm_in "$cfg_var_dir" --print-effective-config)"
+  assert_contains "CRF_VALUE                 = 14" "Config file CRF_VALUE override" "$out"
+  assert_contains "PRESET_VALUE              = slower" "Config file PRESET_VALUE override" "$out"
+}
+
+_test_config_create() {
+  local out
 
   # --create-config (use a clean directory so no pre-existing .muxmrc)
   local cfg_create_dir="$TESTDIR/config_create_test"
@@ -710,24 +751,11 @@ EOF
       fail "--create-config $p: did not create .muxmrc"
     fi
   done
+}
 
-  # Config variable override from file
-  # Use isolated HOME to prevent user's real ~/.muxmrc (e.g. PROFILE_NAME) from
-  # applying a profile that overwrites CRF_VALUE after config-file loading.
-  local cfg_var_dir="$TESTDIR/config_var_test"
-  local cfg_var_home="$TESTDIR/config_var_home"
-  mkdir -p "$cfg_var_dir" "$cfg_var_home"
-  cat > "$cfg_var_dir/.muxmrc" <<'EOF'
-CRF_VALUE=14
-PRESET_VALUE="slower"
-EOF
-  out="$(MUXM_HOME="$cfg_var_home" run_muxm_in "$cfg_var_dir" --print-effective-config)"
-  assert_contains "CRF_VALUE                 = 14" "Config file CRF_VALUE override" "$out"
-  assert_contains "PRESET_VALUE              = slower" "Config file PRESET_VALUE override" "$out"
-
-  # ---- Phase 5: Multi-layer config precedence (R39–R42) ----
+_test_config_layering() {
   # Tests the full three-layer stack: user (~/.muxmrc) + project (./.muxmrc) + CLI.
-  # Previous tests only cover single-layer project config or CLI overrides independently.
+  local out
 
   local layer_home="$TESTDIR/config_layer_home"
   local layer_proj="$TESTDIR/config_layer_project"
@@ -770,6 +798,10 @@ PROFEOF
   # With CLI override — CLI profile wins
   out="$(MUXM_HOME="$layer_home" run_muxm_in "$TESTDIR" --profile streaming --print-effective-config)"
   assert_contains "streaming" "Config layering: CLI --profile overrides user config PROFILE_NAME" "$out"
+}
+
+_test_config_validation() {
+  local out
 
   # ---- Invalid FFMPEG_LOGLEVEL in config file ----
   local loglevel_home="$TESTDIR/loglevel_test_home"
@@ -818,6 +850,22 @@ EOF
   local ocr_out
   ocr_out="$(run_muxm --ocr-tool pgsrip --print-effective-config)"
   assert_contains "SUB_OCR_TOOL              = pgsrip" "--ocr-tool sets SUB_OCR_TOOL in effective config" "$ocr_out"
+}
+
+# === Suite: Config Precedence ===
+# Validates layered configuration: --print-effective-config output, CLI flags overriding
+# profile defaults, project-level .muxmrc loading, --create-config / --force-create-config
+# file generation, and per-variable overrides from config files.
+test_config() {
+  section "Configuration Precedence"
+
+  local cfg_dir="$TESTDIR/config_test"
+  mkdir -p "$cfg_dir"
+
+  _test_config_effective
+  _test_config_create
+  _test_config_layering
+  _test_config_validation
 }
 
 # === Suite: Profile Variable Assignment ===
@@ -1053,21 +1101,27 @@ test_video() {
   # should include vbv-maxrate and vbv-bufsize in the x265 params.
   # Must use an H.264 source to force x265 re-encoding (an HEVC source may
   # be video-copied if a profile sets VIDEO_COPY_IF_COMPLIANT=1, skipping x265).
+  # Uses --ffmpeg-loglevel info so x265 prints its VBV/HRD configuration to
+  # the terminal.  Falls back to the workdir log (which contains the full
+  # ffmpeg command) by extracting the exact log path from muxm's "Logging to"
+  # line rather than using a fragile find glob.
   local vbv_outfile="$TESTDIR/vid_level_vbv.mp4"
   log "Encoding with --level 5.1 (VBV injection test)..."
   out="$(run_muxm --level 5.1 --crf 28 --preset ultrafast --no-video-copy-if-compliant \
+    --ffmpeg-loglevel info --no-hide-banner \
     "$TESTDIR/basic_sdr_subs.mkv" "$vbv_outfile")"
-  if echo "$out" | grep -qiE "vbv-maxrate|vbv-bufsize"; then
+  if echo "$out" | grep -qiE "vbv-maxrate|vbv-bufsize|vbv.?hrd"; then
     pass "--level 5.1: VBV params found in terminal output"
   else
-    # Check workdir log file (-K preserves it)
+    # Extract the exact log path from muxm's "Logging to <path>" line
     local vbv_log
-    vbv_log="$(find "$TESTDIR" -path '*/.muxm.tmp.*/muxm.*.log' 2>/dev/null \
-      | sort | tail -1)"
+    vbv_log="$(echo "$out" | sed -n 's/.*Logging to \(.*\.log\).*/\1/p' | head -1)"
     if [[ -n "$vbv_log" && -f "$vbv_log" ]] && grep -qiE "vbv-maxrate|vbv-bufsize" "$vbv_log"; then
       pass "--level 5.1: VBV params found in workdir log"
     else
-      skip "--level 5.1: VBV keywords not found in output or workdir log"
+      fail "--level 5.1: VBV keywords not found in output or workdir log"
+      (( VERBOSE )) && echo "    Log: ${vbv_log:-not found}"
+      (( VERBOSE )) && echo "    Output: ${out:0:500}"
     fi
   fi
 }
@@ -1843,41 +1897,46 @@ test_edge() {
 # return values via stdout or exit code. Validates edge cases not exercised
 # by encode pipelines.
 #
-# NOTE: Helper functions defined below (_test_codec_rank, _test_commentary,
-# _test_forced, _test_sdh, _test_text_codec, _test_direct_play, _test_lossless,
-# _test_transcode_target, _test_lang_match, _test_loglevel, _test_preset,
-# _test_valid_profile, _test_lossless_muxable, muxm_fn) are defined at global
-# scope because bash has no nested function scoping.  They are only called
-# within test_unit and should not be invoked elsewhere.
-test_unit() {
-  section "Pure-Function Unit Tests"
+# NOTE: Helper functions used by test_unit sub-functions are defined at global
+# scope because bash has no nested function scoping.  muxm_fn is hoisted here
+# (out of the former test_unit body) so all sub-functions can call it.  The
+# _test_* wrappers (_test_codec_rank, _test_commentary, _test_forced, _test_sdh,
+# _test_text_codec, _test_direct_play, _test_lossless, _test_transcode_target,
+# _test_lang_match, _test_loglevel, _test_preset, _test_valid_profile,
+# _test_lossless_muxable) are defined inside the sub-functions that use them.
 
-  # Helper: run a function from muxm in isolation.
-  # Extracts function definitions and evaluates them in a subshell.
-  # Usage: muxm_fn FUNCTION_NAME [args...]
-  #   Captures everything from "^FUNCTION_NAME(){" through the matching "^}"
-  #   plus any needed variable defaults, then calls the function.
-  # ASSUMES: Functions in muxm are defined as "fname() {" at column 0 with the
-  #   closing "}" also at column 0.  Will break silently if muxm switches to
-  #   "function fname {" style or indents the closing brace.
-  muxm_fn() {
-    local fn="$1"; shift
-    local body
-    body="$(awk "/^${fn}\\(\\)[[:space:]]*\\{/,/^\\}/" "$MUXM")"
-    if [[ -z "$body" ]]; then
-      skip "Function $fn not found in muxm"
-      return
-    fi
-    # Some functions reference other helpers — extract dependencies too
-    local deps=""
-    case "$fn" in
-      _audio_descriptive_title)
-        deps="$(awk '/^_channel_label\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
-        ;;
-    esac
-    bash -c "$deps"$'\n'"$body"$'\n'"$fn \"\$@\"" -- "$@"
-  }
+# Helper: run a function from muxm in isolation.
+# Extracts function definitions and evaluates them in a subshell.
+# Usage: muxm_fn FUNCTION_NAME [args...]
+#   Captures everything from "^FUNCTION_NAME(){" through the matching "^}"
+#   plus any needed variable defaults, then calls the function.
+# ASSUMES: Functions in muxm are defined as "fname() {" at column 0 with the
+#   closing "}" also at column 0.  Will break silently if muxm switches to
+#   "function fname {" style or indents the closing brace.
+muxm_fn() {
+  local fn="$1"; shift
+  local body
+  body="$(awk "/^${fn}\\(\\)[[:space:]]*\\{/,/^\\}/" "$MUXM")"
+  if [[ -z "$body" ]]; then
+    skip "Function $fn not found in muxm"
+    return
+  fi
+  # Some functions reference other helpers — extract dependencies too
+  local deps=""
+  case "$fn" in
+    _audio_descriptive_title)
+      deps="$(awk '/^_channel_label\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+      ;;
+  esac
+  bash -c "$deps"$'\n'"$body"$'\n'"$fn \"\$@\"" -- "$@"
+}
 
+# --- test_unit sub-functions ---
+# Organized by the muxm subsystem they exercise.  Each sub-function is
+# independently readable; they execute sequentially in the dispatcher and
+# share only the global muxm_fn helper and PASS/FAIL/SKIP counters.
+
+_test_unit_audio_helpers() {
   # ---- _channel_label ----
   local result
   result="$(muxm_fn _channel_label 1 short)";  if [[ "$result" == "mono" ]]; then pass "_channel_label(1,short)=mono"; else fail "_channel_label(1,short) expected 'mono', got '$result'"; fi
@@ -1923,80 +1982,6 @@ test_unit() {
   _test_commentary "Audio Description" 0 "_audio_is_commentary('Audio Description')=match"
   _test_commentary "" 1 "_audio_is_commentary('')=no match (empty)"
   _test_commentary "Comentario del director" 0 "_audio_is_commentary('Comentario...')=match (Spanish)"
-
-  # ---- _is_forced_title ----
-  _test_forced() {
-    local title="$1" expected="$2" label="$3"
-    local body actual
-    body="$(awk '/^_is_forced_title\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
-    bash -c "$body"$'\n'"_is_forced_title \"\$1\"" -- "$title" && actual=0 || actual=1
-    if [[ "$actual" == "$expected" ]]; then pass "$label"; else fail "$label — expected $expected, got $actual"; fi
-  }
-  _test_forced "Forced" 0 "_is_forced_title('Forced')=match"
-  _test_forced "Signs & Songs" 0 "_is_forced_title('Signs & Songs')=match"
-  _test_forced "Foreign Parts Only" 0 "_is_forced_title('Foreign Parts Only')=match"
-  _test_forced "English" 1 "_is_forced_title('English')=no match"
-  _test_forced "" 1 "_is_forced_title('')=no match (empty)"
-
-  # ---- _is_sdh_title ----
-  _test_sdh() {
-    local title="$1" expected="$2" label="$3"
-    local body actual
-    body="$(awk '/^_is_sdh_title\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
-    bash -c "$body"$'\n'"_is_sdh_title \"\$1\"" -- "$title" && actual=0 || actual=1
-    if [[ "$actual" == "$expected" ]]; then pass "$label"; else fail "$label — expected $expected, got $actual"; fi
-  }
-  _test_sdh "English SDH" 0 "_is_sdh_title('English SDH')=match"
-  _test_sdh "English (CC)" 0 "_is_sdh_title('English (CC)')=match"
-  _test_sdh "Hearing Impaired" 0 "_is_sdh_title('Hearing Impaired')=match"
-  _test_sdh "English" 1 "_is_sdh_title('English')=no match"
-  _test_sdh "history" 1 "_is_sdh_title('history')=no match (false positive guard: 'hi' in 'history')"
-  _test_sdh "HI" 0 "_is_sdh_title('HI')=match (standalone HI)"
-  _test_sdh "" 1 "_is_sdh_title('')=no match (empty)"
-
-  # ---- _is_text_sub_codec ----
-  _test_text_codec() {
-    local codec="$1" expected="$2" label="$3"
-    local body actual
-    body="$(awk '/^_is_text_sub_codec\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
-    bash -c "$body"$'\n'"_is_text_sub_codec \"\$1\"" -- "$codec" && actual=0 || actual=1
-    if [[ "$actual" == "$expected" ]]; then pass "$label"; else fail "$label — expected $expected, got $actual"; fi
-  }
-  _test_text_codec "subrip" 0 "_is_text_sub_codec('subrip')=text"
-  _test_text_codec "ass" 0 "_is_text_sub_codec('ass')=text"
-  _test_text_codec "mov_text" 0 "_is_text_sub_codec('mov_text')=text"
-  _test_text_codec "hdmv_pgs_subtitle" 1 "_is_text_sub_codec('hdmv_pgs_subtitle')=bitmap"
-  _test_text_codec "dvd_subtitle" 1 "_is_text_sub_codec('dvd_subtitle')=bitmap"
-  _test_text_codec "webvtt" 0 "_is_text_sub_codec('webvtt')=text"
-
-  # ---- filesize_pretty ----
-  # Test all four code paths (GB, MB, KB, bytes) + file-not-found
-  local fsz_dir="$TESTDIR/filesize_test"
-  mkdir -p "$fsz_dir"
-
-  # File not found
-  result="$(muxm_fn filesize_pretty "$fsz_dir/nonexistent" 2>/dev/null)" || true
-  if [[ "$result" == *"not found"* ]]; then pass "filesize_pretty(nonexistent)=not found"; else fail "filesize_pretty(nonexistent) expected 'not found', got '$result'"; fi
-
-  # 0 bytes
-  touch "$fsz_dir/empty"
-  result="$(muxm_fn filesize_pretty "$fsz_dir/empty")"
-  if [[ "$result" == "0 bytes" ]]; then pass "filesize_pretty(0 bytes)"; else fail "filesize_pretty(0 bytes) expected '0 bytes', got '$result'"; fi
-
-  # 512 bytes (bytes path)
-  dd if=/dev/zero of="$fsz_dir/small" bs=512 count=1 2>/dev/null
-  result="$(muxm_fn filesize_pretty "$fsz_dir/small")"
-  if [[ "$result" == "512 bytes" ]]; then pass "filesize_pretty(512 bytes)"; else fail "filesize_pretty(512 bytes) expected '512 bytes', got '$result'"; fi
-
-  # 1024 bytes (KB path)
-  dd if=/dev/zero of="$fsz_dir/onekb" bs=1024 count=1 2>/dev/null
-  result="$(muxm_fn filesize_pretty "$fsz_dir/onekb")"
-  if [[ "$result" == *"KB"* ]]; then pass "filesize_pretty(1 KB)"; else fail "filesize_pretty(1 KB) expected 'KB', got '$result'"; fi
-
-  # ~1.5 MB (MB path)
-  dd if=/dev/zero of="$fsz_dir/onemb" bs=1024 count=1536 2>/dev/null
-  result="$(muxm_fn filesize_pretty "$fsz_dir/onemb")"
-  if [[ "$result" == *"MB"* ]]; then pass "filesize_pretty(~1.5 MB)"; else fail "filesize_pretty(~1.5 MB) expected 'MB', got '$result'"; fi
 
   # ---- audio_is_direct_play_copyable ----
   # Gatekeeper for the audio pipeline's biggest branch: copy vs transcode.
@@ -2081,6 +2066,74 @@ test_unit() {
   _test_lang_match ""    "eng"     1 "_audio_lang_matches('', pref='eng')=no match (empty)"
   _test_lang_match "eng" "eng"     0 "_audio_lang_matches('eng', pref='eng')=match (single pref)"
 
+  # ---- audio_lossless_muxable ----
+  # Tests container+codec compatibility matrix for lossless passthrough.
+  # Depends on MUX_FORMAT global.
+  _test_lossless_muxable() {
+    local codec="$1" format="$2" expected="$3" label="$4"
+    local body actual
+    body="$(awk '/^audio_lossless_muxable\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+    bash -c "MUX_FORMAT=\"\$2\""$'\n'"$body"$'\n'"audio_lossless_muxable \"\$1\"" -- "$codec" "$format" && actual=0 || actual=1
+    if [[ "$actual" == "$expected" ]]; then pass "$label"; else fail "$label — expected $expected, got $actual"; fi
+  }
+  _test_lossless_muxable "truehd" "matroska" 0 "audio_lossless_muxable('truehd','matroska')=muxable"
+  _test_lossless_muxable "flac"   "matroska" 0 "audio_lossless_muxable('flac','matroska')=muxable"
+  _test_lossless_muxable "alac"   "mp4"      0 "audio_lossless_muxable('alac','mp4')=muxable"
+  _test_lossless_muxable "flac"   "mp4"      0 "audio_lossless_muxable('flac','mp4')=muxable"
+  _test_lossless_muxable "truehd" "mp4"      1 "audio_lossless_muxable('truehd','mp4')=not muxable"
+  _test_lossless_muxable "dts"    "mp4"      1 "audio_lossless_muxable('dts','mp4')=not muxable"
+  _test_lossless_muxable "alac"   "mov"      0 "audio_lossless_muxable('alac','mov')=muxable"
+  _test_lossless_muxable "truehd" "mov"      1 "audio_lossless_muxable('truehd','mov')=not muxable"
+}
+
+_test_unit_sub_helpers() {
+  # ---- _is_forced_title ----
+  _test_forced() {
+    local title="$1" expected="$2" label="$3"
+    local body actual
+    body="$(awk '/^_is_forced_title\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+    bash -c "$body"$'\n'"_is_forced_title \"\$1\"" -- "$title" && actual=0 || actual=1
+    if [[ "$actual" == "$expected" ]]; then pass "$label"; else fail "$label — expected $expected, got $actual"; fi
+  }
+  _test_forced "Forced" 0 "_is_forced_title('Forced')=match"
+  _test_forced "Signs & Songs" 0 "_is_forced_title('Signs & Songs')=match"
+  _test_forced "Foreign Parts Only" 0 "_is_forced_title('Foreign Parts Only')=match"
+  _test_forced "English" 1 "_is_forced_title('English')=no match"
+  _test_forced "" 1 "_is_forced_title('')=no match (empty)"
+
+  # ---- _is_sdh_title ----
+  _test_sdh() {
+    local title="$1" expected="$2" label="$3"
+    local body actual
+    body="$(awk '/^_is_sdh_title\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+    bash -c "$body"$'\n'"_is_sdh_title \"\$1\"" -- "$title" && actual=0 || actual=1
+    if [[ "$actual" == "$expected" ]]; then pass "$label"; else fail "$label — expected $expected, got $actual"; fi
+  }
+  _test_sdh "English SDH" 0 "_is_sdh_title('English SDH')=match"
+  _test_sdh "English (CC)" 0 "_is_sdh_title('English (CC)')=match"
+  _test_sdh "Hearing Impaired" 0 "_is_sdh_title('Hearing Impaired')=match"
+  _test_sdh "English" 1 "_is_sdh_title('English')=no match"
+  _test_sdh "history" 1 "_is_sdh_title('history')=no match (false positive guard: 'hi' in 'history')"
+  _test_sdh "HI" 0 "_is_sdh_title('HI')=match (standalone HI)"
+  _test_sdh "" 1 "_is_sdh_title('')=no match (empty)"
+
+  # ---- _is_text_sub_codec ----
+  _test_text_codec() {
+    local codec="$1" expected="$2" label="$3"
+    local body actual
+    body="$(awk '/^_is_text_sub_codec\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+    bash -c "$body"$'\n'"_is_text_sub_codec \"\$1\"" -- "$codec" && actual=0 || actual=1
+    if [[ "$actual" == "$expected" ]]; then pass "$label"; else fail "$label — expected $expected, got $actual"; fi
+  }
+  _test_text_codec "subrip" 0 "_is_text_sub_codec('subrip')=text"
+  _test_text_codec "ass" 0 "_is_text_sub_codec('ass')=text"
+  _test_text_codec "mov_text" 0 "_is_text_sub_codec('mov_text')=text"
+  _test_text_codec "hdmv_pgs_subtitle" 1 "_is_text_sub_codec('hdmv_pgs_subtitle')=bitmap"
+  _test_text_codec "dvd_subtitle" 1 "_is_text_sub_codec('dvd_subtitle')=bitmap"
+  _test_text_codec "webvtt" 0 "_is_text_sub_codec('webvtt')=text"
+}
+
+_test_unit_validation_helpers() {
   # ---- is_valid_loglevel ----
   # Validates ffmpeg/ffprobe loglevel strings. Tested indirectly by CLI parser,
   # but a direct unit test catches regressions if a valid level is accidentally
@@ -2141,25 +2194,6 @@ test_unit() {
   _test_valid_profile "nonexistent"       1 "_is_valid_profile('nonexistent')=invalid"
   _test_valid_profile ""                  1 "_is_valid_profile('')=invalid (empty)"
 
-  # ---- audio_lossless_muxable ----
-  # Tests container+codec compatibility matrix for lossless passthrough.
-  # Depends on MUX_FORMAT global.
-  _test_lossless_muxable() {
-    local codec="$1" format="$2" expected="$3" label="$4"
-    local body actual
-    body="$(awk '/^audio_lossless_muxable\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
-    bash -c "MUX_FORMAT=\"\$2\""$'\n'"$body"$'\n'"audio_lossless_muxable \"\$1\"" -- "$codec" "$format" && actual=0 || actual=1
-    if [[ "$actual" == "$expected" ]]; then pass "$label"; else fail "$label — expected $expected, got $actual"; fi
-  }
-  _test_lossless_muxable "truehd" "matroska" 0 "audio_lossless_muxable('truehd','matroska')=muxable"
-  _test_lossless_muxable "flac"   "matroska" 0 "audio_lossless_muxable('flac','matroska')=muxable"
-  _test_lossless_muxable "alac"   "mp4"      0 "audio_lossless_muxable('alac','mp4')=muxable"
-  _test_lossless_muxable "flac"   "mp4"      0 "audio_lossless_muxable('flac','mp4')=muxable"
-  _test_lossless_muxable "truehd" "mp4"      1 "audio_lossless_muxable('truehd','mp4')=not muxable"
-  _test_lossless_muxable "dts"    "mp4"      1 "audio_lossless_muxable('dts','mp4')=not muxable"
-  _test_lossless_muxable "alac"   "mov"      0 "audio_lossless_muxable('alac','mov')=muxable"
-  _test_lossless_muxable "truehd" "mov"      1 "audio_lossless_muxable('truehd','mov')=not muxable"
-
   # ---- _valid_profiles_display ----
   # Verify the comma-separated format output for user-facing messages.
   local vpd_body vpd_constants vpd_result
@@ -2170,6 +2204,51 @@ test_unit() {
   if [[ "$vpd_result" == *","* ]]; then pass "_valid_profiles_display returns comma-separated list"; else fail "_valid_profiles_display expected commas, got '$vpd_result'"; fi
   if [[ "$vpd_result" == *"streaming"* ]]; then pass "_valid_profiles_display includes 'streaming'"; else fail "_valid_profiles_display missing 'streaming' in '$vpd_result'"; fi
   if [[ "$vpd_result" == *"universal"* ]]; then pass "_valid_profiles_display includes 'universal'"; else fail "_valid_profiles_display missing 'universal' in '$vpd_result'"; fi
+}
+
+_test_unit_filesize() {
+  # ---- filesize_pretty ----
+  # Test all four code paths (GB, MB, KB, bytes) + file-not-found
+  local fsz_dir="$TESTDIR/filesize_test"
+  mkdir -p "$fsz_dir"
+
+  local result
+
+  # File not found
+  result="$(muxm_fn filesize_pretty "$fsz_dir/nonexistent" 2>/dev/null)" || true
+  if [[ "$result" == *"not found"* ]]; then pass "filesize_pretty(nonexistent)=not found"; else fail "filesize_pretty(nonexistent) expected 'not found', got '$result'"; fi
+
+  # 0 bytes
+  touch "$fsz_dir/empty"
+  result="$(muxm_fn filesize_pretty "$fsz_dir/empty")"
+  if [[ "$result" == "0 bytes" ]]; then pass "filesize_pretty(0 bytes)"; else fail "filesize_pretty(0 bytes) expected '0 bytes', got '$result'"; fi
+
+  # 512 bytes (bytes path)
+  dd if=/dev/zero of="$fsz_dir/small" bs=512 count=1 2>/dev/null
+  result="$(muxm_fn filesize_pretty "$fsz_dir/small")"
+  if [[ "$result" == "512 bytes" ]]; then pass "filesize_pretty(512 bytes)"; else fail "filesize_pretty(512 bytes) expected '512 bytes', got '$result'"; fi
+
+  # 1024 bytes (KB path)
+  dd if=/dev/zero of="$fsz_dir/onekb" bs=1024 count=1 2>/dev/null
+  result="$(muxm_fn filesize_pretty "$fsz_dir/onekb")"
+  if [[ "$result" == *"KB"* ]]; then pass "filesize_pretty(1 KB)"; else fail "filesize_pretty(1 KB) expected 'KB', got '$result'"; fi
+
+  # ~1.5 MB (MB path)
+  dd if=/dev/zero of="$fsz_dir/onemb" bs=1024 count=1536 2>/dev/null
+  result="$(muxm_fn filesize_pretty "$fsz_dir/onemb")"
+  if [[ "$result" == *"MB"* ]]; then pass "filesize_pretty(~1.5 MB)"; else fail "filesize_pretty(~1.5 MB) expected 'MB', got '$result'"; fi
+}
+
+# === Suite: Pure-Function Unit Tests ===
+# Direct tests for deterministic helper functions that take arguments and
+# return values via stdout or exit code. Validates edge cases not exercised
+# by encode pipelines.
+test_unit() {
+  section "Pure-Function Unit Tests"
+  _test_unit_audio_helpers
+  _test_unit_sub_helpers
+  _test_unit_validation_helpers
+  _test_unit_filesize
 }
 
 # === Suite: Profile End-to-End (real encodes with profiles) ===
