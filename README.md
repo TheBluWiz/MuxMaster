@@ -1,10 +1,12 @@
-# ![muxm](./assets/muxm_header_small.png) MuxMaster
+# ![muxm](assets/muxm_header_small.png) MuxMaster
 
-![Version](https://img.shields.io/badge/version-1.0.0-blue) ![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey) ![License](https://img.shields.io/badge/license-freeware-green)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue)](https://github.com/TheBluWiz/MuxMaster/releases)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#compatibility)
+[![License](https://img.shields.io/badge/license-freeware-green)](#license)
 
 **MuxMaster** (`muxm`) — a single-command video repacking and encoding utility that handles Dolby Vision, HDR10, audio track selection, subtitle processing, and container muxing so you don't have to. Pick a profile, point it at a file, and get a properly encoded output without memorizing ffmpeg flags.
 
-```bash
+```
 # First-time setup (macOS/Linux)
 muxm --setup
 
@@ -13,6 +15,7 @@ muxm --profile atv-directplay-hq movie.mkv
 ```
 
 ## Table of Contents
+
 - [Why MuxMaster?](#why)
 - [Format Profiles](#profiles)
 - [How It Works](#howitworks)
@@ -28,7 +31,7 @@ muxm --profile atv-directplay-hq movie.mkv
 
 ---
 
-## 💡 Why MuxMaster? <a id="why"></a>
+## 💡 Why MuxMaster?
 
 Getting a Blu-ray rip to direct-play correctly on an Apple TV, a Roku, or through Plex — without the server transcoding on the fly — is a surprisingly deep problem. The video might be Dolby Vision Profile 7 that needs conversion to Profile 8.1. The audio might be TrueHD, which your player can't direct-play, so you need E-AC-3 — but you also want a stereo AAC fallback for when you're watching on a phone. The forced subtitles need to be burned in because MP4 containers don't handle PGS bitmaps. And the color space metadata needs to survive the whole process.
 
@@ -44,16 +47,16 @@ Configuration is where the design philosophy comes together. Most CLI tools expe
 
 ---
 
-## 🎯 Format Profiles <a id="profiles"></a>
+## 🎯 Format Profiles
 
 Profiles are named presets that configure `muxm` for a specific use case in a single flag. Every setting a profile changes can be individually overridden with CLI flags.
 
-```bash
-muxm --profile <name> input.mkv
+```
+muxm --profile <n> input.mkv
 ```
 
 | Profile | Goal | Container | Video | Audio | DV |
-|---|---|---|---|---|---|
+| --- | --- | --- | --- | --- | --- |
 | `dv-archival` | Lossless preservation | MKV | Copy (no re-encode) | Lossless passthrough | Preserve |
 | `hdr10-hq` | Max HDR10 quality | MKV | HEVC CRF 17 | Lossless + stereo fallback | Strip |
 | `atv-directplay-hq` | Apple TV Direct Play | MP4 | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | P8.1 auto |
@@ -65,7 +68,7 @@ muxm --profile <name> input.mkv
 
 For collectors who want bit-perfect preservation. Copies video without re-encoding, passes lossless audio through, keeps all subtitles and chapters, and generates a JSON report. Skips processing entirely if the source already matches.
 
-```bash
+```
 muxm --profile dv-archival movie.mkv
 ```
 
@@ -73,7 +76,7 @@ muxm --profile dv-archival movie.mkv
 
 Strips Dolby Vision layers and re-encodes to clean HDR10 HEVC at CRF 17. Preserves lossless audio (TrueHD, DTS-HD MA, FLAC) and adds a stereo fallback track. MKV output.
 
-```bash
+```
 muxm --profile hdr10-hq movie.mkv
 ```
 
@@ -81,7 +84,7 @@ muxm --profile hdr10-hq movie.mkv
 
 Targets true Direct Play on Apple TV 4K via Plex: MP4 container, HEVC Main10 with DV Profile 8.1 when possible, E-AC-3 surround with AAC stereo fallback, and forced subtitle burn-in. Copies compliant video without re-encoding. Skips processing if source is already ATV-compliant.
 
-```bash
+```
 muxm --profile atv-directplay-hq movie.mkv
 ```
 
@@ -89,7 +92,7 @@ muxm --profile atv-directplay-hq movie.mkv
 
 Optimized for Plex, Jellyfin, and Emby on modern clients: Shield, Fire TV, Roku Ultra, smart TVs, and web browsers. HEVC CRF 20 with E-AC-3 surround at streaming-friendly bitrates, AAC stereo fallback, and soft subtitles. Strips DV and keeps HDR10. Balances quality with file size.
 
-```bash
+```
 muxm --profile streaming movie.mkv
 ```
 
@@ -97,7 +100,7 @@ muxm --profile streaming movie.mkv
 
 Tuned for animation content: lower psy-rd/psy-rdoq to avoid ringing on hard cel edges, 10-bit even for SDR to eliminate banding in gradients, and lossless audio passthrough. MKV container preserves styled ASS/SSA subtitles. Keeps all subtitle tracks (up to 6) and chapter markers.
 
-```bash
+```
 muxm --profile animation movie.mkv
 ```
 
@@ -105,7 +108,7 @@ muxm --profile animation movie.mkv
 
 Plays on everything: old Rokus, mobile devices, web browsers, non-HDR TVs. Tone-maps HDR to SDR, encodes to H.264, forces AAC stereo audio, burns forced subtitles, exports others as external SRT, and strips chapters and non-essential metadata.
 
-```bash
+```
 muxm --profile universal movie.mkv
 ```
 
@@ -113,7 +116,7 @@ muxm --profile universal movie.mkv
 
 Profiles are starting points — every setting can be overridden with CLI flags:
 
-```bash
+```
 # Use hdr10-hq but with a different CRF and no stereo fallback
 muxm --profile hdr10-hq --crf 20 --no-stereo-fallback movie.mkv
 
@@ -126,7 +129,10 @@ muxm --profile atv-directplay-hq --output-ext mkv movie.mkv
 
 ---
 
-## 🔧 How It Works <a id="howitworks"></a>
+## 🔧 How It Works
+
+<details>
+<summary>Expand to see the full encoding pipeline</summary>
 
 When you run `muxm`, the script executes a multi-stage pipeline that inspects the source file, makes codec and container decisions based on the active profile, processes each stream type independently, and assembles the final output. Here's what happens under the hood:
 
@@ -146,9 +152,11 @@ When you run `muxm`, the script executes a multi-stage pipeline that inspects th
 
 If any stage fails, `muxm` logs the failure, cleans up incomplete temp files, and exits with a descriptive error code. The `--dry-run` flag executes the entire decision pipeline without writing real output, so you can preview exactly what `muxm` would do before committing to an encode.
 
+</details>
+
 ---
 
-## 📦 Installation <a id="installation"></a>
+## 📦 Installation
 
 ### Compatibility
 
@@ -156,9 +164,9 @@ If any stage fails, `muxm` logs the failure, cleans up incomplete temp files, an
 
 ### Quick Start
 
-```bash
-git clone https://github.com/TheBluWiz/muxm.git
-cd muxm
+```
+git clone https://github.com/TheBluWiz/MuxMaster.git
+cd MuxMaster
 chmod +x muxm
 muxm --setup                    # installs dependencies, man page, and tab completion
 muxm --profile atv-directplay-hq movie.mkv
@@ -166,18 +174,20 @@ muxm --profile atv-directplay-hq movie.mkv
 
 Optionally, move `muxm` into your PATH:
 
-```bash
+```
 sudo cp muxm /usr/local/bin/muxm
 ```
 
 ### Dependencies
 
 **Required:**
+
 - **ffmpeg** and **ffprobe** – core encoding and media inspection
 - **jq** – JSON parsing for stream metadata and reporting
 - **bc** – arithmetic evaluation for frame-rate and bitrate calculations
 
 **Optional (auto-disabled if missing):**
+
 - **ffmpeg with libass** (`ffmpeg-full` on Homebrew) – required for subtitle burn-in (`--sub-burn-forced`); the standard `ffmpeg` package works for all other features
 - **dovi_tool** – Dolby Vision RPU extraction/injection; DV handling is automatically disabled if missing
 - **MP4Box** (gpac) – DV container-level signaling verification
@@ -186,7 +196,7 @@ sudo cp muxm /usr/local/bin/muxm
 
 ### Setup Helpers
 
-```bash
+```
 # First-time setup: dependencies, man page, and tab completion
 muxm --setup
 
@@ -206,20 +216,21 @@ muxm --uninstall-completions
 
 ---
 
-## 🚀 Usage <a id="usage"></a>
+## 🚀 Usage
 
-```bash
+```
 muxm [options] <source> [target.mp4]
 ```
 
 ### Arguments
+
 - `<source>` – Input media file (e.g., `movie.mkv`)
 - `[target]` – Output file (optional; defaults to `<source>.<output-ext>`)
 
 ### Key Flags
 
 | Flag | Description |
-|---|---|
+| --- | --- |
 | `--profile NAME` | Apply a format profile (`dv-archival`, `hdr10-hq`, `atv-directplay-hq`, `streaming`, `animation`, `universal`) |
 | `--dry-run` | Simulate without writing output |
 | `--crf N` | Set video CRF value |
@@ -241,7 +252,7 @@ muxm [options] <source> [target.mp4]
 ### Setup & Management
 
 | Flag | Description |
-|---|---|
+| --- | --- |
 | `--setup` | Full first-time setup: dependencies, man page, and tab completion |
 | `--install-dependencies` | Install required and optional tools via Homebrew/pipx |
 | `--install-man` | Install the `muxm(1)` manual page |
@@ -254,7 +265,7 @@ Run `muxm --help` for the full flag reference.
 
 ---
 
-## ⚙️ Configuration <a id="configuration"></a>
+## ⚙️ Configuration
 
 `muxm` has a layered configuration system designed so you set your preferences once and override only when you need to.
 
@@ -265,7 +276,7 @@ Hardcoded defaults
   → /etc/.muxmrc          (system-wide)
     → ~/.muxmrc            (user defaults)
       → ./.muxmrc          (project-specific)
-        → --profile <name> (format profile)
+        → --profile <n> (format profile)
           → CLI flags      (highest — always wins)
 ```
 
@@ -273,7 +284,7 @@ Hardcoded defaults
 
 Add to any `.muxmrc` file:
 
-```bash
+```
 # ~/.muxmrc — always use Apple TV Direct Play unless overridden
 PROFILE_NAME="atv-directplay-hq"
 ```
@@ -284,12 +295,12 @@ CLI `--profile` always overrides a config-file `PROFILE_NAME`.
 
 Use `--create-config` to generate a full `.muxmrc` file pre-configured for a specific profile:
 
-```bash
+```
 muxm --create-config <scope> [profile]
 ```
 
 | Scope | Path | Use case |
-|---|---|---|
+| --- | --- | --- |
 | `system` | `/etc/.muxmrc` | Organization-wide defaults (requires sudo) |
 | `user` | `~/.muxmrc` | Personal defaults across all projects |
 | `project` | `$PWD/.muxmrc` | Per-project settings |
@@ -304,7 +315,7 @@ Profile defaults to `atv-directplay-hq` if omitted. Use `--force-create-config` 
 
 When configs cascade through multiple layers, it's easy to lose track of what's actually active. `--print-effective-config` resolves every layer and shows you the final result before anything is encoded:
 
-```bash
+```
 # See what the resolved config looks like after all sources merge
 muxm --profile hdr10-hq --crf 20 --print-effective-config
 ```
@@ -313,27 +324,21 @@ Every variable is displayed grouped by section, with the active profile name and
 
 ---
 
-## 📋 Additional Features <a id="additionalfeatures"></a>
+## 📋 Additional Features
 
 Beyond profiles and the core encoding pipeline, `muxm` ships with a set of operational features that make it safer and easier to use in practice:
 
 - **Skip-if-Ideal** – Before encoding, `muxm` inspects the source to determine if it already matches the target profile. If it does, the file is linked or copied without re-encoding, saving time and avoiding generation loss. Enabled per-profile or via `--skip-if-ideal`.
-
 - **Conflict Warnings** – Running `--profile dv-archival --no-dv` doesn't error out — it warns you that the combination is contradictory and proceeds with your explicit flags taking precedence. The tool trusts you but lets you know when something looks wrong.
-
 - **Dry-Run Mode** – `--dry-run` executes the entire decision pipeline (profile resolution, codec detection, DV identification, audio selection) and prints what it would do, without writing any output files.
-
 - **JSON Reporting** – `--report-json` generates a machine-readable JSON report alongside the output file, documenting every decision, warning, codec mapping, and stream disposition from the run.
-
 - **Checksum Verification** – Optionally writes a SHA-256 checksum file for the output to verify integrity after transfer or archival.
-
 - **Man Page** – `muxm --install-man` installs a full `muxm(1)` manual page with complete flag reference, profile documentation, and examples accessible via `man muxm`.
-
 - **Tab Completion** – `muxm --install-completions` installs bash/zsh tab completion for all flags, profiles, presets, and config scopes. Completes media file extensions when providing input files.
 
 ---
 
-## ❓ FAQ <a id="faq"></a>
+## ❓ FAQ
 
 **`muxm` says it requires Bash 4.3+ but I'm on macOS.**
 macOS ships Bash 3.2 (2007) due to licensing. Install a modern version with `brew install bash`, then make sure `/opt/homebrew/bin/bash` (Apple Silicon) or `/usr/local/bin/bash` (Intel) appears before `/bin/bash` in your `$PATH`.
@@ -350,7 +355,7 @@ If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you wa
 **Can I process a batch of files?**
 `muxm` is a per-file tool by design. For a batch, a simple shell loop works:
 
-```bash
+```
 for f in *.mkv; do muxm --profile streaming "$f"; done
 ```
 
@@ -364,32 +369,32 @@ CRF-based encoding targets quality, not file size. A visually complex source (gr
 
 ---
 
-## 📄 License <a id="license"></a>
+## 📄 License
 
 MuxMaster is freeware for personal, non-commercial use.
 Any business, government, or organizational use requires a paid license.
 
-Full license text available in [LICENSE.md](./LICENSE.md)
+Full license text available in [LICENSE.md](LICENSE.md)
 
 ---
 
-## 🐛 Bug Reports <a id="bugreports"></a>
+## 🐛 Bug Reports
 
-Found a bug? Please [open an issue on GitHub](https://github.com/TheBluWiz/muxm/issues). Include the output of `muxm --version`, the profile and flags you used, and any relevant log output. A `--dry-run` dump or `--report-json` output is especially helpful.
+Found a bug? Please [open an issue on GitHub](https://github.com/TheBluWiz/MuxMaster/issues). Include the output of `muxm --version`, the profile and flags you used, and any relevant log output. A `--dry-run` dump or `--report-json` output is especially helpful.
 
-This is a solo-maintained project and I'm not accepting outside code contributions at this time.
+This is a solo-maintained project and I'm not accepting outside code contributions at this time. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ---
 
-## 📬 Contact <a id="contact"></a>
+## 📬 Contact
 
 If you're using MuxMaster, I'd love to hear about it — what's working, what's not, what workflows you're using it for. This is a solo project and real-world feedback shapes what gets built next.
 
-- **Bug reports** → [GitHub Issues](https://github.com/TheBluWiz/muxm/issues)
+- **Bug reports** → [GitHub Issues](https://github.com/TheBluWiz/MuxMaster/issues)
 - **Everything else** (feedback, licensing, questions) → [thebluwiz@thoughtspace.place](mailto:thebluwiz@thoughtspace.place)
 
 ---
 
-## 👤 Author <a id="author"></a>
+## 👤 Author
 
 Jamey Wicklund ([@TheBluWiz](https://github.com/TheBluWiz))
