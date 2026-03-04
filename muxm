@@ -264,6 +264,19 @@ run_with_spinner() {
   return $?
 }
 
+# _make_progress_pipe — Create a named pipe (FIFO) for ffmpeg -progress output.
+# Args: $1 — path for the FIFO
+# Returns: 0 if FIFO created successfully, 1 on failure (with warning logged).
+# On failure, callers should fall back to spinner-only mode (no -progress flag).
+_make_progress_pipe() {
+  local pipe_path="$1"
+  if mkfifo "$pipe_path" 2>/dev/null; then
+    return 0
+  fi
+  warn "Could not create progress pipe ($pipe_path) — progress display unavailable."
+  return 1
+}
+
 # ---- Progress bar — percentage-based for ffmpeg encodes ----
 # Reads ffmpeg -progress output from a named pipe and renders a terminal bar.
 # Args: $1 = ffmpeg PID, $2 = progress pipe path, $3 = total duration (seconds),
@@ -4022,17 +4035,25 @@ run_video_pipeline() {
     local total_secs
     total_secs="$(_get_source_duration_secs)"
     local progress_pipe="$WORKDIR/encode_progress.pipe"
-    mkfifo "$progress_pipe" 2>/dev/null || true
 
     log "ffmpeg encode command: ffmpeg ${ff_cmd[*]}"
-    ffmpeg "${ff_cmd[@]}" -progress "$progress_pipe" 2>"$WORKDIR/encode.err" &
-    local enc_pid=$!
-    # ffmpeg_progress_bar calls wait internally and returns ffmpeg's exit status
-    if ! ffmpeg_progress_bar "$enc_pid" "$progress_pipe" "$total_secs" "Encoding video"; then
+    if _make_progress_pipe "$progress_pipe"; then
+      ffmpeg "${ff_cmd[@]}" -progress "$progress_pipe" 2>"$WORKDIR/encode.err" &
+      local enc_pid=$!
+      # ffmpeg_progress_bar calls wait internally and returns ffmpeg's exit status
+      if ! ffmpeg_progress_bar "$enc_pid" "$progress_pipe" "$total_secs" "Encoding video"; then
+        rm -f "$progress_pipe" 2>/dev/null || true
+        die 40 "Base video encode failed. See: $WORKDIR/encode.err"
+      fi
       rm -f "$progress_pipe" 2>/dev/null || true
-      die 40 "Base video encode failed. See: $WORKDIR/encode.err"
+    else
+      ffmpeg "${ff_cmd[@]}" 2>"$WORKDIR/encode.err" &
+      local enc_pid=$!
+      spinner "$enc_pid" "Encoding video"
+      if ! wait "$enc_pid" 2>/dev/null; then
+        die 40 "Base video encode failed. See: $WORKDIR/encode.err"
+      fi
     fi
-    rm -f "$progress_pipe" 2>/dev/null || true
 
     # Validate encoded output
     _validate_media_file "$V_BASE" "Base video encode"
@@ -4878,16 +4899,24 @@ run_audio_pipeline(){
     local total_secs
     total_secs="$(_get_source_duration_secs)"
     local a_progress_pipe="$WORKDIR/audio_progress.pipe"
-    mkfifo "$a_progress_pipe" 2>/dev/null || true
 
-    ffmpeg "${transcode_args[@]}" -progress "$a_progress_pipe" 2>"$WORKDIR/audio_primary.err" &
-    local atx_pid=$!
-    # ffmpeg_progress_bar calls wait internally and returns ffmpeg's exit status
-    if ! ffmpeg_progress_bar "$atx_pid" "$a_progress_pipe" "$total_secs" "Transcoding audio"; then
+    if _make_progress_pipe "$a_progress_pipe"; then
+      ffmpeg "${transcode_args[@]}" -progress "$a_progress_pipe" 2>"$WORKDIR/audio_primary.err" &
+      local atx_pid=$!
+      # ffmpeg_progress_bar calls wait internally and returns ffmpeg's exit status
+      if ! ffmpeg_progress_bar "$atx_pid" "$a_progress_pipe" "$total_secs" "Transcoding audio"; then
+        rm -f "$a_progress_pipe" 2>/dev/null || true
+        die 43 "Audio transcode to $tgt_codec failed. See: $WORKDIR/audio_primary.err"
+      fi
       rm -f "$a_progress_pipe" 2>/dev/null || true
-      die 43 "Audio transcode to $tgt_codec failed. See: $WORKDIR/audio_primary.err"
+    else
+      ffmpeg "${transcode_args[@]}" 2>"$WORKDIR/audio_primary.err" &
+      local atx_pid=$!
+      spinner "$atx_pid" "Transcoding audio"
+      if ! wait "$atx_pid" 2>/dev/null; then
+        die 43 "Audio transcode to $tgt_codec failed. See: $WORKDIR/audio_primary.err"
+      fi
     fi
-    rm -f "$a_progress_pipe" 2>/dev/null || true
   fi
 
   # Validate primary audio
@@ -4903,20 +4932,33 @@ run_audio_pipeline(){
     local stereo_total_secs
     stereo_total_secs="$(_get_source_duration_secs)"
     local stereo_progress_pipe="$WORKDIR/stereo_progress.pipe"
-    mkfifo "$stereo_progress_pipe" 2>/dev/null || true
 
-    ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
-      -c:a aac -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO" \
-      -progress "$stereo_progress_pipe" 2>"$WORKDIR/audio_stereo.err" &
-    local stereo_pid=$!
-    # ffmpeg_progress_bar calls wait internally and returns ffmpeg's exit status
-    if ! ffmpeg_progress_bar "$stereo_pid" "$stereo_progress_pipe" "$stereo_total_secs" "Creating stereo fallback"; then
-      warn "Stereo fallback creation failed - continuing without it. See: $WORKDIR/audio_stereo.err"
-      AAC_STEREO=""
+    if _make_progress_pipe "$stereo_progress_pipe"; then
+      ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
+        -c:a aac -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO" \
+        -progress "$stereo_progress_pipe" 2>"$WORKDIR/audio_stereo.err" &
+      local stereo_pid=$!
+      # ffmpeg_progress_bar calls wait internally and returns ffmpeg's exit status
+      if ! ffmpeg_progress_bar "$stereo_pid" "$stereo_progress_pipe" "$stereo_total_secs" "Creating stereo fallback"; then
+        warn "Stereo fallback creation failed - continuing without it. See: $WORKDIR/audio_stereo.err"
+        AAC_STEREO=""
+      else
+        mark_done "Stereo fallback prepared"
+      fi
+      rm -f "$stereo_progress_pipe" 2>/dev/null || true
     else
-      mark_done "Stereo fallback prepared"
+      ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
+        -c:a aac -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO" \
+        2>"$WORKDIR/audio_stereo.err" &
+      local stereo_pid=$!
+      spinner "$stereo_pid" "Creating stereo fallback"
+      if ! wait "$stereo_pid" 2>/dev/null; then
+        warn "Stereo fallback creation failed - continuing without it. See: $WORKDIR/audio_stereo.err"
+        AAC_STEREO=""
+      else
+        mark_done "Stereo fallback prepared"
+      fi
     fi
-    rm -f "$stereo_progress_pipe" 2>/dev/null || true
   else
     note "Primary audio is stereo (or fallback disabled); no extra stereo needed."
   fi
