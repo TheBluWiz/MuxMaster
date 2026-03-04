@@ -89,6 +89,10 @@ DV_SRC_BL_PRESENT=""     # Base layer present flag
 DV_SRC_EL_PRESENT=""     # Enhancement layer present flag
 MP4BOX_CMD=""            # Path to mp4box/MP4Box binary (detected at runtime)
 
+# Deferred warning flag: set in Section 13 when H.264 + no tone-mapping is
+# configured, checked in main() after source HDR status is known.
+declare -i _H264_HDR_WARN_PENDING=0
+
 # Grep pattern for detecting DOVI container-level metadata (dvcC/dvvC box) in
 # ffprobe output. Used by verify_dv_container_record and pre-wrap checks.
 readonly DV_CONTAINER_PATTERN='DOVI configuration record|dv_profile|dv_version'
@@ -699,8 +703,12 @@ _dep_install_dependencies(){
         printf "⏳ installing pipx first...\n"
         brew install pipx 2>&1 | sed 's/^/    /'
         pipx ensurepath 2>/dev/null || true
-        # Re-source PATH so pipx-installed tools are visible
-        eval "$(pipx environment --value PIPX_BIN_DIR 2>/dev/null)" 2>/dev/null || true
+        # Add pipx bin dir to current PATH (without eval of arbitrary output)
+        local _pipx_bin
+        _pipx_bin="$(pipx environment --value PIPX_BIN_DIR 2>/dev/null)" || true
+        if [[ -n "$_pipx_bin" && -d "$_pipx_bin" ]]; then
+          export PATH="$_pipx_bin:$PATH"
+        fi
         export PATH="$HOME/.local/bin:$PATH"
       fi
       printf "  %-14s⏳ installing via pipx (%s)...\n" "$_tool" "$pkg"
