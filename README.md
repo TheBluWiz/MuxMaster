@@ -20,6 +20,7 @@ muxm --profile atv-directplay-hq movie.mkv
 - [Usage](#usage)
 - [Configuration](#configuration)
 - [Additional Features](#additionalfeatures)
+- [FAQ](#faq)
 - [License](#license)
 - [Bug Reports](#bugreports)
 - [Contact](#contact)
@@ -37,7 +38,7 @@ You can solve all of this with raw ffmpeg, but the command will be 15+ flags lon
 
 **Tdarr** solves the batch-processing and automation problem well, especially at library scale. But it requires a server, a database, a web UI, and Node.js — it's infrastructure. If you want to process a single file, or a handful of files, with precise control over DV handling, audio track selection, and subtitle policy, Tdarr's plugin system means writing JavaScript to configure what `muxm` handles with a single `--profile` flag. Tdarr is a media library manager; MuxMaster is a per-file encoding tool that aims to make every decision correctly so you don't have to inspect the output.
 
-MuxMaster sits in the gap between "I know ffmpeg well enough to do this manually" and "I need a server-based automation platform." It's a single Bash script with only two required dependencies (ffmpeg and jq) and optional tooling for Dolby Vision and subtitle OCR. It understands Dolby Vision at the RPU level, and its profile system encodes the tribal knowledge of what actually works on real hardware into repeatable, overridable presets.
+MuxMaster sits in the gap between "I know ffmpeg well enough to do this manually" and "I need a server-based automation platform." It's a single Bash script with only three required dependencies (ffmpeg, jq, and bc) and optional tooling for Dolby Vision and subtitle OCR. It understands Dolby Vision at the RPU level, and its profile system encodes the tribal knowledge of what actually works on real hardware into repeatable, overridable presets.
 
 Configuration is where the design philosophy comes together. Most CLI tools expect you to read the source code to learn which variables exist, then hand-build a dotfile from scratch. `muxm --create-config` generates a complete, commented config file pre-seeded with a real profile's values — you start from a working baseline and customize, not from a blank page. Configs cascade through three tiers (system, user, project) so an encoding team can lock organization defaults in `/etc/.muxmrc` while individuals override their preferred CRF or audio settings in `~/.muxmrc` and specific project directories can pin a streaming profile. And `--print-effective-config` shows you the fully resolved result of all those layers *before* you commit to an encode, so you always know exactly what's about to happen.
 
@@ -180,6 +181,7 @@ sudo cp muxm /usr/local/bin/muxm
 - **ffmpeg with libass** (`ffmpeg-full` on Homebrew) – required for subtitle burn-in (`--sub-burn-forced`); the standard `ffmpeg` package works for all other features
 - **dovi_tool** – Dolby Vision RPU extraction/injection; DV handling is automatically disabled if missing
 - **MP4Box** (gpac) – DV container-level signaling verification
+- **tesseract** – OCR engine required by `pgsrip` for PGS bitmap subtitle conversion
 - **sub2srt** or **pgsrip** – PGS bitmap subtitle OCR to SRT (configurable via `--ocr-tool`)
 
 ### Setup Helpers
@@ -331,6 +333,37 @@ Beyond profiles and the core encoding pipeline, `muxm` ships with a set of opera
 
 ---
 
+## ❓ FAQ <a id="faq"></a>
+
+**`muxm` says it requires Bash 4.3+ but I'm on macOS.**
+macOS ships Bash 3.2 (2007) due to licensing. Install a modern version with `brew install bash`, then make sure `/opt/homebrew/bin/bash` (Apple Silicon) or `/usr/local/bin/bash` (Intel) appears before `/bin/bash` in your `$PATH`.
+
+**Dolby Vision handling seems to be disabled / I don't see DV in my output.**
+DV processing requires `dovi_tool` and, for MP4 container signaling, `MP4Box` (gpac). If either is missing, `muxm` silently disables DV features rather than failing. Run `muxm --install-dependencies` to install them, or check with `muxm --dry-run` — the output will show whether DV was detected and what the pipeline plans to do with it.
+
+**My file was copied instead of re-encoded. Is that a bug?**
+Probably not. If the source already matches the target profile (correct codec, container, color space, and audio layout), `muxm` skips the encode and copies/links the file. This is the Skip-if-Ideal feature — it saves time and avoids generation loss. You'll see a message indicating the skip. To force a re-encode, omit `--skip-if-ideal` or override a setting (e.g., `--crf 18`) so the source no longer matches.
+
+**Which profile should I use?**
+If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you want broad device compatibility across Plex/Jellyfin/Emby clients: `streaming`. If you're archiving a Dolby Vision disc rip: `dv-archival`. If you need it to play on everything including old hardware and phones: `universal`. For anime or cartoons: `animation`. For clean HDR10 without DV complexity: `hdr10-hq`. When in doubt, start with `--dry-run` to preview what a profile will do to your file.
+
+**Can I process a batch of files?**
+`muxm` is a per-file tool by design. For a batch, a simple shell loop works:
+
+```bash
+for f in *.mkv; do muxm --profile streaming "$f"; done
+```
+
+For library-scale automation, consider pairing `muxm` with `find`, `xargs`, or a job runner like GNU Parallel.
+
+**How do I know what settings are actually active?**
+Run `muxm --print-effective-config` (with any profile and flags you plan to use). It resolves every config layer — defaults, system/user/project `.muxmrc` files, profile, and CLI flags — and prints the final result. Nothing is encoded; it just shows you exactly what would happen.
+
+**The output file is larger than I expected.**
+CRF-based encoding targets quality, not file size. A visually complex source (grain, fast motion, high detail) will produce a larger file at the same CRF than a clean digital source. You can lower quality slightly with a higher `--crf` value (e.g., `--crf 22` instead of the default), or use a slower `--preset` (`slow` or `slower`) which achieves better compression at the same quality — at the cost of longer encode time.
+
+---
+
 ## 📄 License <a id="license"></a>
 
 MuxMaster is freeware for personal, non-commercial use.
@@ -342,7 +375,7 @@ Full license text available in [LICENSE.md](./LICENSE.md)
 
 ## 🐛 Bug Reports <a id="bugreports"></a>
 
-Found a bug? Please open an issue on GitHub. Include the output of `muxm --version`, the profile and flags you used, and any relevant log output. A `--dry-run` dump or `--report-json` output is especially helpful.
+Found a bug? Please [open an issue on GitHub](https://github.com/TheBluWiz/muxm/issues). Include the output of `muxm --version`, the profile and flags you used, and any relevant log output. A `--dry-run` dump or `--report-json` output is especially helpful.
 
 This is a solo-maintained project and I'm not accepting outside code contributions at this time.
 
@@ -352,7 +385,7 @@ This is a solo-maintained project and I'm not accepting outside code contributio
 
 If you're using MuxMaster, I'd love to hear about it — what's working, what's not, what workflows you're using it for. This is a solo project and real-world feedback shapes what gets built next.
 
-- **Bug reports** → GitHub Issues
+- **Bug reports** → [GitHub Issues](https://github.com/TheBluWiz/muxm/issues)
 - **Everything else** (feedback, licensing, questions) → [thebluwiz@thoughtspace.place](mailto:thebluwiz@thoughtspace.place)
 
 ---

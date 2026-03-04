@@ -2,7 +2,9 @@
 
 All notable changes to MuxMaster will be documented in this file.
 
-## [1.0.0] — 2026-03-02
+The format is based on [Keep a Changelog](https://keepachangelog.com), and this project adheres to [Semantic Versioning](https://semver.org).
+
+## [1.0.0] - 2026-03-02
 
 Initial public release.
 
@@ -15,11 +17,11 @@ Initial public release.
 
 ### Format Profiles
 
-- **`dv-archival`** — Lossless Dolby Vision preservation. Copy video, lossless audio passthrough, skip-if-ideal, JSON reporting
+- **`dv-archival`** — Lossless Dolby Vision preservation. Copy video if compliant, lossless audio passthrough, skip-if-ideal, JSON reporting
 - **`hdr10-hq`** — High-quality HDR10 encoding. HEVC CRF 17, strip DV, lossless audio + stereo fallback, MKV
 - **`atv-directplay-hq`** — Apple TV 4K Direct Play via Plex. MP4, HEVC Main10, DV Profile 8.1 auto-conversion, E-AC-3 + AAC stereo, forced subtitle burn-in
 - **`streaming`** — Modern HEVC streaming for Plex/Jellyfin/Emby. CRF 20, E-AC-3 448k, AAC stereo, MP4
-- **`animation`** — Anime and cartoon optimized. CRF 16, keeps 10-bit for SDR sources (anti-banding), low psy-rd/psy-rdoq, lossless audio, ASS/SSA subtitle preservation, MKV
+- **`animation`** — Optimized for anime and cartoons. CRF 16, keeps 10-bit for SDR sources (anti-banding), low psy-rd/psy-rdoq, lossless audio, ASS/SSA subtitle preservation, MKV
 - **`universal`** — Maximum compatibility. H.264 SDR with HDR tone-mapping, AAC stereo, burned forced subs, external SRT export, MP4
 
 ### Video
@@ -55,7 +57,7 @@ Initial public release.
 - MP4, MKV, M4V, and MOV container support
 - Chapter marker preservation and stripping
 - Metadata stripping
-- Skip-if-ideal detection (avoids re-processing compliant files)
+- skip-if-ideal detection (avoids re-processing compliant files)
 - JSON reporting with full decision/warning/stream-mapping documentation
 - SHA-256 checksum generation
 - Dry-run mode (`--dry-run`) for previewing the full pipeline without encoding
@@ -71,3 +73,5 @@ Initial public release.
 - Conflict warnings for contradictory profile + flag combinations
 - Spinner and progress bar for long-running operations
 - Comprehensive test harness (`test_muxm.sh`) with 18 test suites and ~165 assertions
+
+[1.0.0]: https://github.com/USER/muxm/releases/tag/v1.0.0

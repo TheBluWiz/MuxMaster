@@ -5,7 +5,7 @@
 #  Tip: Uncomment a line to override. Keep values shell-safe.
 # ================================================================
 # Profile: atv-directplay-hq
-# Generated: 2026-02-26 15:31:25
+# Generated: 2026-03-03 20:35:10
 #
 # Variables set by this profile are uncommented below.
 # All other variables are commented with their defaults — uncomment to customize.
@@ -152,10 +152,6 @@ EAC3_BITRATE_7_1=768k
 #   1 = copy lossless  |  0 = transcode to lossy
 AUDIO_LOSSLESS_PASSTHROUGH=0
 
-# Generate descriptive titles for audio streams (e.g., "5.1 Surround (E-AC-3)")
-#INCLUDE_AUDIO_TITLES=1
-
-
 # =========================
 # Subtitles
 # =========================
@@ -211,6 +207,9 @@ STRIP_METADATA=0
 
 # Default language tag for streams missing language metadata
 #TAG_LANGUAGE_DEFAULT=und
+
+# Generate descriptive titles for audio streams (e.g., "5.1 Surround (E-AC-3)")
+#INCLUDE_AUDIO_TITLES=1
 
 
 # =========================

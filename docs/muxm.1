@@ -126,7 +126,7 @@ Same as \fB\-\-create\-config\fR but overwrites an existing file.
 Video quality CRF (lower = higher quality). Typical: 16\(en22.
 .TP
 .BR \-p ", " \-\-preset " " \fINAME\fR
-Encoder preset: ultrafast..placebo. Default: slower.
+Encoder preset: ultrafast \fIto\fR placebo. Default: slower.
 .TP
 .BR \-\-video\-codec " " libx265|libx264
 Video encoder. Default: libx265.
@@ -157,7 +157,7 @@ injection fails. Default: enabled.
 Disable VBV guardrails.
 .TP
 .BR \-\-threads " " \fIN\fR
-ffmpeg threads.
+Number of threads for ffmpeg encoding.
 .SH AUDIO OPTIONS
 .TP
 .BR \-\-audio\-track " " \fIN\fR
@@ -271,7 +271,7 @@ Do not overwrite existing intermediate files (ffmpeg overwrites by default).
 .SH EXAMPLES
 .TP
 .B muxm Movie.mkv
-Encode with no\-profile defaults (HEVC, CRF 18, MP4). Output name is
+Encode using default settings (no profile). Output name is
 derived from input. Use \fB\-\-profile\fR for device\-optimized settings.
 .TP
 .B muxm \-\-profile atv\-directplay\-hq Movie.mkv
@@ -462,7 +462,7 @@ Configurable via \fB\-\-ocr\-tool\fR.
 .PP
 Run \fBmuxm \-\-install\-dependencies\fR to check for and install all
 tools via Homebrew and pipx.
-.SH EXIT CODES
+.SH EXIT STATUS
 .TP
 .B 0
 Success.
