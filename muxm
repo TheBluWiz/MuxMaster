@@ -4726,6 +4726,10 @@ audio_lossless_muxable(){
 # Determine target codec and bitrate for audio transcode based on channel count.
 # Outputs: "codec bitrate" (space-separated, suitable for `read`)
 # Channel thresholds are centralized here to avoid divergence.
+# NOTE: This function selects codec based on *source* channel count, not encoder
+#   limits.  Callers must apply _codec_max_channels() to clamp effective_ch before
+#   passing it to ffmpeg — e.g. eac3 supports at most 6ch despite being selected
+#   for 8ch sources.
 # Args: $1 — channel count
 audio_transcode_target(){
   local ch="$1"
@@ -4736,6 +4740,21 @@ audio_transcode_target(){
   else
     echo "aac 192k"
   fi
+}
+
+# Return the maximum channel count supported by ffmpeg's native encoder for a
+# given codec.  Used by run_audio_pipeline to clamp effective_ch *after*
+# audio_transcode_target selects the codec — prevents fatal ffmpeg errors like
+# "Specified channel layout '7.1' is not supported" from the eac3 encoder.
+# Args: $1 — codec name (lowercased)
+_codec_max_channels(){
+  local codec="$1"
+  case "$codec" in
+    eac3) echo 6 ;;   # ffmpeg native eac3 encoder: 5.1 max
+    ac3)  echo 6 ;;   # ffmpeg native ac3 encoder: 5.1 max
+    aac)  echo 48 ;;  # ffmpeg native aac: effectively unlimited
+    *)    echo 64 ;;  # conservative fallback — no known encoder needs >64
+  esac
 }
 
 # run_audio_pipeline — Select, copy or transcode the best audio track.
@@ -4875,6 +4894,23 @@ run_audio_pipeline(){
   else
     A_PRIMARY_CODEC="$tgt_codec"
   fi
+
+  # Enforce encoder channel ceiling (e.g., eac3/ac3 max = 6ch).
+  # audio_transcode_target selects codec based on *source* channel count, but
+  # ffmpeg's native encoders may support fewer channels than the source has.
+  # Without this clamp, -ac 8 + eac3 causes a fatal ffmpeg error.
+  if (( ! do_copy )); then
+    local codec_max
+    codec_max="$(_codec_max_channels "$tgt_codec")"
+    if (( effective_ch > codec_max )); then
+      note "Capping channels from $effective_ch to $codec_max ($tgt_codec encoder limit)"
+      effective_ch="$codec_max"
+      # Re-derive bitrate for the capped channel count so it matches the actual
+      # output layout (e.g., 768k 7.1 → 640k 5.1).
+      read -r _ tgt_br <<< "$(audio_transcode_target "$effective_ch")"
+    fi
+  fi
+
   A_PRIMARY_CHANNELS="$effective_ch"
 
   if (( do_copy )); then

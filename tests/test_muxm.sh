@@ -306,6 +306,18 @@ generate_extended_media() {
     -metadata:s:a:0 language=eng
   pass "hevc_sdr_51.mkv created"
 
+  # 2b) HEVC 10-bit SDR with 7.1 (8ch) audio — regression test for eac3 encoder
+  #     channel cap bug: ffmpeg's native eac3 encoder only supports up to 6ch,
+  #     so 8ch sources must be downmixed before encoding.
+  #     Uses FLAC (not direct-play-copyable, not lossless-muxable into MP4) to
+  #     guarantee the transcode path fires — AAC would be stream-copied via step 3.
+  log "Creating hevc_sdr_71.mkv (HEVC + FLAC 8ch audio for encoder cap test)"
+  gen_media "$TESTDIR/hevc_sdr_71.mkv" blue \
+    -c:v libx265 -preset ultrafast -crf 28 -pix_fmt yuv420p10le \
+    -c:a flac -ac 8 \
+    -metadata:s:a:0 language=eng
+  pass "hevc_sdr_71.mkv created"
+
   # 3) HEVC 10-bit with HDR10-like metadata tags (not real HDR, but tagged)
   log "Creating hevc_hdr10_tagged.mkv (HEVC 10-bit with HDR-like tags)"
   gen_media "$TESTDIR/hevc_hdr10_tagged.mkv" green 880 \
@@ -1310,6 +1322,43 @@ test_audio() {
     fi
   fi
 
+  # --- 7.1 (8ch) source → eac3 transcode (encoder channel cap regression test) ---
+  # ffmpeg's native eac3 encoder supports a maximum of 6 channels (5.1).
+  # Before the _codec_max_channels fix, an 8ch source would pass -ac 8 to ffmpeg,
+  # causing a fatal "Specified channel layout is not supported" error.
+  # This test ensures the pipeline automatically downmixes to ≤6ch for eac3.
+  outfile="$TESTDIR/audio_71_eac3_cap.mp4"
+  log "Testing 7.1 audio → eac3 (encoder channel cap)..."
+  if assert_encode "7.1→eac3: encode succeeds (channel cap)" "$outfile" \
+       --no-stereo-fallback --crf 28 --preset ultrafast "$TESTDIR/hevc_sdr_71.mkv"; then
+    ch="$(probe_audio "$outfile" channels 0)"
+    if [[ "$ch" -le 6 ]]; then
+      pass "7.1→eac3: output capped to ${ch}ch (encoder limit respected)"
+    else
+      fail "7.1→eac3: output has ${ch}ch — expected ≤6 (eac3 encoder max)"
+    fi
+    acodec="$(probe_audio "$outfile" codec_name 0)"
+    if [[ "$acodec" == "eac3" ]]; then
+      pass "7.1→eac3: output codec is eac3"
+    else
+      skip "7.1→eac3: output codec is '$acodec' (expected eac3)"
+    fi
+  fi
+
+  # --- --audio-force-codec eac3 + 8ch source (forced codec also respects cap) ---
+  outfile="$TESTDIR/audio_71_force_eac3.mp4"
+  log "Testing --audio-force-codec eac3 with 8ch source..."
+  if assert_encode "--audio-force-codec eac3 + 8ch: encode succeeds" "$outfile" \
+       --audio-force-codec eac3 --no-stereo-fallback --crf 28 --preset ultrafast \
+       "$TESTDIR/hevc_sdr_71.mkv"; then
+    ch="$(probe_audio "$outfile" channels 0)"
+    if [[ "$ch" -le 6 ]]; then
+      pass "--audio-force-codec eac3 + 8ch: capped to ${ch}ch"
+    else
+      fail "--audio-force-codec eac3 + 8ch: output has ${ch}ch — expected ≤6"
+    fi
+  fi
+
   # --stereo-bitrate via effective config (#11)
   out="$(run_muxm --stereo-bitrate 192k --print-effective-config)"
   assert_contains "STEREO_BITRATE            = 192k" "--stereo-bitrate: config shows 192k" "$out"
@@ -2052,6 +2101,35 @@ _test_unit_audio_helpers() {
   if [[ "$at8_result" == *"768k"* ]]; then pass "audio_transcode_target(8ch) uses EAC3_BITRATE_7_1=768k"; else fail "audio_transcode_target(8ch) expected 768k in '$at8_result'"; fi
   at6_result="$(bash -c "$transcode_env"$'\n'"$transcode_body"$'\n'"audio_transcode_target 6")"
   if [[ "$at6_result" == *"640k"* ]]; then pass "audio_transcode_target(6ch) uses EAC3_BITRATE_5_1=640k"; else fail "audio_transcode_target(6ch) expected 640k in '$at6_result'"; fi
+
+  # ---- _codec_max_channels ----
+  # Returns the maximum channel count supported by ffmpeg's native encoder for a
+  # given codec.  The eac3/ac3 caps (6) are the root cause of the 7.1 TrueHD→eac3
+  # transcode failure — audio_transcode_target selects eac3 for 8ch sources, but
+  # ffmpeg's encoder rejects -ac 8.  This helper lets run_audio_pipeline clamp
+  # effective_ch before building the ffmpeg command.
+  assert_muxm_fn_stdout "_codec_max_channels('eac3')=6"  "6"  _codec_max_channels "" "eac3"
+  assert_muxm_fn_stdout "_codec_max_channels('ac3')=6"   "6"  _codec_max_channels "" "ac3"
+  assert_muxm_fn_stdout "_codec_max_channels('aac')=48"  "48" _codec_max_channels "" "aac"
+  assert_muxm_fn_stdout "_codec_max_channels('opus')=fallback (64)" "64" _codec_max_channels "" "opus"
+
+  # Contract test: audio_transcode_target(8) picks eac3, but the encoder can't do 8ch.
+  # Verifies the two functions compose correctly — the pipeline must consult
+  # _codec_max_channels after audio_transcode_target to avoid the fatal ffmpeg error.
+  local att8_codec att8_codec_max
+  att8_codec="${at8_result%% *}"
+  local codec_max_body
+  codec_max_body="$(awk '/^_codec_max_channels\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+  if [[ -n "$codec_max_body" ]]; then
+    att8_codec_max="$(bash -c "$codec_max_body"$'\n'"_codec_max_channels \"$att8_codec\"")"
+    if (( att8_codec_max < 8 )); then
+      pass "_codec_max_channels($att8_codec)=$att8_codec_max < 8 — encoder cap engages for 7.1 sources"
+    else
+      fail "_codec_max_channels($att8_codec)=$att8_codec_max — expected < 8 to prevent ffmpeg failure on 7.1 sources"
+    fi
+  else
+    skip "_codec_max_channels not found in muxm (not yet implemented)"
+  fi
 
   # ---- _audio_lang_matches ----
   # Drives audio track selection — the strongest scoring signal (150 points).
