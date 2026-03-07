@@ -2064,6 +2064,18 @@ HEADER
   echo "#   1 = apply cautious vbv-maxrate/bufsize  |  0 = don't apply additional limits"
   printf '#CONSERVATIVE_VBV=1\n'
   echo ""
+  echo "# VBV guardrails: per-level maxrate/bufsize caps (used when CONSERVATIVE_VBV=1)"
+  echo "#   These enforce hardware-decode-safe bitrate ceilings per HEVC level."
+  echo "#   Only active when LEVEL_VALUE is set AND CONSERVATIVE_VBV=1."
+  _V LEVEL_VBV_4_1_MAXRATE
+  _V LEVEL_VBV_4_1_BUFSIZE
+  _V LEVEL_VBV_5_0_MAXRATE
+  _V LEVEL_VBV_5_0_BUFSIZE
+  _V LEVEL_VBV_5_1_MAXRATE
+  _V LEVEL_VBV_5_1_BUFSIZE
+  _V LEVEL_VBV_5_2_MAXRATE
+  _V LEVEL_VBV_5_2_BUFSIZE
+  echo ""
   echo "# Skip encode if source video already matches profile requirements"
   echo "#   1 = copy video stream if compliant (much faster)  |  0 = always re-encode"
   _V VIDEO_COPY_IF_COMPLIANT
