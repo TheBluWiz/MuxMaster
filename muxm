@@ -9,7 +9,7 @@
 # =============================================================================
 #
 # Requires:
-#   - ffmpeg, ffprobe
+#   - ffmpeg, ffprobe, bc
 #   - dovi_tool (optional for Dolby Vision RPU extraction/injection; script will fallback)
 #
 # Optional (for PGS subtitle OCR):
@@ -115,6 +115,7 @@ LEVEL_VBV_5_2_MAXRATE=60000k; LEVEL_VBV_5_2_BUFSIZE=120000k
 # ---- Pixel format / chroma policy
 declare -i FORCE_CHROMA_420=1
 declare -i SDR_USE_10BIT_IF_SRC_10BIT=1
+declare -i SDR_FORCE_10BIT=0
 HDR_TARGET_PIXFMT="yuv420p10le"
 
 # ---- Threads (blank = ffmpeg chooses)
@@ -182,6 +183,8 @@ AUDIO_TRACK_OVERRIDE=""
 VIDEO_CODEC="libx265"
 # Skip encode if source already matches profile requirements
 declare -i VIDEO_COPY_IF_COMPLIANT=0
+# Maximum average bitrate for copy-if-compliant to accept (e.g., "50000k"; "" = no check)
+MAX_COPY_BITRATE=""
 # Tone-map HDR→SDR (universal profile)
 declare -i TONEMAP_HDR_TO_SDR=0
 TONEMAP_FILTER='zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p'
@@ -1018,8 +1021,23 @@ Advanced x265 parameter string.
 .BR \-\-tonemap " , " \-\-no\-tonemap
 Enable/disable HDR/HLG to SDR tone\-mapping.
 .TP
+.BR \-\-sdr\-force\-10bit " , " \-\-no\-sdr\-force\-10bit
+Force/don't force 10\-bit output for SDR sources regardless of source bit
+depth. Useful for animation where 8\-bit sources cause visible banding in
+gradients. Default: disabled (follow source bit depth).
+.TP
 .BR \-\-video\-copy\-if\-compliant " , " \-\-no\-video\-copy\-if\-compliant
 Copy/re\-encode video stream when source already matches target profile.
+.TP
+.BR \-\-max\-copy\-bitrate " " \fIRATE\fR
+Maximum average bitrate for
+.B \-\-video\-copy\-if\-compliant
+to accept a stream copy. Sources exceeding this value are re\-encoded.
+Uses ffprobe\(aqs reported bitrate when available, falling back to
+.RI ( file_size\~\[mu]\~8\~/\~duration ).
+Format: number with k suffix (e.g.,
+.BR 50000k ).
+Empty (default) disables the check.
 .TP
 .BR \-\-no\-dv
 Disable Dolby Vision extraction/injection.
@@ -1092,6 +1110,16 @@ Burn/don't burn forced subtitles into the video stream.
 .TP
 .BR \-\-sub\-export\-external " , " \-\-no\-sub\-export\-external
 Export/embed subtitles as external .srt files.
+.IP
+.BR Note :
+When combined with
+.BR \-\-sub\-burn\-forced ,
+players that auto\-load .srt sidecars with matching filenames (VLC, some
+smart TVs) will display both the burned forced subtitles and the loaded
+external track, resulting in doubled text for foreign\-dialogue segments.
+Use
+.B \-\-no\-sub\-export\-external
+if targeting these players.
 .TP
 .BR \-\-no\-sub\-sdh
 Exclude SDH/HI subtitle tracks.
@@ -1238,7 +1266,8 @@ Major variable groups:
 .B Video
 .BR CRF_VALUE ", " PRESET_VALUE ", " VIDEO_CODEC ", " X265_PARAMS_BASE ", "
 .BR LEVEL_VALUE ", " CONSERVATIVE_VBV ", " FORCE_CHROMA_420 ", "
-.BR SDR_USE_10BIT_IF_SRC_10BIT ", " HDR_TARGET_PIXFMT ", "
+.BR SDR_USE_10BIT_IF_SRC_10BIT ", " SDR_FORCE_10BIT ", "
+.BR HDR_TARGET_PIXFMT ", " MAX_COPY_BITRATE ", "
 .BR TONEMAP_HDR_TO_SDR ", " TONEMAP_FILTER .
 .TP
 .B Dolby Vision
@@ -1544,10 +1573,12 @@ _muxm_completions() {
 
             --crf -p --preset --x265-params -l --level
             --video-codec --tonemap --no-tonemap
+            --sdr-force-10bit --no-sdr-force-10bit
             --no-conservative-vbv
             --no-dv --allow-dv-fallback --no-allow-dv-fallback
             --dv-convert-p81 --no-dv-convert-p81
             --video-copy-if-compliant --no-video-copy-if-compliant
+            --max-copy-bitrate
 
             --audio-track --audio-lang-pref
             --stereo-fallback --no-stereo-fallback --stereo-bitrate
@@ -1835,6 +1866,7 @@ _create_config_emit() {
   case "$profile" in
     dv-archival)
       _active+="SKIP_IF_IDEAL REPORT_JSON "
+      _active+="AUDIO_CODEC_PREFERENCE "
       ;;
     hdr10-hq)
       _active+="CRF_VALUE PRESET_VALUE "
@@ -1844,6 +1876,7 @@ _create_config_emit() {
       _active+="CRF_VALUE PRESET_VALUE "
       _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 "
       _active+="EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 "
+      _active+="MAX_COPY_BITRATE "
       _active+="SUB_EXPORT_EXTERNAL SKIP_IF_IDEAL "
       ;;
     streaming)
@@ -1854,7 +1887,8 @@ _create_config_emit() {
       ;;
     animation)
       _active+="CRF_VALUE PRESET_VALUE "
-      _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 SDR_USE_10BIT_IF_SRC_10BIT "
+      _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 SDR_USE_10BIT_IF_SRC_10BIT SDR_FORCE_10BIT "
+      _active+="AUDIO_CODEC_PREFERENCE "
       _active+="SUB_MAX_TRACKS SUB_EXPORT_EXTERNAL "
       ;;
     universal)
@@ -1948,6 +1982,11 @@ HEADER
   echo "#   1 = copy video stream if compliant (much faster)  |  0 = always re-encode"
   _V VIDEO_COPY_IF_COMPLIANT
   echo ""
+  echo "# Maximum average bitrate (in kbps) for copy-if-compliant to accept."
+  echo "#   Sources exceeding this are re-encoded instead of copied."
+  echo "#   Empty = no bitrate check. Example: 50000k for Apple TV 4K."
+  _V MAX_COPY_BITRATE
+  echo ""
 
   echo ""
   echo "# ========================="
@@ -1960,6 +1999,10 @@ HEADER
   echo ""
   echo "# SDR 10-bit policy: 1 = keep 10-bit if source is 10-bit SDR  |  0 = force 8-bit"
   _V SDR_USE_10BIT_IF_SRC_10BIT
+  echo ""
+  echo "# Force 10-bit output for SDR sources regardless of source bit depth"
+  echo "#   1 = always encode SDR to 10-bit (prevents banding in animation)  |  0 = follow source"
+  _V SDR_FORCE_10BIT
   echo ""
   echo "# Target pixel format when HDR (HLG/HDR10/DV base) is detected"
   _V HDR_TARGET_PIXFMT
@@ -2080,6 +2123,9 @@ HEADER
   _V SUB_BURN_FORCED
   echo ""
   echo "# Export non-forced subtitles as external .srt files alongside output"
+  echo "#   Note: When combined with SUB_BURN_FORCED=1, players that auto-load .srt"
+  echo "#   sidecars (VLC, some smart TVs) will show doubled subtitles for foreign"
+  echo "#   dialogue. Use --no-sub-export-external if targeting these players."
   _V SUB_EXPORT_EXTERNAL
   echo ""
   # Detect available OCR tools on this machine
@@ -2322,6 +2368,7 @@ apply_profile_dv_archival() {
   # Audio: lossless passthrough, no stereo fallback by default
   AUDIO_LOSSLESS_PASSTHROUGH=1
   ADD_STEREO_IF_MULTICH=0
+  AUDIO_CODEC_PREFERENCE="truehd,dts,flac,eac3,ac3,aac,alac,other"
   # Subs: keep all; no burn
   SUB_INCLUDE_FORCED=1
   SUB_INCLUDE_FULL=1
@@ -2376,6 +2423,7 @@ apply_profile_atv_directplay_hq() {
   # Video: prefer copy if compliant; else HEVC Main10
   VIDEO_CODEC="libx265"
   VIDEO_COPY_IF_COMPLIANT=1
+  MAX_COPY_BITRATE="50000k"
   CRF_VALUE=17
   PRESET_VALUE="slower"
   X265_PARAMS_BASE='profile=main10:repeat-headers=1:hdr-opt=1:hdr10=1:hdr10-opt=1:aq-mode=3:aq-strength=1.3:psy-rd=2.0:psy-rdoq=1.0:rc-lookahead=60'
@@ -2414,7 +2462,7 @@ apply_profile_universal() {
   CRF_VALUE=22
   PRESET_VALUE="slow"
   FORCE_CHROMA_420=1
-  # Audio: AAC stereo forced; optional AC3 5.1
+  # Audio: AAC stereo only (MAX_AUDIO_CHANNELS=2 forces downmix to stereo)
   AUDIO_FORCE_CODEC="aac"
   AUDIO_LOSSLESS_PASSTHROUGH=0
   ADD_STEREO_IF_MULTICH=0
@@ -2479,10 +2527,12 @@ apply_profile_animation() {
   HDR_TARGET_PIXFMT="yuv420p10le"
   FORCE_CHROMA_420=1
   SDR_USE_10BIT_IF_SRC_10BIT=1
-  # Audio: lossless passthrough + stereo fallback
+  SDR_FORCE_10BIT=1
+  # Audio: lossless passthrough + stereo fallback (FLAC-first for anime releases)
   AUDIO_LOSSLESS_PASSTHROUGH=1
   ADD_STEREO_IF_MULTICH=1
   STEREO_BITRATE="192k"
+  AUDIO_CODEC_PREFERENCE="flac,truehd,eac3,ac3,aac,alac,other"
   # Subs: keep all, never burn (preserve ASS styling)
   SUB_INCLUDE_FORCED=1
   SUB_INCLUDE_FULL=1
@@ -2654,6 +2704,9 @@ while [[ $# -gt 0 ]]; do
     --no-video-copy-if-compliant) VIDEO_COPY_IF_COMPLIANT=0; shift ;;
     --tonemap) TONEMAP_HDR_TO_SDR=1; shift ;;
     --no-tonemap) TONEMAP_HDR_TO_SDR=0; shift ;;
+    --sdr-force-10bit) SDR_FORCE_10BIT=1; shift ;;
+    --no-sdr-force-10bit) SDR_FORCE_10BIT=0; shift ;;
+    --max-copy-bitrate) MAX_COPY_BITRATE="${2:-}"; shift 2 ;;
 
     --audio-track) AUDIO_TRACK_OVERRIDE="${2:-}"; shift 2 ;;
     --audio-lang-pref) AUDIO_LANG_PREF="${2:-}"; shift 2 ;;
@@ -2914,10 +2967,12 @@ Effective config (post config-files + profile + CLI):
   [Video — Pixel Format / Color]
   FORCE_CHROMA_420          = $FORCE_CHROMA_420
   SDR_USE_10BIT_IF_SRC_10BIT = $SDR_USE_10BIT_IF_SRC_10BIT
+  SDR_FORCE_10BIT           = $SDR_FORCE_10BIT
   HDR_TARGET_PIXFMT         = $HDR_TARGET_PIXFMT
 
   [Video — Copy / Tonemap]
   VIDEO_COPY_IF_COMPLIANT   = $VIDEO_COPY_IF_COMPLIANT
+  MAX_COPY_BITRATE          = ${MAX_COPY_BITRATE:-<none>}
   TONEMAP_HDR_TO_SDR        = $TONEMAP_HDR_TO_SDR
   TONEMAP_FILTER            = $TONEMAP_FILTER
 
@@ -2928,6 +2983,7 @@ Effective config (post config-files + profile + CLI):
 
   [Audio — Selection]
   AUDIO_LANG_PREF           = $AUDIO_LANG_PREF
+  AUDIO_CODEC_PREFERENCE    = $AUDIO_CODEC_PREFERENCE
   AUDIO_TRACK_OVERRIDE      = ${AUDIO_TRACK_OVERRIDE:-<none>}
   AUDIO_SCORE_LANG_BONUS    = $AUDIO_SCORE_LANG_BONUS
   AUDIO_SCORE_CHANNEL_MULTIPLIER = $AUDIO_SCORE_CHANNEL_MULTIPLIER
@@ -3295,24 +3351,11 @@ check_skip_if_ideal() {
   local ideal=1 reason=""
 
   # ---- Video compliance (reuse the copy-compliant check) ----
-  # _video_is_copy_compliant checks: codec match, pixel format, tone-map, DV profile.
+  # _video_is_copy_compliant checks: codec, pixel format, tone-map, DV profile, bitrate.
+  # On rejection it sets _COPY_REJECT_REASON with a specific diagnostic.
   if ! _video_is_copy_compliant; then
     ideal=0
-    # Generate a descriptive reason for reporting
-    local src_codec src_pix
-    src_codec="$(_lower "$(_probe_field codec_name)")"
-    src_pix="$(_lower "$(_probe_field pix_fmt)")"
-    if [[ "$VIDEO_CODEC" == "libx265" && "$src_codec" != "hevc" ]]; then
-      reason="video codec is $src_codec (need hevc)"
-    elif [[ "$VIDEO_CODEC" == "libx264" && "$src_codec" != "h264" ]]; then
-      reason="video codec is $src_codec (need h264)"
-    elif [[ "$TARGET_PIXFMT" == "yuv420p10le" && "$src_pix" != *"p10"* ]]; then
-      reason="pixel format is $src_pix (need 10-bit for $TARGET_PIXFMT)"
-    elif (( TONEMAP_HDR_TO_SDR )); then
-      reason="tone-mapping required (cannot copy)"
-    else
-      reason="video stream not copy-compliant"
-    fi
+    reason="${_COPY_REJECT_REASON:-video stream not copy-compliant}"
   fi
 
   # ---- Container check (skip-if-ideal only) ----
@@ -3403,7 +3446,7 @@ COLOR_ARGS=()
 #
 # Sets globals: PROFILE_DESC, TARGET_PIXFMT, COLOR_ARGS[]
 # Reads globals: METADATA_CACHE, TONEMAP_HDR_TO_SDR, HDR_TARGET_PIXFMT,
-#                FORCE_CHROMA_420, SDR_USE_10BIT_IF_SRC_10BIT
+#                FORCE_CHROMA_420, SDR_USE_10BIT_IF_SRC_10BIT, SDR_FORCE_10BIT
 decide_color_and_pixfmt() {
   local pix prim trc cspace
   pix="$(_probe_field pix_fmt)"
@@ -3450,7 +3493,9 @@ decide_color_and_pixfmt() {
     COLOR_ARGS=(-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc)
   else
     profile="SDR"
-    if (( SDR_USE_10BIT_IF_SRC_10BIT )) && (( is_10bit )); then
+    if (( SDR_FORCE_10BIT )); then
+      tgt_pix="yuv420p10le"
+    elif (( SDR_USE_10BIT_IF_SRC_10BIT )) && (( is_10bit )); then
       tgt_pix="yuv420p10le"
     else
       tgt_pix="yuv420p"
@@ -3794,6 +3839,9 @@ V_DV_MP4=""
 # would be stripped by extracting to raw HEVC elementary stream.
 declare -i VIDEO_COPY_FROM_SOURCE=0
 
+# Diagnostic: set by _video_is_copy_compliant on rejection, read by check_skip_if_ideal.
+_COPY_REJECT_REASON=""
+
 A_PRIMARY=""
 AAC_STEREO=""
 declare -i HAS_AUDIO=0
@@ -3802,30 +3850,38 @@ declare -i HAS_AUDIO=0
 
 # Check if source video can be stream-copied (no re-encode) for the target profile.
 # Tests: codec match (hevc/h264), pixel format (10-bit for HDR), tone-map requirement,
-#        DV profile compatibility (atv-directplay-hq requires P8 for copy).
+#        DV profile compatibility (atv-directplay-hq requires P8 for copy),
+#        bitrate ceiling (MAX_COPY_BITRATE).
 # Returns: 0 if copy-compliant, 1 if re-encode required.
+# Sets: _COPY_REJECT_REASON (diagnostic string when returning 1)
 # Globals: VIDEO_CODEC, TARGET_PIXFMT, TONEMAP_HDR_TO_SDR, PROFILE_DESC,
-#          IS_DV, DISABLE_DV, PROFILE_NAME, DV_SRC_PROFILE (read)
+#          IS_DV, DISABLE_DV, PROFILE_NAME, DV_SRC_PROFILE,
+#          MAX_COPY_BITRATE (read)
 _video_is_copy_compliant() {
+  _COPY_REJECT_REASON=""
   local src_codec src_pix
   src_codec="$(_lower "$(_probe_field codec_name)")"
   src_pix="$(_lower "$(_probe_field pix_fmt)")"
 
   # Check codec match
   if [[ "$VIDEO_CODEC" == "libx265" && "$src_codec" != "hevc" ]]; then
+    _COPY_REJECT_REASON="video codec is $src_codec (need hevc)"
     return 1
   fi
   if [[ "$VIDEO_CODEC" == "libx264" && "$src_codec" != "h264" ]]; then
+    _COPY_REJECT_REASON="video codec is $src_codec (need h264)"
     return 1
   fi
 
   # Check pixel format (10-bit for HDR)
   if [[ "$TARGET_PIXFMT" == "yuv420p10le" && "$src_pix" != *"p10"* ]]; then
+    _COPY_REJECT_REASON="pixel format is $src_pix (need 10-bit for $TARGET_PIXFMT)"
     return 1
   fi
 
   # If tone-mapping is requested, can't copy
   if (( TONEMAP_HDR_TO_SDR )) && [[ "$PROFILE_DESC" == "SDR-TONEMAP" ]]; then
+    _COPY_REJECT_REASON="tone-mapping required (cannot copy)"
     return 1
   fi
 
@@ -3835,7 +3891,39 @@ _video_is_copy_compliant() {
   if (( IS_DV && ! DISABLE_DV )); then
     if [[ "${PROFILE_NAME:-}" == "atv-directplay-hq" ]]; then
       if [[ "${DV_SRC_PROFILE:-}" != "8" ]]; then
-        return 1  # Not copy-compliant; needs DV conversion
+        _COPY_REJECT_REASON="DV profile ${DV_SRC_PROFILE:-?} requires conversion (need P8 for copy)"
+        return 1
+      fi
+    fi
+  fi
+
+  # Bitrate ceiling: reject copy if source exceeds MAX_COPY_BITRATE.
+  # Prevents copying high-bitrate remuxes that would stutter on constrained
+  # hardware (e.g., Apple TV 4K with 80+ Mbps Blu-ray remuxes).
+  if [[ -n "${MAX_COPY_BITRATE:-}" ]]; then
+    local src_br_bps max_br_kbps max_br_bps
+    src_br_bps="$(_probe_field bit_rate)"
+
+    # Fallback: compute average bitrate from file size / duration
+    if [[ -z "$src_br_bps" || "$src_br_bps" == "N/A" || "$src_br_bps" == "0" ]]; then
+      local _dur _fsz
+      _dur="$(_get_source_duration_secs)"
+      _dur="${_dur%.*}"  # truncate to integer
+      if [[ -n "$_dur" ]] && (( _dur > 0 )); then
+        # Cross-platform stat: macOS uses -f%z, Linux uses -c%s
+        _fsz="$(stat -f%z "$SRC_ABS" 2>/dev/null || stat -c%s "$SRC_ABS" 2>/dev/null || echo 0)"
+        if (( _fsz > 0 )); then
+          src_br_bps=$(( _fsz * 8 / _dur ))
+        fi
+      fi
+    fi
+
+    if [[ -n "$src_br_bps" && "$src_br_bps" =~ ^[0-9]+$ ]] && (( src_br_bps > 0 )); then
+      max_br_kbps="${MAX_COPY_BITRATE%k}"
+      max_br_bps=$(( max_br_kbps * 1000 ))
+      if (( src_br_bps > max_br_bps )); then
+        _COPY_REJECT_REASON="bitrate ~$(( src_br_bps / 1000 ))kbps exceeds MAX_COPY_BITRATE=${MAX_COPY_BITRATE}"
+        return 1
       fi
     fi
   fi

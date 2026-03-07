@@ -685,6 +685,9 @@ test_toggles() {
     # ---- Audio title toggles ----
     "--audio-titles|INCLUDE_AUDIO_TITLES      = 1"
     "--no-audio-titles|INCLUDE_AUDIO_TITLES      = 0"
+    # ---- SDR force 10-bit toggles ----
+    "--sdr-force-10bit|SDR_FORCE_10BIT           = 1"
+    "--no-sdr-force-10bit|SDR_FORCE_10BIT           = 0"
   )
 
   local out flag expected
@@ -693,6 +696,10 @@ test_toggles() {
     out="$(run_muxm "$flag" --print-effective-config)"
     assert_contains "$expected" "$flag: registered" "$out"
   done
+
+  # ---- Value flags (non-toggle) ----
+  out="$(run_muxm --max-copy-bitrate 30000k --print-effective-config)"
+  assert_contains "MAX_COPY_BITRATE          = 30000k" "--max-copy-bitrate sets value" "$out"
 
 }
 
@@ -928,6 +935,7 @@ test_profiles() {
   assert_contains "REPORT_JSON               = 1" "dv-archival: JSON report on" "$out"
   assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 1" "dv-archival: lossless audio on" "$out"
   assert_contains "OUTPUT_EXT                = mkv" "dv-archival: MKV container" "$out"
+  assert_contains "truehd,dts,flac" "dv-archival: lossless-first codec preference" "$out"
 
   # hdr10-hq specifics
   out="$(run_muxm --profile hdr10-hq --print-effective-config)"
@@ -940,6 +948,7 @@ test_profiles() {
   assert_contains "OUTPUT_EXT                = mp4" "atv-directplay: MP4 container" "$out"
   assert_contains "SUB_BURN_FORCED           = 1" "atv-directplay: burn forced subs" "$out"
   assert_contains "SKIP_IF_IDEAL             = 1" "atv-directplay: skip-if-ideal on" "$out"
+  assert_contains "MAX_COPY_BITRATE          = 50000k" "atv-directplay: bitrate ceiling" "$out"
 
   # streaming specifics
   out="$(run_muxm --profile streaming --print-effective-config)"
@@ -951,6 +960,8 @@ test_profiles() {
   assert_contains "CRF_VALUE                 = 16" "animation: CRF 16" "$out"
   assert_contains "OUTPUT_EXT                = mkv" "animation: MKV container" "$out"
   assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 1" "animation: lossless audio" "$out"
+  assert_contains "SDR_FORCE_10BIT           = 1" "animation: force 10-bit SDR" "$out"
+  assert_contains "flac,truehd" "animation: FLAC-first codec preference" "$out"
 
   # universal specifics
   out="$(run_muxm --profile universal --print-effective-config)"
@@ -2042,6 +2053,19 @@ _test_unit_audio_helpers() {
   assert_muxm_fn_stdout "_audio_codec_rank(aac)=4"            "4"  _audio_codec_rank "$rank_env" "aac"
   assert_muxm_fn_stdout "_audio_codec_rank(unknown_codec)=10" "10" _audio_codec_rank "$rank_env" "unknown_codec"
 
+  # ---- _audio_codec_rank with dv-archival preference ----
+  local archival_rank_env='AUDIO_CODEC_PREFERENCE="truehd,dts,flac,eac3,ac3,aac,alac,other"'
+  assert_muxm_fn_stdout "_audio_codec_rank(truehd, archival)=0"  "0"  _audio_codec_rank "$archival_rank_env" "truehd"
+  assert_muxm_fn_stdout "_audio_codec_rank(dts, archival)=1"     "1"  _audio_codec_rank "$archival_rank_env" "dts"
+  assert_muxm_fn_stdout "_audio_codec_rank(flac, archival)=2"    "2"  _audio_codec_rank "$archival_rank_env" "flac"
+  assert_muxm_fn_stdout "_audio_codec_rank(eac3, archival)=3"    "3"  _audio_codec_rank "$archival_rank_env" "eac3"
+
+  # ---- _audio_codec_rank with animation preference ----
+  local anim_rank_env='AUDIO_CODEC_PREFERENCE="flac,truehd,eac3,ac3,aac,alac,other"'
+  assert_muxm_fn_stdout "_audio_codec_rank(flac, animation)=0"    "0"  _audio_codec_rank "$anim_rank_env" "flac"
+  assert_muxm_fn_stdout "_audio_codec_rank(truehd, animation)=1"  "1"  _audio_codec_rank "$anim_rank_env" "truehd"
+  assert_muxm_fn_stdout "_audio_codec_rank(eac3, animation)=2"    "2"  _audio_codec_rank "$anim_rank_env" "eac3"
+
   # ---- _audio_is_commentary ----
   assert_muxm_fn_exit "_audio_is_commentary('Director\\'s Commentary')=match"  0 _audio_is_commentary "" "Director's Commentary"
   assert_muxm_fn_exit "_audio_is_commentary('Main Feature')=no match"          1 _audio_is_commentary "" "Main Feature"
@@ -2327,12 +2351,12 @@ test_profile_e2e() {
         dv-archival|atv-directplay-hq)
           assert_stream_count "$profile: audio present" "$outfile" a 1
           ;;
-        hdr10-hq)
+        hdr10-hq|animation)
           pix_fmt="$(probe_video "$outfile" pix_fmt)"
           if echo "$pix_fmt" | grep -q "10"; then
-            pass "hdr10-hq: 10-bit pixel format ($pix_fmt)"
+            pass "$profile: 10-bit pixel format ($pix_fmt)"
           else
-            log "hdr10-hq: pix_fmt=$pix_fmt (expected 10-bit)"
+            fail "$profile: expected 10-bit pixel format, got $pix_fmt"
           fi
           ;;
       esac

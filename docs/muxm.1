@@ -52,7 +52,7 @@ Modern HEVC streaming. CRF 20, preset medium, E\-AC\-3 448k, AAC stereo.
 MP4. Targets Plex/Jellyfin on Shield, Fire TV, Roku, smart TVs, web.
 .TP
 .B animation
-Anime/cartoon optimized. HEVC CRF 16, 10\-bit for SDR sources (anti\-banding),
+Anime/cartoon optimized. HEVC CRF 16, 10\-bit (even SDR),
 animation\-tuned x265 (low psy\-rd, adjusted deblock, extra b\-frames),
 lossless audio, preserve all subs (ASS/SSA). MKV.
 .TP
@@ -140,8 +140,23 @@ Advanced x265 parameter string.
 .BR \-\-tonemap " , " \-\-no\-tonemap
 Enable/disable HDR/HLG to SDR tone\-mapping.
 .TP
+.BR \-\-sdr\-force\-10bit " , " \-\-no\-sdr\-force\-10bit
+Force/don't force 10\-bit output for SDR sources regardless of source bit
+depth. Useful for animation where 8\-bit sources cause visible banding in
+gradients. Default: disabled (follow source bit depth).
+.TP
 .BR \-\-video\-copy\-if\-compliant " , " \-\-no\-video\-copy\-if\-compliant
 Copy/re\-encode video stream when source already matches target profile.
+.TP
+.BR \-\-max\-copy\-bitrate " " \fIRATE\fR
+Maximum average bitrate for
+.B \-\-video\-copy\-if\-compliant
+to accept a stream copy. Sources exceeding this value are re\-encoded.
+Uses ffprobe\(aqs reported bitrate when available, falling back to
+.RI ( file_size\~\[mu]\~8\~/\~duration ).
+Format: number with k suffix (e.g.,
+.BR 50000k ).
+Empty (default) disables the check.
 .TP
 .BR \-\-no\-dv
 Disable Dolby Vision extraction/injection.
@@ -214,6 +229,16 @@ Burn/don't burn forced subtitles into the video stream.
 .TP
 .BR \-\-sub\-export\-external " , " \-\-no\-sub\-export\-external
 Export/embed subtitles as external .srt files.
+.IP
+.BR Note :
+When combined with
+.BR \-\-sub\-burn\-forced ,
+players that auto\-load .srt sidecars with matching filenames (VLC, some
+smart TVs) will display both the burned forced subtitles and the loaded
+external track, resulting in doubled text for foreign\-dialogue segments.
+Use
+.B \-\-no\-sub\-export\-external
+if targeting these players.
 .TP
 .BR \-\-no\-sub\-sdh
 Exclude SDH/HI subtitle tracks.
@@ -360,7 +385,8 @@ Major variable groups:
 .B Video
 .BR CRF_VALUE ", " PRESET_VALUE ", " VIDEO_CODEC ", " X265_PARAMS_BASE ", "
 .BR LEVEL_VALUE ", " CONSERVATIVE_VBV ", " FORCE_CHROMA_420 ", "
-.BR SDR_USE_10BIT_IF_SRC_10BIT ", " HDR_TARGET_PIXFMT ", "
+.BR SDR_USE_10BIT_IF_SRC_10BIT ", " SDR_FORCE_10BIT ", "
+.BR HDR_TARGET_PIXFMT ", " MAX_COPY_BITRATE ", "
 .BR TONEMAP_HDR_TO_SDR ", " TONEMAP_FILTER .
 .TP
 .B Dolby Vision
