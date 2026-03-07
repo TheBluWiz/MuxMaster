@@ -1,4 +1,4 @@
-# MuxMaster™ Freeware License v1.0.0
+# MuxMaster™ Freeware License v1.0.1
 
 Copyright © 2025–2026 Jamey Wicklund (theBluWiz). All rights reserved.
 
@@ -27,7 +27,13 @@ Subject to the terms of this license, you are granted a worldwide, royalty-free,
    - This license file is included in its entirety.
    - No fee is charged for the Software itself (you may charge for physical media or bandwidth, but not for the Software).
    - The Software is clearly identified as the original, unmodified version by Jamey Wicklund.
-3. **Create personal modifications** for your own private use. You may not distribute modified versions of the Software (see Section 5).
+3. **Create and distribute modified versions** ("forks") of the Software, provided that:
+   - The modified version is used only for Personal Use as defined in Section 2.
+   - This license file and all copyright notices are included in their entirety.
+   - The modified version is clearly identified as a modified version and not the original Software.
+   - The name "MuxMaster" or "muxm" is not used in the name of the modified version (see Section 6).
+   - No fee is charged for the modified version itself.
+   - The modified version includes a prominent notice in its primary documentation (e.g., README) stating that it is based on MuxMaster (muxm) by Jamey Wicklund, with a link to the original project repository at [github.com/TheBluWiz/MuxMaster](https://github.com/TheBluWiz/MuxMaster).
 
 ---
 
@@ -43,7 +49,7 @@ For commercial licensing terms and pricing, contact: [**thebluwiz@thoughtspace.p
 
 Without prior written permission from the copyright holder, you may **not**:
 
-- Distribute modified, adapted, or derivative versions of the Software.
+- Distribute modified, adapted, or derivative versions of the Software except as permitted under Section 3.
 - Incorporate the Software, in whole or in part, into another product or service.
 - Sublicense, sell, rent, or lease the Software.
 - Remove or alter any copyright notices, license text, or trademark notices included with the Software.
@@ -110,4 +116,4 @@ This license applies to MuxMaster versions distributed with this license file. T
 ## Contact
 
 - **Commercial licensing:** [thebluwiz@thoughtspace.place](mailto:thebluwiz@thoughtspace.place)
-- **Project home:** [github.com/TheBluWiz/muxm](https://github.com/TheBluWiz/muxm)
+- **Project home:** [github.com/TheBluWiz/MuxMaster](https://github.com/TheBluWiz/MuxMaster)
