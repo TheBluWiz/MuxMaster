@@ -6,9 +6,9 @@
 
 **MuxMaster** (`muxm`) — a single-command video repacking and encoding utility that handles Dolby Vision, HDR10, audio track selection, subtitle processing, and container muxing so you don't have to. Pick a profile, point it at a file, and get a properly encoded output without memorizing ffmpeg flags.
 
-```
-# First-time setup (macOS/Linux)
-muxm --setup
+```bash
+# Install via Homebrew (macOS)
+brew install TheBluWiz/muxm/muxm
 
 # Encode for Apple TV Direct Play — that's it
 muxm --profile atv-directplay-hq movie.mkv
@@ -16,20 +16,22 @@ muxm --profile atv-directplay-hq movie.mkv
 
 ## Table of Contents
 
-- [Why MuxMaster?](#why)
-- [Format Profiles](#profiles)
-- [How It Works](#howitworks)
+- [Why MuxMaster?](#why-muxmaster)
+- [Format Profiles](#format-profiles)
+- [How It Works](#how-it-works)
 - [Installation](#installation)
 - [Usage](#usage)
 - [Configuration](#configuration)
-- [Additional Features](#additionalfeatures)
+- [Additional Features](#additional-features)
 - [FAQ](#faq)
 - [License](#license)
-- [Bug Reports](#bugreports)
+- [Bug Reports](#bug-reports)
 - [Contact](#contact)
 - [Author](#author)
 
 ---
+
+<a id="why-muxmaster"></a>
 
 ## 💡 Why MuxMaster?
 
@@ -46,6 +48,8 @@ MuxMaster sits in the gap between "I know ffmpeg well enough to do this manually
 Configuration is where the design philosophy comes together. Most CLI tools expect you to read the source code to learn which variables exist, then hand-build a dotfile from scratch. `muxm --create-config` generates a complete, commented config file pre-seeded with a real profile's values — you start from a working baseline and customize, not from a blank page. Configs cascade through three tiers (system, user, project) so an encoding team can lock organization defaults in `/etc/.muxmrc` while individuals override their preferred CRF or audio settings in `~/.muxmrc` and specific project directories can pin a streaming profile. And `--print-effective-config` shows you the fully resolved result of all those layers *before* you commit to an encode, so you always know exactly what's about to happen.
 
 ---
+
+<a id="format-profiles"></a>
 
 ## 🎯 Format Profiles
 
@@ -129,6 +133,8 @@ muxm --profile atv-directplay-hq --output-ext mkv movie.mkv
 
 ---
 
+<a id="how-it-works"></a>
+
 ## 🔧 How It Works
 
 <details>
@@ -156,26 +162,50 @@ If any stage fails, `muxm` logs the failure, cleans up incomplete temp files, an
 
 ---
 
+<a id="installation"></a>
+
 ## 📦 Installation
+
+<a id="compatibility"></a>
 
 ### Compatibility
 
 `muxm` requires Bash 4.3+ and runs on macOS (10.15 Catalina or later) and modern Linux distributions (Ubuntu 20.04+, Fedora 33+, Debian 11+, Arch). It is tested primarily on macOS with Homebrew-installed ffmpeg builds.
 
-### Quick Start
+### Homebrew (recommended — macOS)
 
+```bash
+brew install TheBluWiz/muxm/muxm
+muxm --install-completions      # bash/zsh tab completion
 ```
+
+This installs `muxm` with its required dependencies (bash 4.3+, ffmpeg, jq) and the man page automatically.
+
+**Optional dependencies** — for Dolby Vision, subtitle OCR, and subtitle burn-in:
+
+```bash
+muxm --install-dependencies       # installs everything missing in one pass
+```
+
+Or install individually as needed:
+
+```bash
+brew install dovi_tool            # Dolby Vision RPU handling
+brew install gpac                 # DV container signaling (MP4Box)
+brew install tesseract            # PGS subtitle OCR engine
+brew install ffmpeg-full          # ffmpeg with libass (for --sub-burn-forced) + tesseract
+```
+
+Note: `ffmpeg-full` is keg-only, so after installing it you'll need to run `brew link --force ffmpeg-full` to make it available in your PATH. It conflicts with the standard `ffmpeg` formula — Homebrew will prompt you to unlink one before linking the other.
+
+### Manual Install (macOS/Linux)
+
+```bash
 git clone https://github.com/TheBluWiz/MuxMaster.git
 cd MuxMaster
 chmod +x muxm
-muxm --setup                    # installs dependencies, man page, and tab completion
-muxm --profile atv-directplay-hq movie.mkv
-```
-
-Optionally, move `muxm` into your PATH:
-
-```
 sudo cp muxm /usr/local/bin/muxm
+muxm --setup                     # installs dependencies, man page, and tab completion
 ```
 
 ### Dependencies
@@ -196,8 +226,8 @@ sudo cp muxm /usr/local/bin/muxm
 
 ### Setup Helpers
 
-```
-# First-time setup: dependencies, man page, and tab completion
+```bash
+# First-time setup (manual installs only): dependencies, man page, and tab completion
 muxm --setup
 
 # Or run individually:
@@ -215,6 +245,8 @@ muxm --uninstall-completions
 ```
 
 ---
+
+<a id="usage"></a>
 
 ## 🚀 Usage
 
@@ -265,6 +297,8 @@ muxm [options] <source> [target.mp4]
 Run `muxm --help` for the full flag reference.
 
 ---
+
+<a id="configuration"></a>
 
 ## ⚙️ Configuration
 
@@ -325,6 +359,8 @@ Every variable is displayed grouped by section, with the active profile name and
 
 ---
 
+<a id="additional-features"></a>
+
 ## 📋 Additional Features
 
 Beyond profiles and the core encoding pipeline, `muxm` ships with a set of operational features that make it safer and easier to use in practice:
@@ -339,10 +375,12 @@ Beyond profiles and the core encoding pipeline, `muxm` ships with a set of opera
 
 ---
 
+<a id="faq"></a>
+
 ## ❓ FAQ
 
 **`muxm` says it requires Bash 4.3+ but I'm on macOS.**
-macOS ships Bash 3.2 (2007) due to licensing. Install a modern version with `brew install bash`, then make sure `/opt/homebrew/bin/bash` (Apple Silicon) or `/usr/local/bin/bash` (Intel) appears before `/bin/bash` in your `$PATH`.
+macOS ships Bash 3.2 (2007) due to licensing. If you installed via Homebrew (`brew install TheBluWiz/muxm/muxm`), this is handled automatically — the formula rewrites the shebang to use Homebrew's bash. For manual installs, run `brew install bash` and make sure `/opt/homebrew/bin/bash` (Apple Silicon) or `/usr/local/bin/bash` (Intel) appears before `/bin/bash` in your `$PATH`.
 
 **Dolby Vision handling seems to be disabled / I don't see DV in my output.**
 DV processing requires `dovi_tool` and, for MP4 container signaling, `MP4Box` (gpac). If either is missing, `muxm` silently disables DV features rather than failing. Run `muxm --install-dependencies` to install them, or check with `muxm --dry-run` — the output will show whether DV was detected and what the pipeline plans to do with it.
@@ -370,6 +408,8 @@ CRF-based encoding targets quality, not file size. A visually complex source (gr
 
 ---
 
+<a id="license"></a>
+
 ## 📄 License
 
 MuxMaster is freeware for personal, non-commercial use.
@@ -379,6 +419,8 @@ Full license text available in [LICENSE.md](LICENSE.md)
 
 ---
 
+<a id="bug-reports"></a>
+
 ## 🐛 Bug Reports
 
 Found a bug? Please [open an issue on GitHub](https://github.com/TheBluWiz/MuxMaster/issues). Include the output of `muxm --version`, the profile and flags you used, and any relevant log output. A `--dry-run` dump or `--report-json` output is especially helpful.
@@ -386,6 +428,8 @@ Found a bug? Please [open an issue on GitHub](https://github.com/TheBluWiz/MuxMa
 This is a solo-maintained project and I'm not accepting outside code contributions at this time. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ---
+
+<a id="contact"></a>
 
 ## 📬 Contact
 
@@ -395,6 +439,8 @@ If you're using MuxMaster, I'd love to hear about it — what's working, what's 
 - **Everything else** (feedback, licensing, questions) → [thebluwiz@thoughtspace.place](mailto:thebluwiz@thoughtspace.place)
 
 ---
+
+<a id="author"></a>
 
 ## 👤 Author
 

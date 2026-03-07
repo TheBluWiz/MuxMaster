@@ -1,82 +1,64 @@
-# Changelog
+# typed: strict
+# frozen_string_literal: true
 
-All notable changes to MuxMaster will be documented in this file.
+# Formula for MuxMaster (muxm) — video encoding/muxing utility
+# https://github.com/TheBluWiz/MuxMaster
+class Muxm < Formula
+  desc "Universal video encoder/muxer for DV, HDR10, HLG, and SDR with format profiles"
+  homepage "https://github.com/TheBluWiz/MuxMaster"
+  url "https://github.com/TheBluWiz/MuxMaster/archive/refs/tags/v1.0.0.tar.gz"
+  sha256 "6bd97e0114a3854e2e7a42b1d25d0ef9cdfc3582b186c173c874840969fcb85c"
+  license :cannot_represent # MuxMaster Freeware License v1.0.0
 
-The format is based on [Keep a Changelog](https://keepachangelog.com), and this project adheres to [Semantic Versioning](https://semver.org).
+  depends_on "bash"   # macOS ships bash 3.2; muxm requires 4.3+
+  depends_on "jq"
+  depends_on :macos   # tested primarily on macOS; Linux users install differently
 
-## [1.0.0] - 2026-03-09
+  # ffmpeg is required but users may want the homebrew-ffmpeg tap build
+  # (--with-libass) for subtitle burn-in. We depend on core ffmpeg and
+  # note the libass upgrade path in caveats.
+  depends_on "ffmpeg"
 
-Initial public release.
+  # Optional but recommended — gracefully disabled at runtime if missing.
+  # These are not declared as depends_on because muxm auto-disables
+  # features when they're absent. Users can install as needed:
+  #   brew install dovi_tool gpac tesseract
 
-### Core
+  def install
+    # Rewrite shebang from /usr/bin/env bash to Homebrew's bash 4.3+
+    inreplace "muxm", "#!/usr/bin/env bash",
+                       "#!#{Formula["bash"].opt_bin}/bash"
 
-- Multi-stage encoding pipeline: source inspection → profile resolution → video → audio → subtitles → final mux → verification
-- Single-pass ffprobe metadata cache for all stream analysis
-- Layered configuration precedence: hardcoded defaults → `/etc/.muxmrc` → `~/.muxmrc` → `./.muxmrc` → `--profile` → CLI flags
-- 60+ CLI flags with `--help`, `man muxm`, and bash/zsh tab completion
+    bin.install "muxm"
+  end
 
-### Format Profiles
+  def post_install
+    # Install man page via muxm's built-in installer.
+    # Detects brew --prefix automatically and writes to the correct path.
+    system bin/"muxm", "--install-man"
+  end
 
-- **`dv-archival`** — Lossless Dolby Vision preservation. Copy video if compliant, lossless audio passthrough, skip-if-ideal, JSON reporting
-- **`hdr10-hq`** — High-quality HDR10 encoding. HEVC CRF 17, strip DV, lossless audio + stereo fallback, MKV
-- **`atv-directplay-hq`** — Apple TV 4K Direct Play via Plex. MP4, HEVC Main10, DV Profile 8.1 auto-conversion, E-AC-3 + AAC stereo, forced subtitle burn-in
-- **`streaming`** — Modern HEVC streaming for Plex/Jellyfin/Emby. CRF 20, E-AC-3 448k, AAC stereo, MP4
-- **`animation`** — Optimized for anime and cartoons. CRF 16, keeps 10-bit for SDR sources (anti-banding), low psy-rd/psy-rdoq, lossless audio, ASS/SSA subtitle preservation, MKV
-- **`universal`** — Maximum compatibility. H.264 SDR with HDR tone-mapping, AAC stereo, burned forced subs, external SRT export, MP4
+  def caveats
+    <<~EOS
+      muxm is installed. To complete setup, run:
 
-### Video
+        muxm --install-completions    # bash/zsh tab completion
 
-- Dolby Vision detection via stream metadata and frame-level side data
-- RPU extraction, profile conversion (P7 dual-layer → P8.1 single-layer), and injection via `dovi_tool`
-- DV container signaling verification via `MP4Box`
-- Color space detection (BT.2020 PQ, BT.2020 HLG, BT.709 SDR) with distinct HDR10, HLG, and SDR encoding paths and automatic x265 parameter selection
-- HDR-to-SDR tone-mapping via zscale + hable
-- Chroma subsampling normalization (4:2:2/4:4:4 → 4:2:0) for Direct Play compatibility
-- Video copy-if-compliant to skip re-encoding when source already matches target, with configurable bitrate ceiling to prevent blindly copying oversized streams
-- Conservative VBV guardrails per x265 level
+      Optional dependencies (install as needed):
 
-### Audio
+        brew install dovi_tool         # Dolby Vision RPU handling
+        brew install gpac              # DV container signaling (MP4Box)
+        brew install tesseract         # PGS subtitle OCR
 
-- Weighted scoring system for automatic track selection (language, channels, surround bonus, codec preference, commentary penalty)
-- Configurable scoring weights via `.muxmrc`
-- Lossless passthrough for TrueHD, DTS-HD MA, and FLAC
-- Automatic AAC stereo fallback generation from surround sources
-- E-AC-3 transcoding at profile-specific bitrates (5.1 and 7.1)
-- Descriptive audio stream titling (e.g., "5.1 Surround (E-AC-3)")
+      For subtitle burn-in (--sub-burn-forced), ffmpeg must be built with
+      libass. If you need this feature:
 
-### Subtitles
+        brew tap homebrew-ffmpeg/ffmpeg
+        brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libass
+    EOS
+  end
 
-- Track categorization: forced, full, and SDH
-- PGS bitmap subtitle OCR to SRT via `pgsrip` or `sub2srt`
-- Forced subtitle burn-in
-- External `.srt` export
-- Language preference filtering
-- SDH track exclusion
-
-### Output & Reporting
-
-- MP4, MKV, M4V, and MOV container support
-- Chapter marker preservation and stripping
-- Metadata stripping
-- skip-if-ideal detection (avoids re-processing compliant files)
-- JSON reporting with full decision/warning/stream-mapping documentation
-- SHA-256 checksum generation
-- Dry-run mode (`--dry-run`) for previewing the full pipeline without encoding
-- Effective config display (`--print-effective-config`) showing resolved settings from all layers
-
-### Setup & Tooling
-
-- `--setup` for one-command first-time installation (dependencies + man page + tab completion)
-- `--install-dependencies` with Homebrew and pipx detection
-- `--install-man` / `--uninstall-man` for system man page management
-- `--install-completions` / `--uninstall-completions` for bash/zsh tab completion
-- `--create-config` / `--force-create-config` for generating pre-seeded `.muxmrc` files
-- Conflict warnings for contradictory profile + flag combinations
-- Spinner and progress bar for long-running operations
-- Quick-test mode (`--skip-video`, `--skip-audio`, `--skip-subs`) for validating pipeline decisions without waiting for a full encode
-- Disk space preflight warning before encoding begins
-- Graceful signal handling (Ctrl-C / SIGTERM) with automatic temp file cleanup
-- Structured exit codes for scripting and automation (10 = missing tool, 11 = bad arguments, 12 = corrupt source, 40–43 = pipeline failures)
-- Comprehensive test harness (`test_muxm.sh`) with 18 test suites and ~165 assertions
-
-[1.0.0]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.0.0
+  test do
+    assert_match "MuxMaster v#{version}", shell_output("#{bin}/muxm --version")
+  end
+end
