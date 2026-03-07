@@ -594,7 +594,7 @@ fi
 # Config chain (Section 6) is sourced before this so the installer sees the
 # user's resolved SUB_OCR_TOOL and other config-file settings.
 #
-# Required:     ffmpeg, ffprobe, jq
+# Required:     ffmpeg (with libass, via homebrew-ffmpeg tap), ffprobe, jq, bc
 # DV pipeline:  dovi_tool, mp4box (gpac)
 # Subtitles:    tesseract, pgsrip (Python, via pipx)
 
@@ -625,6 +625,15 @@ _dep_check_only(){
 
   say "Core (required):"
   _check_tool ffmpeg
+  # Check for libass support in ffmpeg (needed for --sub-burn-forced)
+  if command -v ffmpeg >/dev/null 2>&1; then
+    printf "  %-14s" "  └ libass"
+    if ffmpeg -version 2>/dev/null | grep -q -- "--enable-libass"; then
+      printf "✅ built with libass support\n"
+    else
+      printf "⚠️  built without libass — --sub-burn-forced will not work\n"
+    fi
+  fi
   _check_tool ffprobe
   _check_tool jq
   _check_tool bc
@@ -777,10 +786,80 @@ _dep_install_dependencies(){
     fi
   }
 
+  # Helper: install ffmpeg with libass support for --sub-burn-forced.
+  # Detection uses ffmpeg's compiled-in configure flags (ffmpeg -version),
+  # which are stable across versions — unlike filter list output which varies.
+  # If ffmpeg is already built with --enable-libass, this is a no-op.
+  _ensure_ffmpeg_full(){
+    total=$(( total + 1 ))
+    printf "  %-14s" "ffmpeg"
+    if command -v ffmpeg >/dev/null 2>&1; then
+      # Check compiled-in build flags — most reliable across all install methods
+      if ffmpeg -version 2>/dev/null | grep -q -- "--enable-libass"; then
+        printf "✅ already installed with libass (%s)\n" "$(command -v ffmpeg)"
+        skipped=$(( skipped + 1 ))
+        return
+      fi
+      printf "⚠️  installed but built without libass (needed for --sub-burn-forced)\n"
+
+      # Identify which Homebrew formula is currently providing ffmpeg so we
+      # uninstall the right one. Without this, `brew uninstall ffmpeg` may
+      # miss a tapped formula (e.g., homebrew-ffmpeg/ffmpeg/ffmpeg).
+      local _current_formula=""
+      if brew ls --versions homebrew-ffmpeg/ffmpeg/ffmpeg >/dev/null 2>&1; then
+        _current_formula="homebrew-ffmpeg/ffmpeg/ffmpeg"
+      elif brew ls --versions ffmpeg >/dev/null 2>&1; then
+        _current_formula="ffmpeg"
+      fi
+
+      if [[ -n "$_current_formula" ]]; then
+        printf "  %-14s⏳ removing %s before reinstall...\n" "" "$_current_formula"
+        brew uninstall --ignore-dependencies "$_current_formula" 2>&1 | sed 's/^/    /' || true
+      fi
+    else
+      printf "⏳ installing via homebrew-ffmpeg tap (--with-libass)...\n"
+    fi
+
+    brew tap homebrew-ffmpeg/ffmpeg 2>&1 | sed 's/^/    /' || true
+    if brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libass 2>&1 | sed 's/^/    /'; then
+      if command -v ffmpeg >/dev/null 2>&1; then
+        if ffmpeg -version 2>/dev/null | grep -q -- "--enable-libass"; then
+          printf "  %-14s✅ installed with libass\n" "ffmpeg"
+        else
+          printf "  %-14s✅ installed (verify libass with: ffmpeg -version | grep enable-libass)\n" "ffmpeg"
+        fi
+        installed=$(( installed + 1 ))
+      else
+        printf "  %-14s⚠️  install succeeded but ffmpeg not found in PATH\n" "ffmpeg"
+        failed=$(( failed + 1 ))
+      fi
+    else
+      # Fallback: if the tap fails, install standard ffmpeg so the tool is at least usable
+      printf "  %-14s⚠️  homebrew-ffmpeg tap failed — falling back to standard ffmpeg\n" ""
+      if brew install ffmpeg 2>&1 | sed 's/^/    /'; then
+        printf "  %-14s✅ installed (standard build — --sub-burn-forced may not work)\n" "ffmpeg"
+        installed=$(( installed + 1 ))
+      else
+        printf "  %-14s❌ ffmpeg install failed\n" ""
+        failed=$(( failed + 1 ))
+      fi
+    fi
+  }
+
   say "Core tools (required):"
-  _brew_ensure ffmpeg   ffmpeg
-  _brew_ensure ffprobe  ffmpeg
+  _ensure_ffmpeg_full
+  # ffprobe ships with ffmpeg — verify it's on PATH
+  total=$(( total + 1 ))
+  printf "  %-14s" "ffprobe"
+  if command -v ffprobe >/dev/null 2>&1; then
+    printf "✅ already installed (%s)\n" "$(command -v ffprobe)"
+    skipped=$(( skipped + 1 ))
+  else
+    printf "❌ not found (should have been installed with ffmpeg)\n"
+    failed=$(( failed + 1 ))
+  fi
   _brew_ensure jq       jq
+  _brew_ensure bc       bc
   echo ""
 
   say "Dolby Vision pipeline (recommended):"

@@ -4,7 +4,7 @@ All notable changes to MuxMaster will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com), and this project adheres to [Semantic Versioning](https://semver.org).
 
-## [1.0.0] - 2026-03-02
+## [1.0.0] - 2026-03-09
 
 Initial public release.
 
@@ -29,9 +29,10 @@ Initial public release.
 - Dolby Vision detection via stream metadata and frame-level side data
 - RPU extraction, profile conversion (P7 dual-layer → P8.1 single-layer), and injection via `dovi_tool`
 - DV container signaling verification via `MP4Box`
-- Color space detection (BT.2020 PQ, BT.2020 HLG, BT.709 SDR) with automatic x265 parameter selection
+- Color space detection (BT.2020 PQ, BT.2020 HLG, BT.709 SDR) with distinct HDR10, HLG, and SDR encoding paths and automatic x265 parameter selection
 - HDR-to-SDR tone-mapping via zscale + hable
-- Video copy-if-compliant to skip re-encoding when source already matches target
+- Chroma subsampling normalization (4:2:2/4:4:4 → 4:2:0) for Direct Play compatibility
+- Video copy-if-compliant to skip re-encoding when source already matches target, with configurable bitrate ceiling to prevent blindly copying oversized streams
 - Conservative VBV guardrails per x265 level
 
 ### Audio
@@ -72,6 +73,10 @@ Initial public release.
 - `--create-config` / `--force-create-config` for generating pre-seeded `.muxmrc` files
 - Conflict warnings for contradictory profile + flag combinations
 - Spinner and progress bar for long-running operations
+- Quick-test mode (`--skip-video`, `--skip-audio`, `--skip-subs`) for validating pipeline decisions without waiting for a full encode
+- Disk space preflight warning before encoding begins
+- Graceful signal handling (Ctrl-C / SIGTERM) with automatic temp file cleanup
+- Structured exit codes for scripting and automation (10 = missing tool, 11 = bad arguments, 12 = corrupt source, 40–43 = pipeline failures)
 - Comprehensive test harness (`test_muxm.sh`) with 18 test suites and ~165 assertions
 
-[1.0.0]: https://github.com/USER/muxm/releases/tag/v1.0.0
+[1.0.0]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.0.0
