@@ -20,6 +20,7 @@ muxm --profile atv-directplay-hq movie.mkv
 - [Format Profiles](#format-profiles)
 - [How It Works](#how-it-works)
 - [Installation](#installation)
+- [Upgrading](#upgrading)
 - [Usage](#usage)
 - [Configuration](#configuration)
 - [Additional Features](#additional-features)
@@ -242,6 +243,28 @@ muxm --create-config project streaming         # ./.muxmrc
 # Remove installed components
 muxm --uninstall-man
 muxm --uninstall-completions
+```
+
+### Upgrading
+
+<a id="upgrading"></a>
+
+**Homebrew:**
+
+```bash
+brew upgrade muxm
+```
+
+The man page and tab completions are refreshed automatically on every upgrade — no extra steps needed.
+
+**Manual installs:**
+
+Pull the latest version and re-run setup to update the man page, completions, and dependencies:
+
+```bash
+cd MuxMaster && git pull
+sudo cp muxm /usr/local/bin/muxm
+muxm --setup
 ```
 
 ---
