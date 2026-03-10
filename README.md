@@ -87,7 +87,7 @@ muxm --profile hdr10-hq movie.mkv
 
 ### `atv-directplay-hq` — Apple TV Direct Play
 
-Targets true Direct Play on Apple TV 4K via Plex: MP4 container, HEVC Main10 with DV Profile 8.1 when possible, E-AC-3 surround with AAC stereo fallback, and forced subtitle burn-in. Copies compliant video without re-encoding. Skips processing if source is already ATV-compliant.
+Targets true Direct Play on Apple TV 4K via Plex: MP4 container, HEVC Main10 with DV Profile 8.1 when possible, E-AC-3 surround with AAC stereo fallback, and forced subtitle burn-in. Copies compliant video without re-encoding. **Automatically uses hardware acceleration (NVIDIA/Intel/Apple) when available** for 3-5x faster encoding. Skips processing if source is already ATV-compliant.
 
 ```
 muxm --profile atv-directplay-hq movie.mkv
@@ -242,6 +242,18 @@ muxm --create-config project streaming         # ./.muxmrc
 muxm --uninstall-man
 muxm --uninstall-completions
 ```
+
+**🚀 Hardware Acceleration Setup**
+
+After installation, configure hardware acceleration for 3-5x faster encoding:
+
+```bash
+# Auto-detect and configure your GPU (NVIDIA/Intel/Apple)
+muxm --setup
+```
+
+**📖 Full Hardware Acceleration Guide:**  
+[See comprehensive setup documentation](docs/hardware_acceleration.md) for platform-specific requirements, FFmpeg setup, troubleshooting, and performance optimization.
 
 ### Upgrading
 
