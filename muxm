@@ -4954,11 +4954,13 @@ run_video_pipeline() {
       hevc_videotoolbox)
         # Apple VideoToolbox: use -q:v instead of -crf, no preset support
         # VideoToolbox doesn't support -preset parameter
-        encode_args=(-c:v hevc_videotoolbox -q:v "$CRF_VALUE" -pix_fmt "$TARGET_PIXFMT" "${COLOR_ARGS[@]}")
+        # Add -allow_sw 1 to allow software fallback if hardware is busy
+        encode_args=(-c:v hevc_videotoolbox -q:v "$CRF_VALUE" -pix_fmt "$TARGET_PIXFMT" -allow_sw 1 "${COLOR_ARGS[@]}")
         ;;
       h264_videotoolbox)
         # Apple VideoToolbox H.264: use -q:v instead of -crf, no preset support
-        encode_args=(-c:v h264_videotoolbox -q:v "$CRF_VALUE" -pix_fmt yuv420p "${COLOR_ARGS[@]}")
+        # Add -allow_sw 1 to allow software fallback if hardware is busy
+        encode_args=(-c:v h264_videotoolbox -q:v "$CRF_VALUE" -pix_fmt yuv420p -allow_sw 1 "${COLOR_ARGS[@]}")
         ;;
       *)
         # libx265 (CPU encode)
