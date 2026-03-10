@@ -903,6 +903,33 @@ _dep_install_dependencies(){
   _pipx_ensure pgsrip   pgsrip
   echo ""
 
+  say "Hardware Acceleration (optional — for faster encoding):"
+  echo ""
+  echo "  MuxMaster can use GPU acceleration for video encoding and decoding."
+  echo "  Supported platforms:"
+  echo ""
+  echo "  • NVIDIA GPU (CUDA):"
+  echo "    - Requires: NVIDIA GPU driver + ffmpeg with hevc_nvenc support"
+  echo "    - Install NVENC library:"
+  echo "      macOS:  brew install nvidia-video-sdk"
+  echo "      Linux:  sudo apt install libnvidia-encode1  (Debian/Ubuntu)"
+  echo "              sudo dnf install libnvidia-encode   (Fedora/RHEL)"
+  echo "              sudo pacman -S nvidia-utils         (Arch)"
+  echo ""
+  echo "  • Intel GPU (QuickSync):"
+  echo "    - Requires: Intel CPU with QuickSync + ffmpeg with hevc_qsv support"
+  echo "    - Install: libmfx-dev (Linux) or included in ffmpeg (macOS/Windows)"
+  echo ""
+  echo "  • Apple Silicon (VideoToolbox):"
+  echo "    - Built into macOS — no additional installation needed"
+  echo "    - Requires: ffmpeg compiled with --enable-videotoolbox"
+  echo "    - Homebrew ffmpeg includes this by default"
+  echo ""
+  echo "  After installing hardware support, run:"
+  echo "    muxm --show-hardware-info    # Check detected hardware"
+  echo "    muxm --setup                 # Cache hardware detection"
+  echo ""
+
   # TESSDATA_PREFIX check
   say "Environment:"
   local tessdir_resolved
