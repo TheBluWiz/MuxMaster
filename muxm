@@ -617,7 +617,12 @@ _detect_intel_gpu(){
   if ! command -v ffmpeg >/dev/null 2>&1; then
     return 1
   fi
-  if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q hevc_qsv; then
+  # Check for hevc_qsv encoder (primary check)
+  if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "hevc_qsv"; then
+    return 0
+  fi
+  # Fallback: check for h264_qsv if hevc_qsv not found
+  if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "h264_qsv"; then
     return 0
   fi
   return 1
@@ -733,30 +738,30 @@ _dep_check_only(){
   printf "  %-20s" "NVIDIA GPU (CUDA)"
   hw_total=$(( hw_total + 1 ))
   if _detect_nvidia_gpu; then
-    printf "✅ detected\n"
+    printf "\t✅ detected\n"
     hw_available=$(( hw_available + 1 ))
   else
-    printf "❌ not found\n"
+    printf "\t❌ not found\n"
     hw_unavailable=$(( hw_unavailable + 1 ))
   fi
   
   printf "  %-20s" "Intel GPU (QuickSync)"
   hw_total=$(( hw_total + 1 ))
   if _detect_intel_gpu; then
-    printf "✅ detected\n"
+    printf "\t✅ detected\n"
     hw_available=$(( hw_available + 1 ))
   else
-    printf "❌ not found\n"
+    printf "\t❌ not found\n"
     hw_unavailable=$(( hw_unavailable + 1 ))
   fi
   
   printf "  %-20s" "Apple Silicon (VT)"
   hw_total=$(( hw_total + 1 ))
   if _detect_apple_silicon; then
-    printf "✅ detected\n"
+    printf "\t✅ detected\n"
     hw_available=$(( hw_available + 1 ))
   else
-    printf "❌ not found\n"
+    printf "\t❌ not found\n"
     hw_unavailable=$(( hw_unavailable + 1 ))
   fi
   
