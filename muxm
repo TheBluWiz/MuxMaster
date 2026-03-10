@@ -4952,15 +4952,32 @@ run_video_pipeline() {
         encode_args=(-c:v hevc_qsv -preset "$PRESET_VALUE" -global_quality "$CRF_VALUE" -pix_fmt "$TARGET_PIXFMT" "${COLOR_ARGS[@]}")
         ;;
       hevc_videotoolbox)
-        # Apple VideoToolbox: use -q:v instead of -crf, no preset support
-        # VideoToolbox doesn't support -preset parameter
-        # Add -allow_sw 1 to allow software fallback if hardware is busy
-        encode_args=(-c:v hevc_videotoolbox -q:v "$CRF_VALUE" -pix_fmt "$TARGET_PIXFMT" -allow_sw 1 "${COLOR_ARGS[@]}")
+        # Apple VideoToolbox: use -b:v for bitrate instead of -q:v or -crf
+        # VideoToolbox doesn't support -preset or -q:v parameters
+        # Convert CRF to approximate bitrate (rough estimate: higher CRF = lower bitrate)
+        # CRF 17 ≈ 4000k, CRF 20 ≈ 3000k, CRF 23 ≈ 2000k
+        local vt_bitrate="4000k"
+        case "$CRF_VALUE" in
+          14|15|16|17) vt_bitrate="5000k" ;;
+          18|19|20) vt_bitrate="3500k" ;;
+          21|22|23) vt_bitrate="2500k" ;;
+          24|25|26) vt_bitrate="2000k" ;;
+          *) vt_bitrate="3000k" ;;
+        esac
+        encode_args=(-c:v hevc_videotoolbox -b:v "$vt_bitrate" -pix_fmt "$TARGET_PIXFMT" -allow_sw 1 "${COLOR_ARGS[@]}")
         ;;
       h264_videotoolbox)
-        # Apple VideoToolbox H.264: use -q:v instead of -crf, no preset support
-        # Add -allow_sw 1 to allow software fallback if hardware is busy
-        encode_args=(-c:v h264_videotoolbox -q:v "$CRF_VALUE" -pix_fmt yuv420p -allow_sw 1 "${COLOR_ARGS[@]}")
+        # Apple VideoToolbox H.264: use -b:v for bitrate instead of -q:v or -crf
+        # VideoToolbox doesn't support -preset or -q:v parameters
+        local vt_bitrate="4000k"
+        case "$CRF_VALUE" in
+          14|15|16|17) vt_bitrate="5000k" ;;
+          18|19|20) vt_bitrate="3500k" ;;
+          21|22|23) vt_bitrate="2500k" ;;
+          24|25|26) vt_bitrate="2000k" ;;
+          *) vt_bitrate="3000k" ;;
+        esac
+        encode_args=(-c:v h264_videotoolbox -b:v "$vt_bitrate" -pix_fmt yuv420p -allow_sw 1 "${COLOR_ARGS[@]}")
         ;;
       *)
         # libx265 (CPU encode)
