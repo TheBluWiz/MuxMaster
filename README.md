@@ -65,7 +65,6 @@ muxm --profile <n> input.mkv
 | `dv-archival` | Lossless preservation | MKV | Copy (no re-encode) | Lossless passthrough | Preserve |
 | `hdr10-hq` | Max HDR10 quality | MKV | HEVC CRF 17 | Lossless + stereo fallback | Strip |
 | `atv-directplay-hq` | Apple TV Direct Play | MP4 | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | P8.1 auto |
-| `atv-directplay-hq-nvenc` | Apple TV Direct Play (GPU) | MP4 | HEVC NVENC CQ 17 | E-AC-3 + AAC stereo | Strip |
 | `streaming` | Modern HEVC streaming | MP4 | HEVC CRF 20 | E-AC-3 448k + AAC stereo | Strip |
 | `animation` | Anime/cartoon optimized | MKV | HEVC CRF 16, 10-bit | Lossless + stereo fallback | Strip |
 | `universal` | Play anywhere | MP4 | H.264 SDR (tone-map HDR) | AAC stereo | Strip |
@@ -88,56 +87,10 @@ muxm --profile hdr10-hq movie.mkv
 
 ### `atv-directplay-hq` — Apple TV Direct Play
 
-Targets true Direct Play on Apple TV 4K via Plex: MP4 container, HEVC Main10 with DV Profile 8.1 when possible, E-AC-3 surround with AAC stereo fallback, and forced subtitle burn-in. Copies compliant video without re-encoding. Skips processing if source is already ATV-compliant.
+Targets true Direct Play on Apple TV 4K via Plex: MP4 container, HEVC Main10 with DV Profile 8.1 when possible, E-AC-3 surround with AAC stereo fallback, and forced subtitle burn-in. Copies compliant video without re-encoding. **Automatically uses hardware acceleration (NVIDIA/Intel/Apple) when available** for 3-5x faster encoding. Skips processing if source is already ATV-compliant.
 
 ```
 muxm --profile atv-directplay-hq movie.mkv
-```
-
-### `atv-directplay-hq-nvenc` — Apple TV Direct Play with NVIDIA NVENC
-
-Optimized for Apple TV Direct Play using NVIDIA NVENC GPU encoding. Targets the same Apple TV / Plex Direct Play compatibility as `atv-directplay-hq`, but uses GPU-accelerated HEVC encoding instead of CPU-based x265. Intelligently detects source codec and enables GPU decoding when supported, providing full GPU acceleration for compatible sources. Does not burn forced subtitles to keep the encode path simple; uses soft subtitles instead.
-
-**Requirements:**
-- ffmpeg compiled with `hevc_nvenc` support
-- Working NVIDIA GPU driver
-- Runtime NVENC library: `libnvidia-encode.so.1` (on Debian/Ubuntu, install `libnvidia-encode1`)
-
-**Typical behavior:**
-- Video decode: GPU (CUDA) when source codec supports it (H.264, HEVC, VP8, VP9, AV1, MPEG-2, VC-1); CPU otherwise
-- Video encode: NVIDIA GPU (HEVC, CQ 17, preset p5)
-- Audio: E-AC-3 surround + AAC stereo fallback
-- Subtitles: Soft subtitles (no burn-in)
-- DV handling: Strips DV (NVENC does not support DV injection in this profile)
-
-**GPU Decode Support:**
-The profile automatically detects source codec and enables CUDA hardware decoding for:
-- H.264 / AVC
-- HEVC / H.265
-- VP8, VP9
-- AV1
-- MPEG-2
-- VC-1
-
-For unsupported codecs, decoding falls back to CPU automatically.
-
-**Verification:**
-```bash
-# Check GPU availability
-nvidia-smi
-
-# Verify ffmpeg has hevc_nvenc support
-ffmpeg -hide_banner -encoders | grep nvenc
-```
-
-**Troubleshooting:**
-If you see `Cannot load libnvidia-encode.so.1`:
-- **Debian/Ubuntu:** `sudo apt-get install libnvidia-encode1`
-- **Fedora/RHEL:** `sudo dnf install libnvidia-encode`
-- **Arch:** `sudo pacman -S nvidia-utils`
-
-```
-muxm --profile atv-directplay-hq-nvenc movie.mkv
 ```
 
 ### `streaming` — Modern HEVC Streaming
