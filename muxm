@@ -614,15 +614,15 @@ _detect_nvidia_gpu(){
 _detect_intel_gpu(){
   # Check for Intel GPU and QuickSync support
   # Note: requires ffmpeg to be installed to check encoder availability
-  if ! command -v ffmpeg >/dev/null 2>&1; then
-    return 1
-  fi
+  local ffmpeg_path
+  ffmpeg_path="$(command -v ffmpeg 2>/dev/null)" || return 1
+  
   # Check for hevc_qsv encoder (primary check)
-  if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "hevc_qsv"; then
+  if "$ffmpeg_path" -hide_banner -encoders 2>/dev/null | grep -q "hevc_qsv"; then
     return 0
   fi
   # Fallback: check for h264_qsv if hevc_qsv not found
-  if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "h264_qsv"; then
+  if "$ffmpeg_path" -hide_banner -encoders 2>/dev/null | grep -q "h264_qsv"; then
     return 0
   fi
   return 1
