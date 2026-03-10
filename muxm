@@ -617,11 +617,19 @@ _detect_intel_gpu(){
   local ffmpeg_path
   ffmpeg_path="$(command -v ffmpeg 2>/dev/null)" || return 1
   
-  # Try to detect QSV encoders - check multiple patterns to be robust
-  # Some ffmpeg builds may have different output formatting
-  if "$ffmpeg_path" -hide_banner -encoders 2>/dev/null | grep -E "qsv|QuickSync" >/dev/null 2>&1; then
+  # Check if ffmpeg has QSV encoders
+  if ! "$ffmpeg_path" -hide_banner -encoders 2>/dev/null | grep -E "qsv|QuickSync" >/dev/null 2>&1; then
+    return 1
+  fi
+  
+  # Test if QSV device is actually available by attempting to initialize it
+  # Create a minimal test: try to use hevc_qsv encoder with hwaccel qsv
+  # If device creation fails, the hardware is not available
+  if "$ffmpeg_path" -hide_banner -hwaccel qsv -f lavfi -i color=c=black:s=320x240:d=0.1 \
+    -c:v hevc_qsv -t 0.1 -f null - >/dev/null 2>&1; then
     return 0
   fi
+  
   return 1
 }
 
