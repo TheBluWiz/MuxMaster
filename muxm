@@ -2076,8 +2076,7 @@ _setup_all(){
   # ---- 4. Hardware detection and config generation ----
   say "━━━ Step 4/4: Hardware Detection & Config ━━━"
   echo ""
-  _detect_hardware
-  say "Detected hardware acceleration: $HWACCEL_TYPE"
+  _setup_detect_and_display_hardware
   echo ""
   say "Generating user config (~/.muxmrc) with hardware settings..."
   if ( _create_config_user_with_hardware ); then
@@ -2103,6 +2102,61 @@ _setup_all(){
   else
     warn "Setup finished with $failures step(s) reporting errors. Check output above."
     exit 1
+  fi
+}
+
+_setup_detect_and_display_hardware(){
+  # Detect hardware and display results in dependency-checker style
+  say "Hardware Acceleration Support:"
+  echo ""
+  
+  local -i total=0 available=0 unavailable=0
+  
+  # NVIDIA GPU (CUDA)
+  total=$(( total + 1 ))
+  printf "  %-20s" "NVIDIA GPU (CUDA)"
+  if _detect_nvidia_gpu; then
+    printf "✅ detected\n"
+    available=$(( available + 1 ))
+  else
+    printf "❌ not found\n"
+    unavailable=$(( unavailable + 1 ))
+  fi
+  
+  # Intel GPU (QuickSync)
+  total=$(( total + 1 ))
+  printf "  %-20s" "Intel GPU (QuickSync)"
+  if _detect_intel_gpu; then
+    printf "✅ detected\n"
+    available=$(( available + 1 ))
+  else
+    printf "❌ not found\n"
+    unavailable=$(( unavailable + 1 ))
+  fi
+  
+  # Apple Silicon (VideoToolbox)
+  total=$(( total + 1 ))
+  printf "  %-20s" "Apple Silicon (VT)"
+  if _detect_apple_silicon; then
+    printf "✅ detected\n"
+    available=$(( available + 1 ))
+  else
+    printf "❌ not found\n"
+    unavailable=$(( unavailable + 1 ))
+  fi
+  
+  echo ""
+  
+  # Detect and set primary hardware
+  _detect_hardware
+  
+  say "Summary: $total checked, $available available, $unavailable unavailable"
+  say "Primary hardware: $HWACCEL_TYPE"
+  
+  if (( HWACCEL_ENABLED )); then
+    say "✅ Hardware acceleration enabled"
+  else
+    say "ℹ️  Hardware acceleration disabled (CPU encoding will be used)"
   fi
 }
 
