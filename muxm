@@ -642,7 +642,9 @@ _detect_intel_gpu(){
 }
 
 _detect_apple_silicon(){
-  # Check for Apple Silicon and VideoToolbox support
+  # Check for Apple Silicon and hardware encoding support
+  # Note: ffmpeg 8+ on macOS removed hevc_videotoolbox/h264_videotoolbox encoders
+  # Apple Silicon GPU encoding is not currently available in ffmpeg 8
   if [[ "$(uname -s)" != "Darwin" ]]; then
     return 1
   fi
@@ -650,25 +652,24 @@ _detect_apple_silicon(){
   local ffmpeg_path
   ffmpeg_path="$(command -v ffmpeg 2>/dev/null)" || return 1
   
-  # Check if ffmpeg has VideoToolbox encoders
-  if ! "$ffmpeg_path" -hide_banner -encoders 2>/dev/null | grep -E "videotoolbox|VideoToolbox" >/dev/null 2>&1; then
-    return 1
+  # Check if ffmpeg has VideoToolbox encoders (ffmpeg 7 and earlier)
+  if "$ffmpeg_path" -hide_banner -encoders 2>/dev/null | grep -E "videotoolbox|VideoToolbox" >/dev/null 2>&1; then
+    # Test if VideoToolbox encoder is actually available by attempting a minimal encode
+    # Try hevc_videotoolbox first, fall back to h264_videotoolbox if that fails
+    if "$ffmpeg_path" -hide_banner -f lavfi -i color=c=black:s=320x240:d=0.001 \
+      -c:v hevc_videotoolbox -t 0.001 -f null - >/dev/null 2>&1; then
+      return 0
+    fi
+    
+    # Try h264_videotoolbox as fallback
+    if "$ffmpeg_path" -hide_banner -f lavfi -i color=c=black:s=320x240:d=0.001 \
+      -c:v h264_videotoolbox -t 0.001 -f null - >/dev/null 2>&1; then
+      return 0
+    fi
   fi
   
-  # Test if VideoToolbox encoder is actually available by attempting a minimal encode
-  # Try hevc_videotoolbox first, fall back to h264_videotoolbox if that fails
-  if "$ffmpeg_path" -hide_banner -f lavfi -i color=c=black:s=320x240:d=0.001 \
-    -c:v hevc_videotoolbox -t 0.001 -f null - >/dev/null 2>&1; then
-    return 0
-  fi
-  
-  # Try h264_videotoolbox as fallback
-  if "$ffmpeg_path" -hide_banner -f lavfi -i color=c=black:s=320x240:d=0.001 \
-    -c:v h264_videotoolbox -t 0.001 -f null - >/dev/null 2>&1; then
-    return 0
-  fi
-  
-  # If both encoder tests fail, VideoToolbox is not available
+  # ffmpeg 8+ on macOS: VideoToolbox encoders not available
+  # Apple Silicon GPU encoding requires ffmpeg 7 or earlier
   return 1
 }
 
