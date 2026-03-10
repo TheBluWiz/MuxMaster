@@ -905,8 +905,45 @@ _dep_install_dependencies(){
 
   say "Hardware Acceleration (optional — for faster encoding):"
   echo ""
-  echo "  MuxMaster can use GPU acceleration for video encoding and decoding."
-  echo "  Supported platforms:"
+  
+  # Detect and display hardware capabilities
+  local -i hw_total=0 hw_available=0 hw_unavailable=0
+  
+  printf "  %-20s" "NVIDIA GPU (CUDA)"
+  hw_total=$(( hw_total + 1 ))
+  if _detect_nvidia_gpu; then
+    printf "✅ detected\n"
+    hw_available=$(( hw_available + 1 ))
+  else
+    printf "❌ not found\n"
+    hw_unavailable=$(( hw_unavailable + 1 ))
+  fi
+  
+  printf "  %-20s" "Intel GPU (QuickSync)"
+  hw_total=$(( hw_total + 1 ))
+  if _detect_intel_gpu; then
+    printf "✅ detected\n"
+    hw_available=$(( hw_available + 1 ))
+  else
+    printf "❌ not found\n"
+    hw_unavailable=$(( hw_unavailable + 1 ))
+  fi
+  
+  printf "  %-20s" "Apple Silicon (VT)"
+  hw_total=$(( hw_total + 1 ))
+  if _detect_apple_silicon; then
+    printf "✅ detected\n"
+    hw_available=$(( hw_available + 1 ))
+  else
+    printf "❌ not found\n"
+    hw_unavailable=$(( hw_unavailable + 1 ))
+  fi
+  
+  echo ""
+  say "Summary: $hw_total checked, $hw_available available, $hw_unavailable unavailable"
+  echo ""
+  
+  say "Installation instructions for hardware support:"
   echo ""
   echo "  • NVIDIA GPU (CUDA):"
   echo "    - Requires: NVIDIA GPU driver + ffmpeg with hevc_nvenc support"
@@ -2116,10 +2153,10 @@ _setup_detect_and_display_hardware(){
   total=$(( total + 1 ))
   printf "  %-20s" "NVIDIA GPU (CUDA)"
   if _detect_nvidia_gpu; then
-    printf "✅ detected\n"
+    printf "\t✅ detected\n"
     available=$(( available + 1 ))
   else
-    printf "❌ not found\n"
+    printf "\t❌ not found\n"
     unavailable=$(( unavailable + 1 ))
   fi
   
@@ -2127,10 +2164,10 @@ _setup_detect_and_display_hardware(){
   total=$(( total + 1 ))
   printf "  %-20s" "Intel GPU (QuickSync)"
   if _detect_intel_gpu; then
-    printf "✅ detected\n"
+    printf "\t✅ detected\n"
     available=$(( available + 1 ))
   else
-    printf "❌ not found\n"
+    printf "\t❌ not found\n"
     unavailable=$(( unavailable + 1 ))
   fi
   
@@ -2138,10 +2175,10 @@ _setup_detect_and_display_hardware(){
   total=$(( total + 1 ))
   printf "  %-20s" "Apple Silicon (VT)"
   if _detect_apple_silicon; then
-    printf "✅ detected\n"
+    printf "\t✅ detected\n"
     available=$(( available + 1 ))
   else
-    printf "❌ not found\n"
+    printf "\t❌ not found\n"
     unavailable=$(( unavailable + 1 ))
   fi
   
