@@ -603,11 +603,22 @@ fi
 
 _detect_nvidia_gpu(){
   # Check for NVIDIA GPU and CUDA support
-  if command -v nvidia-smi >/dev/null 2>&1; then
-    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q hevc_nvenc; then
-      return 0
-    fi
+  local ffmpeg_path
+  ffmpeg_path="$(command -v ffmpeg 2>/dev/null)" || return 1
+  
+  # Check if ffmpeg has NVIDIA NVENC encoders
+  if ! "$ffmpeg_path" -hide_banner -encoders 2>/dev/null | grep -E "nvenc|NVIDIA" >/dev/null 2>&1; then
+    return 1
   fi
+  
+  # Test if NVIDIA CUDA device is actually available by attempting a minimal encode
+  # This verifies that the CUDA device can be created and the encoder can be initialized
+  if "$ffmpeg_path" -hide_banner -f lavfi -i color=c=black:s=320x240:d=0.001 \
+    -c:v hevc_nvenc -t 0.001 -f null - >/dev/null 2>&1; then
+    return 0
+  fi
+  
+  # If encoder test fails, NVIDIA GPU device is not available
   return 1
 }
 
