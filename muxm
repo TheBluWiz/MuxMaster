@@ -581,22 +581,11 @@ _muxm_try_source(){
   . "$f"
   MUXM_CONFIG_LOADED+=("$f")
 }
-_muxm_try_source /etc/.muxmrc
-_muxm_try_source "$HOME/.muxmrc"
-_muxm_try_source "./.muxmrc"
+# NOTE: Config files are sourced AFTER profile application (see Section 11)
+# This allows config files to override profile defaults while still being overridable by CLI flags
 
 # Deprecation bridge: AUDIO_SCORE_LANG_BONUS_ENG → AUDIO_SCORE_LANG_BONUS (v1.1)
-if [[ -n "${AUDIO_SCORE_LANG_BONUS_ENG:-}" ]]; then
-  AUDIO_SCORE_LANG_BONUS="$AUDIO_SCORE_LANG_BONUS_ENG"
-  # shellcheck disable=SC2016
-  printf '⚠️  Deprecated: AUDIO_SCORE_LANG_BONUS_ENG → rename to AUDIO_SCORE_LANG_BONUS in your .muxmrc\n' >&2
-fi
-
-# Validate loglevel values from config files (catch typos early, before ffmpeg sees them)
-[[ -n "$FFMPEG_LOGLEVEL" ]] && ! is_valid_loglevel "$FFMPEG_LOGLEVEL" && \
-  die 11 "Invalid FFMPEG_LOGLEVEL=\"$FFMPEG_LOGLEVEL\" in config. Valid values: quiet, panic, fatal, error, warning, info, verbose, debug, trace"
-[[ -n "$FFPROBE_LOGLEVEL" ]] && ! is_valid_loglevel "$FFPROBE_LOGLEVEL" && \
-  die 11 "Invalid FFPROBE_LOGLEVEL=\"$FFPROBE_LOGLEVEL\" in config. Valid values: quiet, panic, fatal, error, warning, info, verbose, debug, trace"
+# (Note: This will be applied after config files are sourced in Section 11)
 
 # ===== Section 6b: Hardware detection (early definition for dependency installer) ==========
 # Define hardware detection functions early so they're available in _dep_check_only
@@ -3249,6 +3238,24 @@ fi
 unset _cc_force _cc_scope _cc_profile _cc_found _cc_i _cc_args
 
 apply_profile
+
+# Source config files AFTER profile application so they can override profile defaults
+_muxm_try_source /etc/.muxmrc
+_muxm_try_source "$HOME/.muxmrc"
+_muxm_try_source "./.muxmrc"
+
+# Deprecation bridge: AUDIO_SCORE_LANG_BONUS_ENG → AUDIO_SCORE_LANG_BONUS (v1.1)
+if [[ -n "${AUDIO_SCORE_LANG_BONUS_ENG:-}" ]]; then
+  AUDIO_SCORE_LANG_BONUS="$AUDIO_SCORE_LANG_BONUS_ENG"
+  # shellcheck disable=SC2016
+  printf '⚠️  Deprecated: AUDIO_SCORE_LANG_BONUS_ENG → rename to AUDIO_SCORE_LANG_BONUS in your .muxmrc\n' >&2
+fi
+
+# Validate loglevel values from config files (catch typos early, before ffmpeg sees them)
+[[ -n "$FFMPEG_LOGLEVEL" ]] && ! is_valid_loglevel "$FFMPEG_LOGLEVEL" && \
+  die 11 "Invalid FFMPEG_LOGLEVEL=\"$FFMPEG_LOGLEVEL\" in config. Valid values: quiet, panic, fatal, error, warning, info, verbose, debug, trace"
+[[ -n "$FFPROBE_LOGLEVEL" ]] && ! is_valid_loglevel "$FFPROBE_LOGLEVEL" && \
+  die 11 "Invalid FFPROBE_LOGLEVEL=\"$FFPROBE_LOGLEVEL\" in config. Valid values: quiet, panic, fatal, error, warning, info, verbose, debug, trace"
 
 # ===== Section 12: CLI parsing =================================================================
 USAGE_SHORT="Usage: ${CLI_NAME} [options] <source> [target.${OUTPUT_EXT}]"
