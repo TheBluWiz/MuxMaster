@@ -2392,6 +2392,11 @@ unset _arg
 _create_config_emit() {
   local profile="$1"
 
+  # Detect hardware acceleration if not already set
+  if [[ -z "$HWACCEL_TYPE" ]]; then
+    _detect_hardware
+  fi
+
   # Build the set of variables that this profile explicitly sets.
   # These will be emitted uncommented; all others stay commented.
   #
@@ -2498,17 +2503,22 @@ HEADER
   echo "# ========================="
   echo ""
   echo "# Hardware acceleration type: nvidia|intel|apple|cpu"
-  echo "# Auto-detected during 'muxm --setup' and cached here for future runs"
-  printf '#HWACCEL_TYPE=%s\n' "${HWACCEL_TYPE:-cpu}"
+  echo "# Auto-detected and cached here for future runs"
+  if [[ "$HWACCEL_TYPE" != "cpu" ]]; then
+    printf 'HWACCEL_TYPE=%s\n' "$HWACCEL_TYPE"
+  else
+    printf '# No hardware acceleration detected\n'
+    printf '#HWACCEL_TYPE=%s\n' "$HWACCEL_TYPE"
+  fi
   echo ""
   echo "# Enable hardware acceleration (1=enabled, 0=disabled)"
-  printf '#HWACCEL_ENABLED=%s\n' "${HWACCEL_ENABLED:-0}"
+  printf 'HWACCEL_ENABLED=%s\n' "$HWACCEL_ENABLED"
   echo ""
   echo "# Enable hardware decode when available (1=enabled, 0=disabled)"
-  printf '#HWACCEL_DECODE=1\n'
+  printf 'HWACCEL_DECODE=1\n'
   echo ""
   echo "# Enable hardware encode when available (1=enabled, 0=disabled)"
-  printf '#HWACCEL_ENCODE=1\n'
+  printf 'HWACCEL_ENCODE=1\n'
   echo ""
 
   echo "# ========================="
