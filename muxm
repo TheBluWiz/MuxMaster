@@ -1962,6 +1962,10 @@ _detect_nvidia_gpu(){
 
 _detect_intel_gpu(){
   # Check for Intel GPU and QuickSync support
+  # Note: requires ffmpeg to be installed to check encoder availability
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    return 1
+  fi
   if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q hevc_qsv; then
     return 0
   fi
@@ -2071,6 +2075,16 @@ _get_hwaccel_encoder(){
 _show_hardware_info(){
   say "=== Hardware Acceleration Info ==="
   echo ""
+  
+  # Check if ffmpeg is available (required for detection)
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    warn "ffmpeg not found — cannot detect hardware encoder support"
+    echo ""
+    say "To enable hardware acceleration detection, install ffmpeg:"
+    echo "  muxm --install-dependencies"
+    echo ""
+    exit 1
+  fi
   
   # Detect current hardware
   _detect_hardware
