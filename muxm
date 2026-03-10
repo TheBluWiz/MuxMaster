@@ -2067,6 +2067,46 @@ _get_hwaccel_encoder(){
   esac
 }
 
+# Display hardware acceleration capabilities and status
+_show_hardware_info(){
+  say "=== Hardware Acceleration Info ==="
+  echo ""
+  
+  # Detect current hardware
+  _detect_hardware
+  
+  say "Detected Hardware: $HWACCEL_TYPE"
+  say "Hardware Enabled: $(( HWACCEL_ENABLED ? 1 : 0 ))"
+  echo ""
+  
+  say "Capabilities:"
+  if _detect_nvidia_gpu; then
+    say "  ✅ NVIDIA GPU (CUDA) — hevc_nvenc, h264_nvenc, CUVID decoders"
+  else
+    say "  ❌ NVIDIA GPU (CUDA) — not available"
+  fi
+  
+  if _detect_intel_gpu; then
+    say "  ✅ Intel GPU (QuickSync) — hevc_qsv, h264_qsv, QSV decoders"
+  else
+    say "  ❌ Intel GPU (QuickSync) — not available"
+  fi
+  
+  if _detect_apple_silicon; then
+    say "  ✅ Apple Silicon (VideoToolbox) — hevc_videotoolbox, h264_videotoolbox"
+  else
+    say "  ❌ Apple Silicon (VideoToolbox) — not available"
+  fi
+  
+  echo ""
+  say "Current Configuration:"
+  say "  HWACCEL_TYPE=$HWACCEL_TYPE"
+  say "  HWACCEL_ENABLED=$HWACCEL_ENABLED"
+  say "  HWACCEL_DECODE=$HWACCEL_DECODE"
+  say "  HWACCEL_ENCODE=$HWACCEL_ENCODE"
+  echo ""
+}
+
 # ===== Section 9b: Full setup (--setup) =======================================================
 # Combines --install-dependencies, --install-man, --install-completions, and hardware
 # detection into a single first-time-setup command. Each installer runs in a subshell
@@ -3478,47 +3518,6 @@ if [[ "$VIDEO_CODEC" == "libx264" ]] && (( ! TONEMAP_HDR_TO_SDR )); then
 else
   _H264_HDR_WARN_PENDING=0
 fi
-
-
-# Display hardware acceleration capabilities and status
-_show_hardware_info(){
-  say "=== Hardware Acceleration Info ==="
-  echo ""
-  
-  # Detect current hardware
-  _detect_hardware
-  
-  say "Detected Hardware: $HWACCEL_TYPE"
-  say "Hardware Enabled: $(( HWACCEL_ENABLED ? 1 : 0 ))"
-  echo ""
-  
-  say "Capabilities:"
-  if _detect_nvidia_gpu; then
-    say "  ✅ NVIDIA GPU (CUDA) — hevc_nvenc, h264_nvenc, CUVID decoders"
-  else
-    say "  ❌ NVIDIA GPU (CUDA) — not available"
-  fi
-  
-  if _detect_intel_gpu; then
-    say "  ✅ Intel GPU (QuickSync) — hevc_qsv, h264_qsv, QSV decoders"
-  else
-    say "  ❌ Intel GPU (QuickSync) — not available"
-  fi
-  
-  if _detect_apple_silicon; then
-    say "  ✅ Apple Silicon (VideoToolbox) — hevc_videotoolbox, h264_videotoolbox"
-  else
-    say "  ❌ Apple Silicon (VideoToolbox) — not available"
-  fi
-  
-  echo ""
-  say "Current Configuration:"
-  say "  HWACCEL_TYPE=$HWACCEL_TYPE"
-  say "  HWACCEL_ENABLED=$HWACCEL_ENABLED"
-  say "  HWACCEL_DECODE=$HWACCEL_DECODE"
-  say "  HWACCEL_ENCODE=$HWACCEL_ENCODE"
-  echo ""
-}
 
 # Display the resolved configuration from all sources (config files + profile + CLI).
 # Called when --print-effective-config is passed. Exits after printing.
