@@ -617,12 +617,9 @@ _detect_intel_gpu(){
   local ffmpeg_path
   ffmpeg_path="$(command -v ffmpeg 2>/dev/null)" || return 1
   
-  # Check for hevc_qsv encoder (primary check)
-  if "$ffmpeg_path" -hide_banner -encoders 2>/dev/null | grep -q "hevc_qsv"; then
-    return 0
-  fi
-  # Fallback: check for h264_qsv if hevc_qsv not found
-  if "$ffmpeg_path" -hide_banner -encoders 2>/dev/null | grep -q "h264_qsv"; then
+  # Try to detect QSV encoders - check multiple patterns to be robust
+  # Some ffmpeg builds may have different output formatting
+  if "$ffmpeg_path" -hide_banner -encoders 2>/dev/null | grep -E "qsv|QuickSync" >/dev/null 2>&1; then
     return 0
   fi
   return 1
