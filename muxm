@@ -3396,11 +3396,7 @@ while [[ $# -gt 0 ]]; do
     --report-json) REPORT_JSON=1; shift ;;
     --no-report-json) REPORT_JSON=0; shift ;;
 
-    --replace-source)
-      if [[ ! -t 0 ]]; then
-        die 11 "--replace-source requires an interactive terminal (stdin is not a TTY). Use --force-replace-source for non-interactive/scripted usage."
-      fi
-      REPLACE_SOURCE=1; shift ;;
+    --replace-source) REPLACE_SOURCE=1; shift ;;
     --force-replace-source) FORCE_REPLACE_SOURCE=1; shift ;;
 
     # --profile was consumed by pre-scan; handle straggler gracefully
@@ -3784,19 +3780,29 @@ fi
 # --replace-source / --force-replace-source: allow source replacement
 # Otherwise: auto-version the output filename to avoid collision
 declare -i _REPLACING_SOURCE=0
-if [[ "$SRC_ABS" -ef "$OUT_ABS" ]]; then
-  if (( FORCE_REPLACE_SOURCE )); then
+
+# Check if source replacement is requested (before collision detection)
+if (( FORCE_REPLACE_SOURCE )); then
+  _REPLACING_SOURCE=1
+  note "Source replacement enabled (--force-replace-source): $SRC_ABS"
+elif (( REPLACE_SOURCE )); then
+  if [[ ! -t 0 ]]; then
+    die 11 "--replace-source requires an interactive terminal (stdin is not a TTY). Use --force-replace-source for non-interactive/scripted usage."
+  fi
+  printf '⚠️  Are you sure you want the original file replaced? (y/n) '
+  read -r _confirm
+  if [[ "$_confirm" == [Yy]* ]]; then
     _REPLACING_SOURCE=1
-    note "Source will be replaced (--force-replace-source): $SRC_ABS"
-  elif (( REPLACE_SOURCE )); then
-    printf '⚠️  Are you sure you want the original file replaced? (y/n) '
-    read -r _confirm
-    if [[ "$_confirm" == [Yy]* ]]; then
-      _REPLACING_SOURCE=1
-      note "Source will be replaced (confirmed): $SRC_ABS"
-    else
-      die 11 "Aborted — source replacement declined by user."
-    fi
+    note "Source replacement confirmed (--replace-source): $SRC_ABS"
+  else
+    die 11 "Aborted — source replacement declined by user."
+  fi
+fi
+
+# Handle output path collision with source file
+if [[ "$SRC_ABS" -ef "$OUT_ABS" ]]; then
+  if (( _REPLACING_SOURCE )); then
+    note "Output path matches source file - replacement will occur: $SRC_ABS"
   else
     # Auto-version: filename(1).ext, filename(2).ext, ...
     _ver_base="${OUT_ABS%.*}"
@@ -3930,7 +3936,23 @@ on_exit() {
       # This causes Finder to treat the final output as hidden. Clear it here.
       # No-op on Linux (chflags doesn't exist) and harmless if already clear.
       chflags nohidden "$OUT" 2>/dev/null || true
-      (( _REPLACING_SOURCE )) && note "Original source file has been replaced."
+      
+      # Handle source replacement if requested
+      if (( _REPLACING_SOURCE )); then
+        if [[ -f "$SRC_ABS" && -f "$OUT" ]]; then
+          if [[ "$SRC_ABS" != "$OUT" ]]; then
+            # Move the encoded output to replace the original source
+            mv -f "$OUT" "$SRC_ABS"
+            note "Original source file has been replaced: $SRC_ABS"
+            OUT="$SRC_ABS"
+          else
+            note "Original source file has been replaced in-place: $SRC_ABS"
+          fi
+        else
+          warn "Source replacement requested but files not found - source: $SRC_ABS, output: $OUT"
+        fi
+      fi
+      
       (( CHECKSUM )) && write_checksum "$OUT"
       note "Build SUCCEEDED."
     fi
