@@ -305,6 +305,18 @@ is rejected with an error directing you to use
 Replace the original source file with the encoded output without prompting
 for confirmation. This is the scripting\-friendly variant of
 .BR \-\-replace\-source .
+.TP
+.BR \-\-remove\-source
+Remove the original source file after a successful encode. Prompts for
+confirmation before proceeding. Requires an interactive terminal (stdin
+must be a TTY); in non\-interactive shells (scripts, pipelines), this flag
+is rejected with an error directing you to use
+.BR \-\-force\-remove\-source .
+.TP
+.BR \-\-force\-remove\-source
+Remove the original source file after a successful encode without prompting
+for confirmation. This is the scripting\-friendly variant of
+.BR \-\-remove\-source .
 .PP
 .B Source collision auto\-versioning:
 When the derived output path matches the source file and neither

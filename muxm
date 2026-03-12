@@ -176,9 +176,11 @@ FFMPEG_LOGLEVEL="error"
 declare -i FFMPEG_OVERWRITE=1
 FFPROBE_LOGLEVEL="error"
 
-# ---- Source replacement (in-place overwrite)
+# ---- Source replacement / removal
 declare -i REPLACE_SOURCE=0
 declare -i FORCE_REPLACE_SOURCE=0
+declare -i REMOVE_SOURCE=0
+declare -i FORCE_REMOVE_SOURCE=0
 
 # ---- Quick-test toggles
 declare -i SKIP_VIDEO=0
@@ -1942,6 +1944,7 @@ _muxm_completions() {
             --checksum --no-checksum
             --no-overwrite
             --replace-source --force-replace-source
+            --remove-source --force-remove-source
 
             -k --keep-temp -K --keep-temp-always
             --ffmpeg-loglevel --ffprobe-loglevel --no-hide-banner
@@ -3272,6 +3275,8 @@ Common options:
   --print-effective-config    Show resolved config and exit
   --replace-source            Replace the original source file (interactive prompt)
   --force-replace-source      Replace the original source file (no prompt)
+  --remove-source             Remove the original source file after (interactive prompt)
+  --force-remove-source       Remove the original source file after (no prompt)
   --install-dependencies      Install required tools via Homebrew/pipx
   --install-man               Install the muxm(1) manual page
   --uninstall-man             Remove the installed manual page
@@ -3398,6 +3403,8 @@ while [[ $# -gt 0 ]]; do
 
     --replace-source) REPLACE_SOURCE=1; shift ;;
     --force-replace-source) FORCE_REPLACE_SOURCE=1; shift ;;
+    --remove-source) REMOVE_SOURCE=1; shift ;;
+    --force-remove-source) FORCE_REMOVE_SOURCE=1; shift ;;
 
     # --profile was consumed by pre-scan; handle straggler gracefully
     --profile) shift 2 ;;
@@ -3685,6 +3692,8 @@ Effective config (post config-files + profile + CLI):
   KEEP_TEMP_ALWAYS          = $KEEP_TEMP_ALWAYS
   REPLACE_SOURCE            = $REPLACE_SOURCE
   FORCE_REPLACE_SOURCE      = $FORCE_REPLACE_SOURCE
+  REMOVE_SOURCE             = $REMOVE_SOURCE
+  FORCE_REMOVE_SOURCE       = $FORCE_REMOVE_SOURCE
 EOF
   exit 0
 }
@@ -3780,11 +3789,31 @@ fi
 # --replace-source / --force-replace-source: allow source replacement
 # Otherwise: auto-version the output filename to avoid collision
 declare -i _REPLACING_SOURCE=0
+declare -i _REMOVING_SOURCE=0
+
+# Check if source removal is requested
+if (( FORCE_REMOVE_SOURCE )); then
+  _REMOVING_SOURCE=1
+  note "Source removal enabled (--force-remove-source): $SRC_ABS"
+elif (( REMOVE_SOURCE )); then
+  if [[ ! -t 0 ]]; then
+    die 11 "--remove-source requires an interactive terminal (stdin is not a TTY). Use --force-remove-source for non-interactive/scripted usage."
+  fi
+  printf '⚠️  Are you sure you want the original file removed after encoding? (y/n) '
+  read -r _confirm
+  if [[ "$_confirm" == [Yy]* ]]; then
+    _REMOVING_SOURCE=1
+    note "Source removal confirmed (--remove-source): $SRC_ABS"
+  else
+    die 11 "Aborted — source removal declined by user."
+  fi
+fi
 
 # Check if source replacement is requested (before collision detection)
 if (( FORCE_REPLACE_SOURCE )); then
   _REPLACING_SOURCE=1
   note "Source replacement enabled (--force-replace-source): $SRC_ABS"
+  _REMOVING_SOURCE=0 # Replacement implies removal, but handled differently
 elif (( REPLACE_SOURCE )); then
   if [[ ! -t 0 ]]; then
     die 11 "--replace-source requires an interactive terminal (stdin is not a TTY). Use --force-replace-source for non-interactive/scripted usage."
@@ -3794,6 +3823,7 @@ elif (( REPLACE_SOURCE )); then
   if [[ "$_confirm" == [Yy]* ]]; then
     _REPLACING_SOURCE=1
     note "Source replacement confirmed (--replace-source): $SRC_ABS"
+    _REMOVING_SOURCE=0 # Replacement implies removal, but handled differently
   else
     die 11 "Aborted — source replacement declined by user."
   fi
@@ -3950,6 +3980,11 @@ on_exit() {
           fi
         else
           warn "Source replacement requested but files not found - source: $SRC_ABS, output: $OUT"
+        fi
+      elif (( _REMOVING_SOURCE )); then
+        if [[ -f "$SRC_ABS" && "$SRC_ABS" != "$OUT" ]]; then
+          rm -f "$SRC_ABS"
+          note "Original source file has been removed: $SRC_ABS"
         fi
       fi
       
@@ -6054,13 +6089,13 @@ _is_sdh_title(){
 
 # _sub_stream_info — Fetch all scan-relevant fields for one subtitle stream
 # in a single jq call (replaces 3–4 separate jq forks per stream).
-# Returns: codec|language|title|forced  (pipe-delimited)
+# Returns: codec\tlanguage\ttitle\tforced  (tab-delimited)
 # Args: $1 — subtitle stream index (0-based, relative to subtitle streams)
 # Globals: METADATA_CACHE (read)
 _sub_stream_info(){
   local idx="$1"
-  _jq_cache -r "[.streams[] | select(.codec_type==\"subtitle\")] | .[$idx] |
-    \"\(.codec_name // \"?\")|\(.tags.language // \"\")|\(.tags.title // \"\")|\(.disposition.forced // 0)\"" | head -n1 || echo "?|||0"
+  _jq_cache -r "[.streams[] | select(.codec_type==\"subtitle\")] | .[$idx] | \\
+    \"\(.codec_name // \"?\")\t\(.tags.language // \"\")\t\(.tags.title // \"\")\t\(.disposition.forced // 0)\"" | head -n1 || printf "?\t\t\t0\n"
 }
 
 # Format a subtitle stream as a human-readable one-line summary.
@@ -6069,7 +6104,7 @@ _sub_stream_info(){
 describe_sub_stream(){
   local i="$1" info codec lang title forced flags=""
   info="$(_sub_stream_info "$i")"
-  IFS='|' read -r codec lang title forced <<< "$info"
+  IFS=$'\t' read -r codec lang title forced <<< "$info"
 
   codec="${codec,,}"
   lang="${lang,,}"
@@ -6343,7 +6378,7 @@ build_subtitle_plan(){
   for i in $(list_sub_indices); do
     local _sinfo _scodec
     _sinfo="$(_sub_stream_info "$i")"
-    IFS='|' read -r _scodec lang title forced <<< "$_sinfo"
+    IFS=$'\t' read -r _scodec lang title forced <<< "$_sinfo"
     lang="${lang,,}"
     [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
 

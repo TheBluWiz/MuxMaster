@@ -314,6 +314,8 @@ muxm [options] <source> [target.mp4]
 | `--skip-if-ideal` | Skip processing if source matches target |
 | `--replace-source` | Replace the original source file (interactive confirmation) |
 | `--force-replace-source` | Replace the original source file (no prompt; scripting-friendly) |
+| `--remove-source` | Remove the original source file after encoding (interactive confirmation) |
+| `--force-remove-source` | Remove the original source file after encoding (no prompt; scripting-friendly) |
 | `--print-effective-config` | Show resolved config after config file imports |
 
 ### Setup & Management
@@ -402,6 +404,7 @@ Beyond profiles and the core encoding pipeline, `muxm` ships with a set of opera
 
 - **Skip-if-Ideal** – Before encoding, `muxm` inspects the source to determine if it already matches the target profile. If it does, the file is linked or copied without re-encoding, saving time and avoiding generation loss. Enabled per-profile or via `--skip-if-ideal`.
 - **Collision Handling** – When the derived output filename matches the source (e.g., encoding `movie.mp4` with the default `.mp4` extension), `muxm` auto-versions the output to `movie(1).mp4`, `movie(2).mp4`, etc. instead of failing. Use `--replace-source` for interactive in-place replacement or `--force-replace-source` for scripted workflows.
+- **Source Management** – In addition to replacing the source file, you can choose to remove the original file entirely after a successful encode using `--remove-source` (interactive) or `--force-remove-source` (scripted).
 - **Conflict Warnings** – Running `--profile dv-archival --no-dv` doesn't error out — it warns you that the combination is contradictory and proceeds with your explicit flags taking precedence. The tool trusts you but lets you know when something looks wrong.
 - **Dry-Run Mode** – `--dry-run` executes the entire decision pipeline (profile resolution, codec detection, DV identification, audio selection) and prints what it would do, without writing any output files.
 - **JSON Reporting** – `--report-json` generates a machine-readable JSON report alongside the output file, documenting every decision, warning, codec mapping, and stream disposition from the run.
