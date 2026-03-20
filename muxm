@@ -2084,11 +2084,11 @@ HEADER
   _V X265_PARAMS_BASE quoted
   echo ""
   echo "# Level/IDR constraint for compatibility (e.g., 5.1). Leave empty to let encoder decide."
-  printf '#LEVEL_VALUE=5.1\n'
+  _V LEVEL_VALUE
   echo ""
   echo "# Conservative VBV guardrails (apply when LEVEL_VALUE is set)"
   echo "#   1 = apply cautious vbv-maxrate/bufsize  |  0 = don't apply additional limits"
-  printf '#CONSERVATIVE_VBV=1\n'
+  _V CONSERVATIVE_VBV
   echo ""
   echo "# VBV guardrails: per-level maxrate/bufsize caps (used when CONSERVATIVE_VBV=1)"
   echo "#   These enforce hardware-decode-safe bitrate ceilings per HEVC level."
@@ -4844,13 +4844,13 @@ _audio_is_commentary(){
 
 # _audio_stream_info — Fetch all scoring-relevant fields for one audio stream
 # in a single jq call (replaces 5 separate jq forks per stream).
-# Returns: codec|channels|language|bit_rate|title  (pipe-delimited)
+# Returns: codec\tchannels\tlanguage\tbit_rate\ttitle  (tab-delimited)
 # Args: $1 — audio stream index (0-based, relative to audio streams)
 # Globals: METADATA_CACHE (read)
 _audio_stream_info(){
   local idx="$1"
   _jq_cache -r "[.streams[] | select(.codec_type==\"audio\")] | .[$idx] |
-    \"\(.codec_name // \"unknown\")|\(.channels // 0)|\(.tags.language // \"\")|\(.bit_rate // \"0\")|\(.tags.title // \"\")\"" | head -n1 || echo "unknown|0||0|"
+    \"\(.codec_name // \"unknown\")\t\(.channels // 0)\t\(.tags.language // \"\")\t\(.bit_rate // \"0\")\t\(.tags.title // \"\")\"" | head -n1 || printf 'unknown\t0\t\t0\t\n'
 }
 
 # Audio stream scoring algorithm for automatic track selection.
@@ -4876,7 +4876,7 @@ _score_audio_stream(){
   # Single jq call fetches all fields at once
   local info codec lang ch br title rank score
   info="$(_audio_stream_info "$idx")"
-  IFS='|' read -r codec ch lang br title <<< "$info"
+  IFS=$'\t' read -r codec ch lang br title <<< "$info"
 
   codec="${codec,,}"
   lang="${lang,,}"
@@ -4910,7 +4910,7 @@ _score_audio_stream(){
     score=$(( score - AUDIO_SCORE_COMMENTARY_PENALTY ))
   fi
 
-  printf "%s|%s|%s|%s|%s|%s\n" "$score" "$idx" "$codec" "$ch" "$lang" "${title:-}"
+  printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$score" "$idx" "$codec" "$ch" "$lang" "${title:-}"
 }
 
 # Select best audio track based on scoring algorithm
@@ -4942,7 +4942,7 @@ select_best_audio(){
     local line score
     line="$(_score_audio_stream "$i")"
     score_lines+=("$line")
-    score="${line%%|*}"
+    score="${line%%$'\t'*}"
     if [[ "$score" =~ ^-?[0-9]+$ ]] && (( score > best_score )); then
       best_score="$score"
       best_line="$line"
@@ -4952,13 +4952,13 @@ select_best_audio(){
   # Log score breakdown when multiple tracks exist (aids debugging)
   if (( n >= 2 )); then
     local best_idx
-    best_idx="${best_line#*|}"; best_idx="${best_idx%%|*}"
+    best_idx="${best_line#*$'\t'}"; best_idx="${best_idx%%$'\t'*}"
     local score_summary=""
     for (( i=0; i<n; i++ )); do
       local sl="${score_lines[$i]}"
       local s_score s_idx s_codec s_ch s_lang s_title
       # shellcheck disable=SC2034  # s_title completes the IFS destructure
-      IFS='|' read -r s_score s_idx s_codec s_ch s_lang s_title <<< "$sl"
+      IFS=$'\t' read -r s_score s_idx s_codec s_ch s_lang s_title <<< "$sl"
       local marker=""
       [[ "$s_idx" == "$best_idx" ]] && marker=" ★"
       score_summary+="#${s_idx}: ${s_codec} ${s_ch}ch [${s_lang}] = ${s_score}${marker}  "
@@ -4966,8 +4966,8 @@ select_best_audio(){
     log "• Score: ${score_summary% }"
   fi
 
-  # Extract index from best_line (format: score|idx|codec|ch|lang|title)
-  echo "${best_line#*|}" | cut -d'|' -f1
+  # Extract index from best_line (format: score\tidx\tcodec\tch\tlang\ttitle)
+  echo "${best_line#*$'\t'}" | cut -d$'\t' -f1
 }
 
 # Check if audio codec can be direct-play copied to MP4
@@ -5078,7 +5078,7 @@ run_audio_pipeline(){
   for (( i=0; i<n; i++ )); do
     local _ainfo _c _ch_i _l _br_i _t pretty
     _ainfo="$(_audio_stream_info "$i")"
-    IFS='|' read -r _c _ch_i _l _br_i _t <<< "$_ainfo"
+    IFS=$'\t' read -r _c _ch_i _l _br_i _t <<< "$_ainfo"
     _c="${_c,,}"
     _l="${_l,,}"
     [[ -z "$_l" ]] && _l="$TAG_LANGUAGE_DEFAULT"
@@ -5361,13 +5361,13 @@ _is_sdh_title(){
 
 # _sub_stream_info — Fetch all scan-relevant fields for one subtitle stream
 # in a single jq call (replaces 3–4 separate jq forks per stream).
-# Returns: codec|language|title|forced  (pipe-delimited)
+# Returns: codec\tlanguage\ttitle\tforced  (tab-delimited)
 # Args: $1 — subtitle stream index (0-based, relative to subtitle streams)
 # Globals: METADATA_CACHE (read)
 _sub_stream_info(){
   local idx="$1"
   _jq_cache -r "[.streams[] | select(.codec_type==\"subtitle\")] | .[$idx] |
-    \"\(.codec_name // \"?\")|\(.tags.language // \"\")|\(.tags.title // \"\")|\(.disposition.forced // 0)\"" | head -n1 || echo "?|||0"
+    \"\(.codec_name // \"?\")\t\(.tags.language // \"\")\t\(.tags.title // \"\")\t\(.disposition.forced // 0)\"" | head -n1 || printf '?\t\t\t0\n'
 }
 
 # Format a subtitle stream as a human-readable one-line summary.
@@ -5376,7 +5376,7 @@ _sub_stream_info(){
 describe_sub_stream(){
   local i="$1" info codec lang title forced flags=""
   info="$(_sub_stream_info "$i")"
-  IFS='|' read -r codec lang title forced <<< "$info"
+  IFS=$'\t' read -r codec lang title forced <<< "$info"
 
   codec="${codec,,}"
   lang="${lang,,}"
@@ -5650,7 +5650,7 @@ build_subtitle_plan(){
   for i in $(list_sub_indices); do
     local _sinfo _scodec
     _sinfo="$(_sub_stream_info "$i")"
-    IFS='|' read -r _scodec lang title forced <<< "$_sinfo"
+    IFS=$'\t' read -r _scodec lang title forced <<< "$_sinfo"
     lang="${lang,,}"
     [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
 
@@ -6142,10 +6142,10 @@ main() {
       _v_summary="$(printf '%s\n' "$verify_json" | jq -r '
         ([.streams[] | select(.codec_type=="video")][0] |
           "\(.codec_name // "?") \(.profile // "")"
-          + "|" + "\(.width)x\(.height)"
-          + "|" + (.r_frame_rate // "?"))
-        + "|" + ([.streams[] | select(.codec_type=="subtitle")] | length | tostring)' 2>/dev/null)"
-      IFS='|' read -r v_codec v_res v_fps s_count <<< "$_v_summary"
+          + "\t" + "\(.width)x\(.height)"
+          + "\t" + (.r_frame_rate // "?"))
+        + "\t" + ([.streams[] | select(.codec_type=="subtitle")] | length | tostring)' 2>/dev/null)"
+      IFS=$'\t' read -r v_codec v_res v_fps s_count <<< "$_v_summary"
       v_codec="${v_codec% }"
       # Convert fractional fps like 24000/1001 to decimal
       if [[ "$v_fps" == */* ]]; then
@@ -6155,7 +6155,7 @@ main() {
       say "  Video : ${v_codec:-?} ${v_res:-?} @ ${v_fps:-?} fps"
 
       # Audio: rich per-track metadata (codec, channels, language, bitrate, title)
-      # Single jq call extracts all fields per track as pipe-delimited lines.
+      # Single jq call extracts all fields per track as tab-delimited lines.
       local a_track_count
       a_track_count="$(printf '%s\n' "$verify_json" | jq '[.streams[] | select(.codec_type=="audio")] | length' 2>/dev/null)"
       if [[ "${a_track_count:-0}" != "0" ]]; then
@@ -6165,8 +6165,8 @@ main() {
           # Batch: fetch all audio fields in one jq call per track
           _vinfo="$(printf '%s\n' "$verify_json" | jq -r "
             [.streams[] | select(.codec_type==\"audio\")][$a_idx] |
-            \"\(.codec_name // \"?\")|\(.channels // 0)|\(.tags.language // \"und\")|\(.bit_rate // \"\")|\(.tags.title // \"\")|\(.channel_layout // \"\")\"" 2>/dev/null)"
-          IFS='|' read -r a_codec a_ch a_lang a_br a_title a_layout <<< "$_vinfo"
+            \"\(.codec_name // \"?\")\t\(.channels // 0)\t\(.tags.language // \"und\")\t\(.bit_rate // \"\")\t\(.tags.title // \"\")\t\(.channel_layout // \"\")\"" 2>/dev/null)"
+          IFS=$'\t' read -r a_codec a_ch a_lang a_br a_title a_layout <<< "$_vinfo"
 
           # Descriptive channel label
           a_ch_label="$(_channel_label "${a_ch:-0}")"

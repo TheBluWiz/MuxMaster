@@ -4,13 +4,14 @@ All notable changes to MuxMaster will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com), and this project adheres to [Semantic Versioning](https://semver.org).
 
-## [1.0.2] - 2026-03-19
+## [1.0.2] - 2026-03-20
 
-Enforce HEVC Level 5.1 VBV guardrails in `atv-directplay-hq` re-encodes to prevent bitrate spikes that cause stutter on Apple TV 4K.
+Enforce HEVC Level 5.1 VBV guardrails in `atv-directplay-hq` re-encodes to prevent bitrate spikes that cause stutter on Apple TV 4K. Fix crash when subtitle or audio stream titles contain literal pipe characters.
 
 ### Fixed
 
 - **`atv-directplay-hq` re-encodes now capped by Level 5.1 VBV.** Previously, the copy path was guarded by `MAX_COPY_BITRATE=50000k` but the re-encode path had no bitrate ceiling — a CRF 17 encode of complex scenes could spike beyond what the Apple TV 4K hardware decoder sustains without buffering. The profile now sets `LEVEL_VALUE="5.1"`, which activates the existing conservative VBV machinery (`vbv-maxrate=40000k`, `vbv-bufsize=80000k`). Can be overridden with `--level` or `--no-conservative-vbv`.
+- **Pipe characters in stream titles no longer break field parsing.** Subtitle titles such as `"Original | English"` or `"Original | English | (SDH)"` contain literal `|` which corrupted the pipe-delimited output of `_sub_stream_info` and the verify-block audio jq call. The `forced` variable would receive fragments like `" English|0"` instead of `0`, causing an arithmetic evaluation crash under `nounset`. Switched all internal field delimiters from `|` to `\t` (tab) across 4 jq producer functions, 10 consumer `read`/`cut`/parameter-expansion sites, and their fallback defaults. Tab is safe because it effectively never appears in media metadata. The audio pipeline (`_audio_stream_info`, `_score_audio_stream`, and their consumers) was not actively broken — the free-text `title` field happened to be last, absorbing extra pipes — but was migrated for consistency to prevent silent breakage if fields are ever reordered.
 
 ### Changed
 

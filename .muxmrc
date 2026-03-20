@@ -5,7 +5,7 @@
 #  Tip: Uncomment a line to override. Keep values shell-safe.
 # ================================================================
 # Profile: atv-directplay-hq
-# Generated: 2026-03-08 16:23:41
+# Generated: 2026-03-20 19:47:33
 #
 # Variables set by this profile are uncommented below.
 # All other variables are commented with their defaults — uncomment to customize.
@@ -40,11 +40,11 @@ PRESET_VALUE=slower
 X265_PARAMS_BASE='profile=main10:repeat-headers=1:hdr-opt=1:hdr10=1:hdr10-opt=1:aq-mode=3:aq-strength=1.3:psy-rd=2.0:psy-rdoq=1.0:rc-lookahead=60'
 
 # Level/IDR constraint for compatibility (e.g., 5.1). Leave empty to let encoder decide.
-#LEVEL_VALUE=5.1
+LEVEL_VALUE=5.1
 
 # Conservative VBV guardrails (apply when LEVEL_VALUE is set)
 #   1 = apply cautious vbv-maxrate/bufsize  |  0 = don't apply additional limits
-#CONSERVATIVE_VBV=1
+CONSERVATIVE_VBV=1
 
 # VBV guardrails: per-level maxrate/bufsize caps (used when CONSERVATIVE_VBV=1)
 #   These enforce hardware-decode-safe bitrate ceilings per HEVC level.
