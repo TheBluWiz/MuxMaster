@@ -1988,7 +1988,7 @@ _create_config_emit() {
       _active+="CRF_VALUE PRESET_VALUE "
       _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 "
       _active+="EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 "
-      _active+="MAX_COPY_BITRATE "
+      _active+="MAX_COPY_BITRATE LEVEL_VALUE CONSERVATIVE_VBV "
       _active+="SUB_EXPORT_EXTERNAL SKIP_IF_IDEAL "
       ;;
     streaming)
@@ -2556,6 +2556,7 @@ apply_profile_atv_directplay_hq() {
   MAX_COPY_BITRATE="50000k"
   CRF_VALUE=17
   PRESET_VALUE="slower"
+  LEVEL_VALUE="5.1"
   X265_PARAMS_BASE='profile=main10:repeat-headers=1:hdr-opt=1:hdr10=1:hdr10-opt=1:aq-mode=3:aq-strength=1.3:psy-rd=2.0:psy-rdoq=1.0:rc-lookahead=60'
   HDR_TARGET_PIXFMT="yuv420p10le"
   FORCE_CHROMA_420=1

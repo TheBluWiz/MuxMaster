@@ -331,11 +331,11 @@ Settings are resolved through multiple levels, applied in this order (lowest →
 
 ```
 Hardcoded defaults
-  → /etc/.muxmrc          (system-wide)
+  → /etc/.muxmrc           (system-wide)
     → ~/.muxmrc            (user defaults)
       → ./.muxmrc          (project-specific)
-        → --profile <n> (format profile)
-          → CLI flags      (highest — always wins)
+        → --profile        (format profile)
+      → CLI flags          (highest — always wins)
 ```
 
 ### Setting a Default Profile

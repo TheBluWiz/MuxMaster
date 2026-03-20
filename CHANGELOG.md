@@ -4,6 +4,18 @@ All notable changes to MuxMaster will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com), and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [1.0.2] - 2026-03-19
+
+Enforce HEVC Level 5.1 VBV guardrails in `atv-directplay-hq` re-encodes to prevent bitrate spikes that cause stutter on Apple TV 4K.
+
+### Fixed
+
+- **`atv-directplay-hq` re-encodes now capped by Level 5.1 VBV.** Previously, the copy path was guarded by `MAX_COPY_BITRATE=50000k` but the re-encode path had no bitrate ceiling — a CRF 17 encode of complex scenes could spike beyond what the Apple TV 4K hardware decoder sustains without buffering. The profile now sets `LEVEL_VALUE="5.1"`, which activates the existing conservative VBV machinery (`vbv-maxrate=40000k`, `vbv-bufsize=80000k`). Can be overridden with `--level` or `--no-conservative-vbv`.
+
+### Changed
+
+- `--create-config ... atv-directplay-hq` now emits `LEVEL_VALUE` and `CONSERVATIVE_VBV` as uncommented (active) variables, matching the profile's new defaults.
+
 ## [1.0.1] - 2026-03-09
 
 Output file collisions now handled gracefully. Adds new flags `--replace-source` and `--force-replace-source`.
@@ -98,5 +110,6 @@ Initial public release.
 - Structured exit codes for scripting and automation (10 = missing tool, 11 = bad arguments, 12 = corrupt source, 40–43 = pipeline failures)
 - Comprehensive test harness (`test_muxm.sh`) with 18 test suites and ~165 assertions
 
+[1.0.2]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.0.2
 [1.0.1]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.0.1
 [1.0.0]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.0.0
