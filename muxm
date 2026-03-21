@@ -185,6 +185,14 @@ declare -i SKIP_SUBS=0
 # ---- Overrides
 AUDIO_TRACK_OVERRIDE=""
 
+# ---- Multi-track audio (dv-archival)
+# Keep all matching audio tracks instead of selecting one.
+# When enabled, run_audio_pipeline skips single-track scoring; audio streams
+# are filtered and mapped directly from source in mux_final with -c:a copy.
+declare -i AUDIO_MULTI_TRACK=0
+# Filter: exclude commentary/descriptive audio tracks (multi-track mode only)
+declare -i AUDIO_KEEP_COMMENTARY=1
+
 # ---- Profile-introduced variables (safe defaults preserve current behavior)
 # Video codec: libx265 (default) or libx264 (universal)
 VIDEO_CODEC="libx265"
@@ -1005,7 +1013,9 @@ Apply a named format profile.
 Available profiles:
 .TP
 .B dv\-archival
-Preserve DV + HDR10 + lossless audio. Copy video (no re\-encode). MKV.
+Preserve DV + HDR10 + all audio tracks (multi\-track, copy only). MKV.
+Commentary/descriptive tracks dropped by default. Filterable via
+.BR AUDIO_LANG_PREF " and " AUDIO_KEEP_COMMENTARY .
 Skip if already ideal. JSON report.
 .TP
 .B hdr10\-hq
@@ -1186,6 +1196,35 @@ Language preference is the strongest signal by default, ensuring that a
 preferred\-language stereo track beats a foreign surround track. Reduce
 .B AUDIO_SCORE_LANG_BONUS
 to ~25 to prefer higher channel counts regardless of language.
+.SS Multi\-Track Audio (Archival)
+The
+.B dv\-archival
+profile uses multi\-track mode
+.RB ( AUDIO_MULTI_TRACK=1 ),
+which keeps all audio tracks that pass a subtractive filter instead of
+scoring and selecting one. All surviving tracks are stream\-copied from
+source (never transcoded). No stereo fallback is created.
+.PP
+Filters (configured via
+.IR .muxmrc ):
+.TP
+.B AUDIO_LANG_PREF
+When non\-empty, only tracks whose language matches the comma\-separated
+list are kept. When empty (the default for
+.BR dv\-archival ),
+all languages pass.
+.TP
+.B AUDIO_KEEP_COMMENTARY
+When 0 (the
+.B dv\-archival
+default), tracks whose title matches commentary or audio\-description
+keywords are dropped. Set to 1 to keep them.
+.PP
+Multi\-track mode is automatically demoted to single\-track if
+.B \-\-audio\-track
+or
+.B \-\-audio\-force\-codec
+is set on the CLI (the explicit flag wins).
 .SH SUBTITLE OPTIONS
 .TP
 .BR \-\-no\-subtitles
@@ -1408,6 +1447,9 @@ Major variable groups:
 .B Audio scoring
 .BR AUDIO_SCORE_LANG_BONUS ", " AUDIO_SCORE_CHANNEL_MULTIPLIER ", "
 .BR AUDIO_SCORE_SURROUND_BONUS ", " AUDIO_SCORE_COMMENTARY_PENALTY .
+.TP
+.B Multi\-track audio (archival)
+.BR AUDIO_MULTI_TRACK ", " AUDIO_KEEP_COMMENTARY .
 .TP
 .B Subtitles
 .BR SUB_LANG_PREF ", " SUB_INCLUDE_FORCED ", " SUB_INCLUDE_FULL ", "
@@ -2003,6 +2045,7 @@ _create_config_emit() {
     dv-archival)
       _active+="SKIP_IF_IDEAL REPORT_JSON "
       _active+="AUDIO_CODEC_PREFERENCE "
+      _active+="AUDIO_MULTI_TRACK AUDIO_KEEP_COMMENTARY "
       ;;
     hdr10-hq)
       _active+="CRF_VALUE PRESET_VALUE "
@@ -2219,6 +2262,23 @@ HEADER
   echo "# Penalty applied to commentary / audio-description tracks (detected by title tag)."
   echo "# Set to 0 to disable commentary detection."
   printf '#AUDIO_SCORE_COMMENTARY_PENALTY=200\n'
+  echo ""
+
+  echo ""
+  echo "# ========================="
+  echo "# Multi-track audio (archival)"
+  echo "# ========================="
+  echo ""
+  echo "# Keep ALL matching audio tracks instead of selecting one."
+  echo "# All tracks are stream-copied from source (never transcoded)."
+  echo "# Filtering is subtractive: everything passes unless excluded by"
+  echo "# AUDIO_LANG_PREF or AUDIO_KEEP_COMMENTARY."
+  echo "#   1 = multi-track (filter + copy all)  |  0 = single-track (score + select one)"
+  _V AUDIO_MULTI_TRACK
+  echo ""
+  echo "# Include commentary / audio-description tracks in multi-track mode"
+  echo "#   1 = keep commentary  |  0 = drop commentary"
+  _V AUDIO_KEEP_COMMENTARY
   echo ""
 
   echo ""
@@ -2528,7 +2588,10 @@ apply_profile_dv_archival() {
   # Video: copy, don't re-encode
   VIDEO_COPY_IF_COMPLIANT=1
   VIDEO_CODEC="libx265"
-  # Audio: lossless passthrough, no stereo fallback by default
+  # Audio: multi-track, copy all matching tracks from source.
+  # No scoring, no transcoding, no stereo fallback.
+  AUDIO_MULTI_TRACK=1
+  AUDIO_KEEP_COMMENTARY=0
   AUDIO_LOSSLESS_PASSTHROUGH=1
   ADD_STEREO_IF_MULTICH=0
   AUDIO_CODEC_PREFERENCE="truehd,dts,flac,eac3,ac3,aac,alac,other"
@@ -2791,7 +2854,7 @@ ${APP_NAME} v${VERSION} — ${CLI_NAME}
 $USAGE_SHORT
 
 Profiles (--profile NAME):
-  dv-archival          Preserve DV + HDR10 + lossless audio. MKV.
+  dv-archival          Preserve DV + HDR10 + all audio tracks. MKV.
   hdr10-hq             Strip DV, keep HDR10. HEVC CRF 17. MKV.
   atv-directplay-hq    Apple TV Direct Play. MP4, DV P8.1, E-AC-3.
   streaming            HEVC streaming for Plex/Jellyfin. MP4.
@@ -2984,6 +3047,21 @@ if [[ -n "${PROFILE_NAME:-}" ]]; then
       (( SUB_BURN_FORCED )) && \
         _warn_conflict "$PROFILE_NAME" "--sub-burn-forced" \
           "Burning subtitles is irreversible and conflicts with archival goals."
+
+      # Multi-track audio conflicts: flags that force single-track behavior
+      if (( AUDIO_MULTI_TRACK )); then
+        [[ -n "${AUDIO_TRACK_OVERRIDE:-}" ]] && \
+          _warn_conflict "$PROFILE_NAME" "--audio-track $AUDIO_TRACK_OVERRIDE" \
+            "Multi-track mode keeps all matching tracks. --audio-track forces single-track selection."
+
+        [[ -n "${AUDIO_FORCE_CODEC:-}" ]] && \
+          _warn_conflict "$PROFILE_NAME" "--audio-force-codec $AUDIO_FORCE_CODEC" \
+            "Multi-track archival copies all audio. --audio-force-codec implies transcoding, which forces single-track."
+
+        (( ADD_STEREO_IF_MULTICH )) && \
+          _warn_conflict "$PROFILE_NAME" "--stereo-fallback" \
+            "Multi-track archival preserves all source tracks. Stereo fallback is redundant."
+      fi
       ;;
 
     hdr10-hq)
@@ -3183,6 +3261,8 @@ Effective config (post config-files + profile + CLI):
   AUDIO_LANG_PREF           = $AUDIO_LANG_PREF
   AUDIO_CODEC_PREFERENCE    = $AUDIO_CODEC_PREFERENCE
   AUDIO_TRACK_OVERRIDE      = ${AUDIO_TRACK_OVERRIDE:-<none>}
+  AUDIO_MULTI_TRACK         = $AUDIO_MULTI_TRACK
+  AUDIO_KEEP_COMMENTARY     = $AUDIO_KEEP_COMMENTARY
   AUDIO_SCORE_LANG_BONUS    = $AUDIO_SCORE_LANG_BONUS
   AUDIO_SCORE_CHANNEL_MULTIPLIER = $AUDIO_SCORE_CHANNEL_MULTIPLIER
   AUDIO_SCORE_SURROUND_BONUS = $AUDIO_SCORE_SURROUND_BONUS
@@ -3608,7 +3688,19 @@ check_skip_if_ideal() {
   fi
 
   # ---- Audio compliance (skip-if-ideal only) ----
-  if (( ideal )) && (( ! AUDIO_LOSSLESS_PASSTHROUGH )); then
+  if (( ideal )) && (( AUDIO_MULTI_TRACK )); then
+    # Multi-track: source is ideal only if every audio track survives the filter.
+    # If any track would be dropped (commentary, wrong language), we need to remux.
+    local _ideal_keep
+    _ideal_keep="$(_build_audio_keep_list)"
+    local _ideal_n_keep _ideal_n_total
+    # shellcheck disable=SC2086  # intentional word-splitting for count
+    _ideal_n_keep=$(echo $_ideal_keep | wc -w | tr -d ' ')
+    _ideal_n_total="$(_audio_stream_count)"
+    if [[ "$_ideal_n_keep" != "$_ideal_n_total" ]]; then
+      ideal=0; reason="audio filter would drop $(( _ideal_n_total - _ideal_n_keep )) of $_ideal_n_total tracks"
+    fi
+  elif (( ideal )) && (( ! AUDIO_LOSSLESS_PASSTHROUGH )); then
     local n_audio a_codec
     n_audio="$(_audio_stream_count)"
     if (( n_audio > 0 )); then
@@ -4098,6 +4190,16 @@ _COPY_REJECT_REASON=""
 A_PRIMARY=""
 AAC_STEREO=""
 declare -i HAS_AUDIO=0
+
+# Multi-track audio: when AUDIO_MULTI_TRACK=1, audio streams are mapped
+# directly from source in mux_final (no intermediate extraction).
+# AUDIO_COPY_FROM_SOURCE is the runtime flag set by run_audio_pipeline_multi.
+declare -i AUDIO_COPY_FROM_SOURCE=0
+declare -a AUDIO_MT_INDICES=()    # 0-based audio-relative indices to keep
+declare -a AUDIO_MT_CODECS=()     # codec per kept track (e.g., truehd, ac3)
+declare -a AUDIO_MT_CHANNELS=()   # channel count per kept track
+declare -a AUDIO_MT_LANGS=()      # language tag per kept track
+declare -a AUDIO_MT_TITLES=()     # title tag per kept track (empty if unset)
 
 # ===== Section 26: Video pipeline =============================================================
 
@@ -5151,6 +5253,169 @@ _codec_max_channels(){
   esac
 }
 
+# _build_audio_keep_list — Subtractive filter for multi-track audio mode.
+#
+# Enumerates all audio streams and applies keep-filters:
+#   1. AUDIO_LANG_PREF (if non-empty) — only keep tracks whose language matches
+#   2. AUDIO_KEEP_COMMENTARY — drop commentary/descriptive tracks when 0
+#
+# Unlike select_best_audio (which scores and picks ONE), this keeps ALL tracks
+# that pass the filters. No scoring, no ranking — just pass/fail.
+#
+# Output: space-separated list of 0-based audio-relative indices on stdout.
+#         Empty string if no tracks survive the filter.
+# Globals: AUDIO_LANG_PREF (read), AUDIO_KEEP_COMMENTARY (read),
+#          METADATA_CACHE (read), TAG_LANGUAGE_DEFAULT (read)
+_build_audio_keep_list(){
+  local n i
+  n="$(_audio_stream_count)"
+  (( n > 0 )) || { echo ""; return 0; }
+
+  local -a kept=()
+  local -a dropped_reasons=()
+
+  for (( i=0; i<n; i++ )); do
+    local info codec lang ch br title
+    info="$(_audio_stream_info "$i")"
+    IFS=$'\t' read -r codec ch lang br title <<< "$info"
+    codec="${codec,,}"
+    lang="${lang,,}"
+    [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
+
+    # Filter 1: language
+    if [[ -n "${AUDIO_LANG_PREF:-}" ]]; then
+      if ! _audio_lang_matches "$lang"; then
+        dropped_reasons+=("#$i: ${codec} ${ch}ch [$lang] — language not in AUDIO_LANG_PREF")
+        continue
+      fi
+    fi
+
+    # Filter 2: commentary
+    if (( ! AUDIO_KEEP_COMMENTARY )) && _audio_is_commentary "$title"; then
+      dropped_reasons+=("#$i: ${codec} ${ch}ch [$lang] — commentary/descriptive")
+      continue
+    fi
+
+    kept+=("$i")
+  done
+
+  # Log filter results
+  if (( ${#dropped_reasons[@]} > 0 )); then
+    local reason
+    for reason in "${dropped_reasons[@]}"; do
+      log "  [multi-track] Dropped $reason"
+    done
+  fi
+
+  echo "${kept[*]}"
+}
+
+# run_audio_pipeline_multi — Multi-track audio: filter and defer to mux_final.
+#
+# Called instead of the single-track pipeline when AUDIO_MULTI_TRACK=1.
+# No ffmpeg calls, no intermediate files. Populates metadata arrays that
+# mux_final uses to map audio streams directly from source with -c:a copy.
+#
+# Sets: AUDIO_COPY_FROM_SOURCE, AUDIO_MT_INDICES, AUDIO_MT_CODECS,
+#       AUDIO_MT_CHANNELS, AUDIO_MT_LANGS, AUDIO_MT_TITLES,
+#       HAS_AUDIO, A_PRIMARY (cleared), AAC_STEREO (cleared)
+# Globals: AUDIO_MULTI_TRACK (read), METADATA_CACHE (read)
+run_audio_pipeline_multi(){
+  local keep_list
+  keep_list="$(_build_audio_keep_list)"
+
+  if [[ -z "$keep_list" ]]; then
+    note "[Audio] Multi-track filter: no audio tracks survived filtering."
+    HAS_AUDIO=0
+    return 0
+  fi
+
+  # Reset single-track vars (not used in multi-track mode)
+  A_PRIMARY=""
+  AAC_STEREO=""
+
+  # Populate parallel metadata arrays
+  AUDIO_MT_INDICES=()
+  AUDIO_MT_CODECS=()
+  AUDIO_MT_CHANNELS=()
+  AUDIO_MT_LANGS=()
+  AUDIO_MT_TITLES=()
+
+  local idx
+  for idx in $keep_list; do
+    local info codec ch lang br title
+    info="$(_audio_stream_info "$idx")"
+    IFS=$'\t' read -r codec ch lang br title <<< "$info"
+    codec="${codec,,}"
+    lang="${lang,,}"
+    [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
+
+    AUDIO_MT_INDICES+=("$idx")
+    AUDIO_MT_CODECS+=("$codec")
+    AUDIO_MT_CHANNELS+=("$ch")
+    AUDIO_MT_LANGS+=("$lang")
+    AUDIO_MT_TITLES+=("${title:-}")
+  done
+
+  AUDIO_COPY_FROM_SOURCE=1
+  HAS_AUDIO=1
+
+  # Log summary
+  local n_total n_kept n_dropped
+  n_total="$(_audio_stream_count)"
+  n_kept="${#AUDIO_MT_INDICES[@]}"
+  n_dropped=$(( n_total - n_kept ))
+
+  say "→ Scanning audio streams (multi-track mode):"
+  local i
+  for (( i=0; i<n_total; i++ )); do
+    local _ainfo _c _ch_i _l _br_i _t pretty marker=""
+    _ainfo="$(_audio_stream_info "$i")"
+    IFS=$'\t' read -r _c _ch_i _l _br_i _t <<< "$_ainfo"
+    _c="${_c,,}"
+    _l="${_l,,}"
+    [[ -z "$_l" ]] && _l="$TAG_LANGUAGE_DEFAULT"
+    [[ -z "$_br_i" || ! "$_br_i" =~ ^[0-9]+$ ]] && _br_i=0
+
+    # Check if this index is in the keep list
+    local _is_kept=0
+    for idx in "${AUDIO_MT_INDICES[@]}"; do
+      (( idx == i )) && { _is_kept=1; break; }
+    done
+
+    pretty="#$i: $_c ${_ch_i}ch [$_l]"
+    [[ -n "$_t" ]] && pretty="$pretty — $_t"
+    _audio_is_commentary "$_t" && pretty="$pretty [commentary]"
+    (( _br_i > 0 )) && pretty="$pretty, $((_br_i/1000))kbps"
+
+    if (( _is_kept )); then
+      marker=" ✓"
+    else
+      marker=" ✗"
+    fi
+    say "  $pretty$marker"
+  done
+
+  note "[Audio] Multi-track: keeping ${n_kept} of ${n_total} tracks (${n_dropped} filtered out)"
+  report_add "audio_mode" "multi-track"
+  report_add "audio_multi_track_kept" "$n_kept"
+  report_add "audio_multi_track_dropped" "$n_dropped"
+
+  # Report kept tracks
+  local track_summary=""
+  for (( i=0; i<n_kept; i++ )); do
+    local _idx="${AUDIO_MT_INDICES[$i]}"
+    local _codec="${AUDIO_MT_CODECS[$i]}"
+    local _ch="${AUDIO_MT_CHANNELS[$i]}"
+    local _lang="${AUDIO_MT_LANGS[$i]}"
+    track_summary+="#${_idx}: ${_codec} ${_ch}ch [${_lang}]"
+    (( i < n_kept - 1 )) && track_summary+=", "
+  done
+  report_add "audio_kept_tracks" "$track_summary"
+
+  mark_done "Audio filter plan (multi-track, ${n_kept} tracks)"
+}
+
 # run_audio_pipeline — Select, copy or transcode the best audio track.
 #
 # Decision tree:
@@ -5175,6 +5440,21 @@ run_audio_pipeline(){
     return 0
   fi
 
+  # ── Multi-track mode: filter and defer to mux_final ──
+  # When AUDIO_MULTI_TRACK=1, skip single-track scoring entirely.
+  # Demote to single-track if the user set overrides that are incompatible.
+  if (( AUDIO_MULTI_TRACK )); then
+    if [[ -n "${AUDIO_TRACK_OVERRIDE:-}" ]]; then
+      note "[Audio] AUDIO_MULTI_TRACK demoted to single-track: --audio-track override is set."
+    elif [[ -n "${AUDIO_FORCE_CODEC:-}" ]]; then
+      note "[Audio] AUDIO_MULTI_TRACK demoted to single-track: --audio-force-codec is set."
+    else
+      run_audio_pipeline_multi
+      return $?
+    fi
+  fi
+
+  # ── Single-track mode (score, select, copy/transcode) ──
   idx="$(select_best_audio)"
   [[ -n "$idx" ]] || { HAS_AUDIO=0; return 0; }
 
@@ -5935,6 +6215,7 @@ mux_final() {
   local s_forced_idx="" s_full_idx="" s_sdh_idx=""
   local forced_present=0 full_present=0 sdh_present=0
   local src_sub_idx=""
+  local _src_input_idx=""   # shared index when source is used as ffmpeg input
 
   # Validate and add video stream
   if (( SKIP_VIDEO )); then
@@ -5945,6 +6226,7 @@ mux_final() {
     # Map video directly from source to preserve container-level metadata
     # (DOVI configuration record, displaymatrix, etc.)
     ff_in+=( -i "$SRC_ABS" )
+    _src_input_idx=$next_idx
     vid_idx=$next_idx
     next_idx=$(( next_idx + 1 ))
   elif [[ -n "${V_DV_MP4:-}" && -s "$V_DV_MP4" ]]; then
@@ -5966,17 +6248,29 @@ mux_final() {
     die 42 "No encoded video stream found."
   fi
 
-  # Add audio streams
-  if (( ! SKIP_AUDIO )) && (( HAS_AUDIO )) && [[ -n "${A_PRIMARY:-}" && -s "$A_PRIMARY" ]]; then
-    ff_in+=( -i "$A_PRIMARY" )
-    a_primary_idx=$next_idx
-    next_idx=$(( next_idx + 1 ))
-  fi
-  
-  if (( ! SKIP_AUDIO )) && [[ -n "${AAC_STEREO:-}" && -s "$AAC_STEREO" ]]; then
-    ff_in+=( -i "$AAC_STEREO" )
-    a_stereo_idx=$next_idx
-    next_idx=$(( next_idx + 1 ))
+  # Add audio streams — multi-track or single-track
+  if (( ! SKIP_AUDIO )) && (( HAS_AUDIO )) && (( AUDIO_COPY_FROM_SOURCE )); then
+    # Multi-track: map audio streams directly from source.
+    # Reuse the source input if VIDEO_COPY_FROM_SOURCE already added it.
+    if [[ -z "$_src_input_idx" ]]; then
+      ff_in+=( -i "$SRC_ABS" )
+      _src_input_idx=$next_idx
+      next_idx=$(( next_idx + 1 ))
+    fi
+    # Mapping and tagging handled below in the multi-track section.
+  else
+    # Single-track: use extracted/transcoded intermediate files
+    if (( ! SKIP_AUDIO )) && (( HAS_AUDIO )) && [[ -n "${A_PRIMARY:-}" && -s "$A_PRIMARY" ]]; then
+      ff_in+=( -i "$A_PRIMARY" )
+      a_primary_idx=$next_idx
+      next_idx=$(( next_idx + 1 ))
+    fi
+    
+    if (( ! SKIP_AUDIO )) && [[ -n "${AAC_STEREO:-}" && -s "$AAC_STEREO" ]]; then
+      ff_in+=( -i "$AAC_STEREO" )
+      a_stereo_idx=$next_idx
+      next_idx=$(( next_idx + 1 ))
+    fi
   fi
 
   # Add subtitle streams
@@ -6005,9 +6299,12 @@ mux_final() {
 
   # Add source for direct subtitle mapping if needed
   if (( ! SKIP_SUBS )) && (( SRT_DIRECT_MAP )) && [[ -n "${DIRECT_SUB_RELIDX:-}" ]]; then
-    ff_in+=( -i "$SRC_ABS" )
-    src_sub_idx=$next_idx
-    next_idx=$(( next_idx + 1 ))
+    if [[ -z "$_src_input_idx" ]]; then
+      ff_in+=( -i "$SRC_ABS" )
+      _src_input_idx=$next_idx
+      next_idx=$(( next_idx + 1 ))
+    fi
+    src_sub_idx="$_src_input_idx"
   fi
 
   # Build stream mapping
@@ -6015,8 +6312,16 @@ mux_final() {
   # selects only the video stream, excluding audio/subs/data tracks.
   ff_map+=( -map "$vid_idx":v:0 )
 
-  [[ -n "$a_primary_idx" ]] && ff_map+=( -map "$a_primary_idx":a:0 )
-  [[ -n "$a_stereo_idx"  ]] && ff_map+=( -map "$a_stereo_idx":a:0 )
+  # Audio mapping: multi-track from source or single-track from files
+  if (( AUDIO_COPY_FROM_SOURCE )) && [[ -n "$_src_input_idx" ]]; then
+    local _mt_i
+    for _mt_i in "${AUDIO_MT_INDICES[@]}"; do
+      ff_map+=( -map "${_src_input_idx}:a:${_mt_i}" )
+    done
+  else
+    [[ -n "$a_primary_idx" ]] && ff_map+=( -map "$a_primary_idx":a:0 )
+    [[ -n "$a_stereo_idx"  ]] && ff_map+=( -map "$a_stereo_idx":a:0 )
+  fi
 
   (( forced_present )) && ff_map+=( -map "$s_forced_idx":s:0 )
   (( full_present   )) && ff_map+=( -map "$s_full_idx":s:0 )
@@ -6089,27 +6394,58 @@ mux_final() {
   # Audio metadata: language, title, and disposition tagging.
   # Output audio index tracks which output stream we're tagging.
   local -i out_a_idx=0
-  if [[ -n "$a_primary_idx" ]]; then
-    [[ -n "${A_PRIMARY_LANG:-}" ]]  && ff_codec+=( "-metadata:s:a:${out_a_idx}" "language=$A_PRIMARY_LANG" )
-    if (( INCLUDE_AUDIO_TITLES )) && [[ -n "${A_PRIMARY_CODEC:-}" ]]; then
-      local _desc_title
-      _desc_title="$(_audio_descriptive_title "$A_PRIMARY_CODEC" "${A_PRIMARY_CHANNELS:-0}")"
-      ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=$_desc_title" )
-    elif [[ -n "${A_PRIMARY_TITLE:-}" ]]; then
-      ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=$A_PRIMARY_TITLE" )
+  if (( AUDIO_COPY_FROM_SOURCE )) && (( ${#AUDIO_MT_INDICES[@]} > 0 )); then
+    # Multi-track: tag each kept audio stream copied from source
+    local _mt_i
+    for (( _mt_i=0; _mt_i<${#AUDIO_MT_INDICES[@]}; _mt_i++ )); do
+      local _mt_lang="${AUDIO_MT_LANGS[$_mt_i]}"
+      local _mt_codec="${AUDIO_MT_CODECS[$_mt_i]}"
+      local _mt_ch="${AUDIO_MT_CHANNELS[$_mt_i]}"
+      local _mt_title="${AUDIO_MT_TITLES[$_mt_i]}"
+
+      [[ -n "$_mt_lang" ]] && ff_codec+=( "-metadata:s:a:${out_a_idx}" "language=$_mt_lang" )
+
+      if (( INCLUDE_AUDIO_TITLES )); then
+        local _mt_desc
+        _mt_desc="$(_audio_descriptive_title "$_mt_codec" "$_mt_ch")"
+        ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=$_mt_desc" )
+      elif [[ -n "$_mt_title" ]]; then
+        ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=$_mt_title" )
+      fi
+
+      # First track gets default disposition; rest get none
+      if (( out_a_idx == 0 )); then
+        ff_codec+=( "-disposition:a:${out_a_idx}" default )
+      else
+        ff_codec+=( "-disposition:a:${out_a_idx}" 0 )
+      fi
+
+      out_a_idx=$(( out_a_idx + 1 ))
+    done
+  else
+    # Single-track: primary + optional stereo fallback
+    if [[ -n "$a_primary_idx" ]]; then
+      [[ -n "${A_PRIMARY_LANG:-}" ]]  && ff_codec+=( "-metadata:s:a:${out_a_idx}" "language=$A_PRIMARY_LANG" )
+      if (( INCLUDE_AUDIO_TITLES )) && [[ -n "${A_PRIMARY_CODEC:-}" ]]; then
+        local _desc_title
+        _desc_title="$(_audio_descriptive_title "$A_PRIMARY_CODEC" "${A_PRIMARY_CHANNELS:-0}")"
+        ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=$_desc_title" )
+      elif [[ -n "${A_PRIMARY_TITLE:-}" ]]; then
+        ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=$A_PRIMARY_TITLE" )
+      fi
+      ff_codec+=( "-disposition:a:${out_a_idx}" default )
+      out_a_idx=$(( out_a_idx + 1 ))
     fi
-    ff_codec+=( "-disposition:a:${out_a_idx}" default )
-    out_a_idx=$(( out_a_idx + 1 ))
-  fi
-  if [[ -n "$a_stereo_idx" ]]; then
-    [[ -n "${A_STEREO_LANG:-}" ]] && ff_codec+=( "-metadata:s:a:${out_a_idx}" "language=$A_STEREO_LANG" )
-    if (( INCLUDE_AUDIO_TITLES )); then
-      ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=$(_audio_descriptive_title aac 2)" )
-    else
-      ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=Stereo" )
+    if [[ -n "$a_stereo_idx" ]]; then
+      [[ -n "${A_STEREO_LANG:-}" ]] && ff_codec+=( "-metadata:s:a:${out_a_idx}" "language=$A_STEREO_LANG" )
+      if (( INCLUDE_AUDIO_TITLES )); then
+        ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=$(_audio_descriptive_title aac 2)" )
+      else
+        ff_codec+=( "-metadata:s:a:${out_a_idx}" "title=Stereo" )
+      fi
+      ff_codec+=( "-disposition:a:${out_a_idx}" 0 )
+      out_a_idx=$(( out_a_idx + 1 ))
     fi
-    ff_codec+=( "-disposition:a:${out_a_idx}" 0 )
-    out_a_idx=$(( out_a_idx + 1 ))
   fi
 
   # MP4/MOV optimization

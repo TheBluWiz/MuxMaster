@@ -4,6 +4,27 @@ All notable changes to MuxMaster will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com), and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+Multi-track audio for `dv-archival`: the profile now keeps all audio tracks from the source instead of scoring and selecting one. Commentary/descriptive tracks are dropped by default. All surviving tracks are stream-copied (never transcoded). Configurable via `.muxmrc`.
+
+### Added
+
+- **Multi-track audio pipeline** (`AUDIO_MULTI_TRACK=1`) — New audio mode that keeps all matching audio tracks instead of selecting a single best track. Audio streams are mapped directly from source with `-c:a copy` (no intermediate extraction, no transcoding, no temp files). Controlled by two new config variables:
+  - `AUDIO_MULTI_TRACK` — `1` = keep all tracks that pass filters, `0` = single-track scoring (default, unchanged for all other profiles).
+  - `AUDIO_KEEP_COMMENTARY` — `1` = keep commentary/descriptive tracks, `0` = drop them. Uses the existing `_audio_is_commentary()` heuristic.
+- **`dv-archival` profile updated** — Now sets `AUDIO_MULTI_TRACK=1` and `AUDIO_KEEP_COMMENTARY=0`. Language filtering uses the existing `AUDIO_LANG_PREF` variable: when empty (the dv-archival default), all languages pass; when set (e.g., `eng,jpn`), only matching tracks are kept.
+- **Graceful demotion** — If `--audio-track` or `--audio-force-codec` is set alongside `AUDIO_MULTI_TRACK=1`, multi-track mode is automatically demoted to single-track with an informational note. The explicit CLI flag always wins.
+- **Conflict warnings** (Section 13) for `dv-archival` + `--audio-track`, `--audio-force-codec`, and `--stereo-fallback` when multi-track mode is active.
+- **`skip-if-ideal` updated** — When `AUDIO_MULTI_TRACK=1`, the ideal check verifies that every source audio track would survive the filter. If any would be dropped, the source is not ideal and remuxing proceeds.
+- **Shared source input in `mux_final`** — `VIDEO_COPY_FROM_SOURCE`, `AUDIO_COPY_FROM_SOURCE`, and direct subtitle mapping now share a single `-i "$SRC_ABS"` ffmpeg input via `_src_input_idx`, eliminating duplicate source file inputs.
+- New man page subsection "Multi-Track Audio (Archival)" under AUDIO OPTIONS, documenting filter behavior, config variables, and demotion rules.
+- `AUDIO_MULTI_TRACK` and `AUDIO_KEEP_COMMENTARY` added to `--print-effective-config`, `--create-config` template, and man page CONFIGURATION variable groups.
+
+### Changed
+
+- `dv-archival` profile description updated in man page, usage text, and `--help` output to reflect multi-track audio behavior.
+
 ## [1.0.2] - 2026-03-20
 
 Enforce HEVC Level 5.1 VBV guardrails in `atv-directplay-hq` re-encodes to prevent bitrate spikes that cause stutter on Apple TV 4K. Fix crash when subtitle or audio stream titles contain literal pipe characters. Add ASS/SSA subtitle format preservation for MKV containers. Eliminate redundant multi-GB file copies in the video pipeline. Fix fatal ffmpeg muxer failure when stream-copying TrueHD or ALAC audio via lossless passthrough. Fix misleading "No Dolby Vision detected" log message when DV detection is skipped by a profile.
