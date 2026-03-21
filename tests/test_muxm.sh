@@ -454,6 +454,29 @@ ASS
     "$TESTDIR/ass_subs.mkv"
   pass "ass_subs.mkv created"
 
+  # 5d) Stream titles containing literal pipe characters (v1.0.2 regression fixture).
+  #     Pipe characters in subtitle/audio titles previously corrupted the pipe-delimited
+  #     output of _sub_stream_info and the audio jq pipeline, causing an arithmetic
+  #     evaluation crash under nounset. The delimiter was migrated from | to \t (tab).
+  log "Creating pipe_titles.mkv (HEVC + AAC with pipe in title + SRT with pipe in title)"
+  cat > "$TESTDIR/pipe_test.srt" <<'SRT'
+1
+00:00:00,000 --> 00:00:02,000
+Pipe title subtitle line
+SRT
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=orange:s=320x240:r=24:d=2" \
+    -f lavfi -i "sine=frequency=440:duration=2" \
+    -i "$TESTDIR/pipe_test.srt" \
+    -c:v libx265 -preset ultrafast -crf 28 -pix_fmt yuv420p10le \
+    -c:a aac -b:a 128k -ac 2 \
+    -c:s srt \
+    -map 0:v -map 1:a -map 2 \
+    -metadata:s:a:0 language=eng -metadata:s:a:0 title="Original | English" \
+    -metadata:s:s:0 language=eng -metadata:s:s:0 title="Original | English | (SDH)" \
+    "$TESTDIR/pipe_titles.mkv"
+  pass "pipe_titles.mkv created"
+
   # 6) File with chapters — chapter metadata input requires raw ffmpeg.
   log "Creating with_chapters.mkv (chapters)"
   cat > "$TESTDIR/chapters.txt" <<'CHAP'
@@ -987,6 +1010,8 @@ test_profiles() {
   assert_contains "SUB_BURN_FORCED           = 1" "atv-directplay: burn forced subs" "$out"
   assert_contains "SKIP_IF_IDEAL             = 1" "atv-directplay: skip-if-ideal on" "$out"
   assert_contains "MAX_COPY_BITRATE          = 50000k" "atv-directplay: bitrate ceiling" "$out"
+  assert_contains "LEVEL_VALUE               = 5.1" "atv-directplay: Level 5.1 VBV cap" "$out"
+  assert_contains "CONSERVATIVE_VBV          = 1" "atv-directplay: conservative VBV active" "$out"
 
   # streaming specifics
   out="$(run_muxm --profile streaming --print-effective-config)"
@@ -1484,6 +1509,17 @@ test_audio() {
   else
     skip "--no-audio-titles encode failed or output not found"
   fi
+
+  # ---- Pipe characters in audio stream titles no longer break field parsing ----
+  # v1.0.2 fix: audio titles with literal | (e.g. "Original | English") corrupted
+  # the old pipe-delimited _audio_stream_info output. Delimiter migrated to \t.
+  # Primary signal: encode completes without nounset arithmetic crash.
+  local pipe_audio_out="$TESTDIR/audio_pipe_titles.mp4"
+  log "Testing pipe characters in audio stream title..."
+  if assert_encode "Pipe in audio title: encode completes (no crash)" "$pipe_audio_out" \
+       --crf 28 --preset ultrafast "$TESTDIR/pipe_titles.mkv"; then
+    assert_stream_count "Pipe in audio title: audio stream present" "$pipe_audio_out" a 1
+  fi
 }
 
 # === Suite: Subtitle Pipeline ===
@@ -1689,6 +1725,23 @@ EOF
 
   # Restore HOME
   export HOME="$_saved_home"
+
+  # ---- Pipe characters in subtitle titles no longer break field parsing ----
+  # v1.0.2 fix: titles like "Original | English | (SDH)" contain literal | which
+  # corrupted the old pipe-delimited _sub_stream_info output. Delimiter migrated to \t.
+  local pipe_sub_out="$TESTDIR/subs_pipe_titles.mkv"
+  log "Testing pipe characters in subtitle stream title..."
+  if assert_encode "Pipe in sub title: encode completes (no crash)" "$pipe_sub_out" \
+       --output-ext mkv --crf 28 --preset ultrafast "$TESTDIR/pipe_titles.mkv"; then
+    assert_stream_count "Pipe in sub title: subtitle stream present" "$pipe_sub_out" s 1
+    local pipe_sub_codec
+    pipe_sub_codec="$(probe_sub "$pipe_sub_out" codec_name)"
+    if [[ -n "$pipe_sub_codec" ]]; then
+      pass "Pipe in sub title: subtitle codec readable ($pipe_sub_codec)"
+    else
+      fail "Pipe in sub title: subtitle codec not readable"
+    fi
+  fi
 }
 
 # === Suite: Output Features ===
