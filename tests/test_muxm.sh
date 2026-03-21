@@ -135,7 +135,7 @@ probe_sub() {
 # Usage: probe_format_tag FILE TAG
 probe_format_tag() {
   local file="$1" tag="$2"
-  ffprobe -v error -show_entries "format_tags=$tag" -of csv=p=0 "$file" 2>/dev/null | head -1
+  ffprobe -v error -show_entries "format_tags=$tag" -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null | head -1
 }
 
 # Probe a stream-level tag (language, title, etc.).
@@ -143,7 +143,7 @@ probe_format_tag() {
 #   STREAM_SPEC — ffprobe stream selector (a:0, s:0, v:0, etc.)
 probe_stream_tag() {
   local file="$1" stream="$2" tag="$3"
-  ffprobe -v error -select_streams "$stream" -show_entries "stream_tags=$tag" -of csv=p=0 "$file" 2>/dev/null | head -1
+  ffprobe -v error -select_streams "$stream" -show_entries "stream_tags=$tag" -of default=noprint_wrappers=1:nokey=1 "$file" 2>/dev/null | head -1
 }
 
 # Probe a format-level field (format_name, duration, etc.).
@@ -1923,35 +1923,113 @@ test_containers() {
 }
 
 # === Suite: Metadata Tests ===
-# Validates --strip-metadata removes format-level tags, metadata preservation without the flag,
-# and acceptance of --ffmpeg-loglevel and --no-hide-banner.
+# Validates --strip-metadata removes format-level tags, profile comment behavior
+# (survives strip, suppressed by --no-profile-comment, correct per-profile values),
+# metadata preservation without the flag, and acceptance of --ffmpeg-loglevel / --no-hide-banner.
 test_metadata() {
   section "Metadata & Strip Verification"
 
   local outfile out title comment
 
   # --strip-metadata encode test (#25, #53)
+  # Profile comment is applied AFTER -map_metadata -1, so it intentionally
+  # survives --strip-metadata.  Source-inherited tags (title, encoder) should
+  # be removed; the profile comment should remain.
   outfile="$TESTDIR/meta_stripped.mp4"
-  log "Testing --strip-metadata with real encode..."
+  log "Testing --strip-metadata with profile (comment survives by design)..."
   if assert_encode "--strip-metadata: output produced" "$outfile" \
-       --strip-metadata --crf 28 --preset ultrafast "$TESTDIR/rich_metadata.mkv"; then
+       --profile streaming --strip-metadata --crf 28 --preset ultrafast "$TESTDIR/rich_metadata.mkv"; then
     title="$(probe_format_tag "$outfile" title)"
     comment="$(probe_format_tag "$outfile" comment)"
-    if [[ -z "$title" && -z "$comment" ]]; then
-      pass "--strip-metadata: title and comment removed"
-    elif [[ -z "$title" ]]; then
-      pass "--strip-metadata: title removed"
-      skip "--strip-metadata: comment='$comment' (may persist in some containers)"
+    if [[ -z "$title" ]]; then
+      pass "--strip-metadata: source title removed"
     else
-      skip "--strip-metadata: title='$title', comment='$comment' (stripping may be partial)"
+      fail "--strip-metadata: source title survived ('$title')"
+    fi
+    if [[ "$comment" == "Lean, mean, streaming machine." ]]; then
+      pass "--strip-metadata: profile comment survives (by design)"
+    else
+      fail "--strip-metadata: expected streaming profile comment, got='$comment'"
     fi
   fi
 
-  # Without --strip-metadata, metadata should be preserved
+  # --strip-metadata + --no-profile-comment: everything should be gone
+  outfile="$TESTDIR/meta_stripped_no_comment.mp4"
+  log "Testing --strip-metadata + --no-profile-comment..."
+  if assert_encode "--strip-metadata + --no-profile-comment: output produced" "$outfile" \
+       --profile streaming --strip-metadata --no-profile-comment --crf 28 --preset ultrafast "$TESTDIR/rich_metadata.mkv"; then
+    title="$(probe_format_tag "$outfile" title)"
+    comment="$(probe_format_tag "$outfile" comment)"
+    if [[ -z "$title" ]]; then
+      pass "--strip-metadata + --no-profile-comment: source title removed"
+    else
+      fail "--strip-metadata + --no-profile-comment: source title survived ('$title')"
+    fi
+    if [[ -z "$comment" ]]; then
+      pass "--strip-metadata + --no-profile-comment: comment removed"
+    else
+      fail "--strip-metadata + --no-profile-comment: comment survived ('$comment')"
+    fi
+  fi
+
+  # Profile comment present by default when a profile is active
+  outfile="$TESTDIR/meta_profile_comment.mp4"
+  log "Testing profile comment is written by default..."
+  if assert_encode "Profile comment default: output produced" "$outfile" \
+       --profile streaming --crf 28 --preset ultrafast "$TESTDIR/rich_metadata.mkv"; then
+    comment="$(probe_format_tag "$outfile" comment)"
+    if [[ "$comment" == "Lean, mean, streaming machine." ]]; then
+      pass "Profile comment present: streaming tagline correct"
+    else
+      fail "Profile comment: expected 'Lean, mean, streaming machine.', got='$comment'"
+    fi
+  fi
+
+  # --no-profile-comment suppresses the comment
+  outfile="$TESTDIR/meta_no_profile_comment.mp4"
+  log "Testing --no-profile-comment suppresses comment..."
+  if assert_encode "--no-profile-comment: output produced" "$outfile" \
+       --profile streaming --no-profile-comment --crf 28 --preset ultrafast "$TESTDIR/rich_metadata.mkv"; then
+    comment="$(probe_format_tag "$outfile" comment)"
+    # Without --strip-metadata the source comment may survive; check that the
+    # profile tagline is absent (source comment is "This is a test comment").
+    if echo "$comment" | grep -qF "Lean, mean, streaming machine."; then
+      fail "--no-profile-comment: profile tagline still present"
+    else
+      pass "--no-profile-comment: profile tagline suppressed"
+    fi
+  fi
+
+  # Verify per-profile comment values via real encodes (spot-check two more profiles)
+  outfile="$TESTDIR/meta_comment_animation.mkv"
+  log "Testing animation profile comment..."
+  if assert_encode "Profile comment animation: output produced" "$outfile" \
+       --profile animation --crf 28 --preset ultrafast "$TESTDIR/basic_sdr_subs.mkv"; then
+    comment="$(probe_format_tag "$outfile" comment)"
+    if [[ "$comment" == "psy-rd turned down, sakuga turned up." ]]; then
+      pass "Profile comment: animation tagline correct"
+    else
+      fail "Profile comment animation: expected 'psy-rd turned down, sakuga turned up.', got='$comment'"
+    fi
+  fi
+
+  outfile="$TESTDIR/meta_comment_universal.mp4"
+  log "Testing universal profile comment..."
+  if assert_encode "Profile comment universal: output produced" "$outfile" \
+       --profile universal --crf 28 --preset ultrafast "$TESTDIR/basic_sdr_subs.mkv"; then
+    comment="$(probe_format_tag "$outfile" comment)"
+    if [[ "$comment" == "Lowest common denominator, highest common decency." ]]; then
+      pass "Profile comment: universal tagline correct"
+    else
+      fail "Profile comment universal: expected 'Lowest common denominator, highest common decency.', got='$comment'"
+    fi
+  fi
+
+  # Without --strip-metadata, source metadata should be preserved
   outfile="$TESTDIR/meta_preserved.mp4"
   log "Testing metadata preservation (no --strip-metadata)..."
   if assert_encode "Metadata preservation encode" "$outfile" \
-       --crf 28 --preset ultrafast "$TESTDIR/rich_metadata.mkv"; then
+       --no-profile-comment --crf 28 --preset ultrafast "$TESTDIR/rich_metadata.mkv"; then
     title="$(probe_format_tag "$outfile" title)"
     if [[ -n "$title" ]]; then
       pass "Metadata preserved: title='$title'"
