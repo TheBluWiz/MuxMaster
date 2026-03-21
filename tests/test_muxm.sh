@@ -544,6 +544,26 @@ CHAP
     "$TESTDIR/multi_audio_commentary.mkv"
   pass "multi_audio_commentary.mkv created"
 
+  # 8c) HEVC multi-audio fixture for dv-archival multi-track testing.
+  #     HEVC video (copy-if-compliant) + 3 audio: eng main, eng commentary, spa.
+  #     3 audio inputs require explicit maps — raw ffmpeg.
+  log "Creating hevc_multi_audio.mkv (HEVC + 3 audio: eng main, eng commentary, spa)"
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=orange:s=320x240:r=24:d=2" \
+    -f lavfi -i "sine=frequency=440:duration=2" \
+    -f lavfi -i "sine=frequency=550:duration=2" \
+    -f lavfi -i "sine=frequency=660:duration=2" \
+    -c:v libx265 -preset ultrafast -crf 28 -pix_fmt yuv420p10le \
+    -map 0:v -map 1:a -map 2:a -map 3:a \
+    -c:a:0 aac -b:a:0 128k -ac:a:0 2 \
+    -c:a:1 aac -b:a:1 128k -ac:a:1 2 \
+    -c:a:2 aac -b:a:2 128k -ac:a:2 2 \
+    -metadata:s:a:0 language=eng -metadata:s:a:0 title="Main Feature" \
+    -metadata:s:a:1 language=eng -metadata:s:a:1 title="Director's Commentary" \
+    -metadata:s:a:2 language=spa -metadata:s:a:2 title="Spanish" \
+    "$TESTDIR/hevc_multi_audio.mkv"
+  pass "hevc_multi_audio.mkv created"
+
   # 9) File with rich metadata (encoder, title, etc.) for strip-metadata tests
   log "Creating rich_metadata.mkv (with extra metadata tags)"
   gen_media "$TESTDIR/rich_metadata.mkv" gray \
@@ -997,12 +1017,15 @@ test_profiles() {
   assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 1" "dv-archival: lossless audio on" "$out"
   assert_contains "OUTPUT_EXT                = mkv" "dv-archival: MKV container" "$out"
   assert_contains "truehd,dts,flac" "dv-archival: lossless-first codec preference" "$out"
+  assert_contains "AUDIO_MULTI_TRACK         = 1" "dv-archival: multi-track audio enabled" "$out"
+  assert_contains "AUDIO_KEEP_COMMENTARY     = 0" "dv-archival: commentary excluded by default" "$out"
 
   # hdr10-hq specifics
   out="$(run_muxm --profile hdr10-hq --print-effective-config)"
   assert_contains "DISABLE_DV                = 1" "hdr10-hq: DV disabled" "$out"
   assert_contains "CRF_VALUE                 = 17" "hdr10-hq: CRF 17" "$out"
   assert_contains "OUTPUT_EXT                = mkv" "hdr10-hq: MKV container" "$out"
+  assert_contains "AUDIO_MULTI_TRACK         = 0" "hdr10-hq: multi-track audio off (no bleed)" "$out"
 
   # atv-directplay-hq specifics
   out="$(run_muxm --profile atv-directplay-hq --print-effective-config)"
@@ -1061,6 +1084,19 @@ test_conflicts() {
 
   out="$(run_muxm --profile dv-archival --sub-burn-forced --print-effective-config)"
   assert_contains "⚠" "dv-archival + --sub-burn-forced warns (#40)" "$out"
+
+  # dv-archival multi-track audio conflicts
+  out="$(run_muxm --profile dv-archival --audio-track 0 --print-effective-config)"
+  assert_contains "⚠" "dv-archival + --audio-track warns (multi-track conflict)" "$out"
+  assert_contains "Multi-track" "dv-archival + --audio-track: warning mentions multi-track" "$out"
+
+  out="$(run_muxm --profile dv-archival --audio-force-codec aac --print-effective-config)"
+  assert_contains "⚠" "dv-archival + --audio-force-codec warns (multi-track conflict)" "$out"
+  assert_contains "Multi-track" "dv-archival + --audio-force-codec: warning mentions multi-track" "$out"
+
+  out="$(run_muxm --profile dv-archival --stereo-fallback --print-effective-config)"
+  assert_contains "⚠" "dv-archival + --stereo-fallback warns (multi-track conflict)" "$out"
+  assert_contains "Multi-track" "dv-archival + --stereo-fallback: warning mentions multi-track" "$out"
 
   # --- hdr10-hq conflicts ---
   out="$(run_muxm --profile hdr10-hq --tonemap --print-effective-config)"
@@ -1162,6 +1198,11 @@ test_dryrun() {
   # Dry-run with animation profile + ASS source completes cleanly
   out="$(run_muxm --dry-run --profile animation "$TESTDIR/ass_subs.mkv")"
   assert_contains "DRY-RUN" "Dry-run animation + ASS completes" "$out"
+
+  # Dry-run with dv-archival multi-track audio
+  out="$(run_muxm --dry-run --profile dv-archival "$TESTDIR/hevc_multi_audio.mkv")"
+  assert_contains "DRY-RUN" "Dry-run dv-archival + multi-audio completes" "$out"
+  assert_contains "multi-track" "Dry-run dv-archival: announces multi-track mode" "$out"
 }
 
 # === Suite: Video Pipeline (real encodes) ===
@@ -1520,6 +1561,45 @@ test_audio() {
        --crf 28 --preset ultrafast "$TESTDIR/pipe_titles.mkv"; then
     assert_stream_count "Pipe in audio title: audio stream present" "$pipe_audio_out" a 1
   fi
+
+  # ---- Multi-track audio (dv-archival) ----
+  # Uses hevc_multi_audio.mkv: 3 tracks — eng "Main Feature", eng "Director's Commentary", spa "Spanish"
+
+  # Multi-track dry-run: shows ✓/✗ markers and announces multi-track mode
+  log "Testing multi-track audio dry-run..."
+  local mt_dry
+  mt_dry="$(run_muxm --dry-run --profile dv-archival "$TESTDIR/hevc_multi_audio.mkv")"
+  assert_contains "multi-track" "Multi-track dry-run: announces multi-track mode" "$mt_dry"
+  assert_contains "✓" "Multi-track dry-run: shows ✓ keep marker" "$mt_dry"
+  assert_contains "✗" "Multi-track dry-run: shows ✗ drop marker (commentary filtered)" "$mt_dry"
+
+  # Multi-track commentary filtering: commentary track dropped, 2 survive
+  log "Testing multi-track commentary filtering..."
+  assert_contains "commentary" "Multi-track: commentary track detected" "$mt_dry"
+  # Default dv-archival: AUDIO_KEEP_COMMENTARY=0 drops the commentary track
+  assert_contains "keeping 2 of 3" "Multi-track: 2 of 3 tracks kept (commentary dropped)" "$mt_dry"
+
+  # Multi-track demotion: --audio-track forces single-track
+  log "Testing multi-track demotion on --audio-track..."
+  local mt_demote_at
+  mt_demote_at="$(run_muxm --dry-run --profile dv-archival --audio-track 0 "$TESTDIR/hevc_multi_audio.mkv")"
+  assert_contains "demoted" "Multi-track + --audio-track: demoted to single-track" "$mt_demote_at"
+
+  # Multi-track demotion: --audio-force-codec forces single-track
+  log "Testing multi-track demotion on --audio-force-codec..."
+  local mt_demote_fc
+  mt_demote_fc="$(run_muxm --dry-run --profile dv-archival --audio-force-codec aac "$TESTDIR/hevc_multi_audio.mkv")"
+  assert_contains "demoted" "Multi-track + --audio-force-codec: demoted to single-track" "$mt_demote_fc"
+
+  # Multi-track language filter: --audio-lang-pref eng keeps only English tracks
+  # CLI flag overrides the profile's AUDIO_LANG_PREF="" (config file would not —
+  # profiles run after config files but before CLI).
+  log "Testing multi-track language filter..."
+  local mt_lang_out
+  mt_lang_out="$(run_muxm --dry-run --profile dv-archival \
+    --audio-lang-pref eng "$TESTDIR/hevc_multi_audio.mkv")"
+  # eng main kept, eng commentary dropped (commentary), spa dropped (language) = keeping 1 of 3
+  assert_contains "keeping 1 of 3" "Multi-track + --audio-lang-pref eng: 1 of 3 kept (spa + commentary dropped)" "$mt_lang_out"
 }
 
 # === Suite: Subtitle Pipeline ===
@@ -2808,6 +2888,45 @@ test_profile_e2e() {
   fi
 
   export HOME="$_saved_home"
+
+  # ---- dv-archival multi-track audio: verify commentary filtered, rest preserved ----
+  # hevc_multi_audio.mkv: 3 audio tracks — eng "Main Feature", eng "Director's Commentary", spa "Spanish"
+  # dv-archival defaults: AUDIO_MULTI_TRACK=1, AUDIO_KEEP_COMMENTARY=0, AUDIO_LANG_PREF="" (keep all langs)
+  # Expected: commentary dropped → 2 audio tracks in output (eng main + spa)
+  local mt_e2e_home="$TESTDIR/e2e_mt_home"
+  mkdir -p "$mt_e2e_home"
+
+  local mt_e2e_out="$TESTDIR/e2e_dv_archival_multi.mkv"
+  log "Full encode: dv-archival profile multi-track audio..."
+  if MUXM_HOME="$mt_e2e_home" assert_encode "dv-archival multi-track: e2e output produced" "$mt_e2e_out" \
+       --profile dv-archival "$TESTDIR/hevc_multi_audio.mkv"; then
+    # Should have 2 audio tracks (commentary dropped)
+    local mt_e2e_acount
+    mt_e2e_acount="$(count_streams "$mt_e2e_out" a)"
+    if [[ "$mt_e2e_acount" -eq 2 ]]; then
+      pass "dv-archival multi-track e2e: 2 audio tracks (commentary filtered)"
+    else
+      fail "dv-archival multi-track e2e: expected 2 audio tracks, got $mt_e2e_acount"
+    fi
+    # Video should be copy (HEVC, not re-encoded)
+    assert_probe "dv-archival multi-track e2e: video is HEVC (copy)" "$mt_e2e_out" codec_name hevc
+    # First audio track should have eng language
+    local mt_e2e_lang0
+    mt_e2e_lang0="$(probe_stream_tag "$mt_e2e_out" a:0 language)"
+    if [[ "$mt_e2e_lang0" == "eng" ]]; then
+      pass "dv-archival multi-track e2e: first audio track is English"
+    else
+      fail "dv-archival multi-track e2e: expected eng, got lang='$mt_e2e_lang0'"
+    fi
+    # Second audio track should have spa language
+    local mt_e2e_lang1
+    mt_e2e_lang1="$(probe_stream_tag "$mt_e2e_out" a:1 language)"
+    if [[ "$mt_e2e_lang1" == "spa" ]]; then
+      pass "dv-archival multi-track e2e: second audio track is Spanish"
+    else
+      fail "dv-archival multi-track e2e: expected spa, got lang='$mt_e2e_lang1'"
+    fi
+  fi
 }
 
 # === Suite: Completions Installer ===

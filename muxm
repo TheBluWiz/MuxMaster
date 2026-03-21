@@ -2590,8 +2590,10 @@ apply_profile_dv_archival() {
   VIDEO_CODEC="libx265"
   # Audio: multi-track, copy all matching tracks from source.
   # No scoring, no transcoding, no stereo fallback.
+  # Empty AUDIO_LANG_PREF = keep all languages (archival default).
   AUDIO_MULTI_TRACK=1
   AUDIO_KEEP_COMMENTARY=0
+  AUDIO_LANG_PREF=""
   AUDIO_LOSSLESS_PASSTHROUGH=1
   ADD_STEREO_IF_MULTICH=0
   AUDIO_CODEC_PREFERENCE="truehd,dts,flac,eac3,ac3,aac,alac,other"
