@@ -1,223 +1,255 @@
 # muxm Format Profiles
 
-Below are the six format profiles for `muxm`, listed **from highest fidelity to widest compatibility**.  
-Each profile includes **who/where it's for**, **its goal**, and **default behaviors**.
+`muxm` ships six opinionated profiles, listed below from highest fidelity to widest
+compatibility. Each profile is a starting point — every variable it sets can be
+overridden from a `.muxmrc` config file or from the CLI.
+
+To inspect the exact variables a profile sets (including any overrides you've
+applied), use:
+
+```bash
+muxm --profile <name> --print-effective-config
+```
 
 ---
 
-## 1) `dv-archival` — High Quality Dolby Vision Archival
-**Who/Where:**  
-For collectors or Plex users with a **Dolby Vision-capable ecosystem** (e.g., Apple TV 4K + DV TV, Shield, LG WebOS w/ Plex) who want to **preserve original quality**.  
-Great for long-term storage where fidelity > compatibility.
+## Choosing a Profile
 
-**Goal:**  
-Preserve DV + HDR10 metadata and lossless audio whenever possible. Only perform **lossless remuxes** or metadata fixes. Skip processing if the file is already ideal.
+| Profile | Container | Codec | Audio | Use when… |
+|---|---|---|---|---|
+| `dv-archival` | MKV | copy | lossless copy | You want a bit-perfect archive with DV + HDR10 intact. |
+| `hdr10-hq` | MKV | HEVC | lossless + stereo | Your gear is HDR10 but not Dolby Vision. |
+| `atv-directplay-hq` | MP4 | HEVC | E-AC-3 + stereo | Plex → Apple TV 4K and you never want transcoding. |
+| `streaming` | MP4 | HEVC | E-AC-3 + stereo | Plex/Jellyfin on mixed modern clients; file size matters. |
+| `animation` | MKV | HEVC | lossless + stereo | Anime or cartoons where banding and styled subs matter. |
+| `universal` | MP4 | H.264 | AAC stereo | It has to play everywhere, including old Rokus and phones. |
 
-**Defaults:**
-- **DV policy:** `preserve` (no re-encode unless `--dv-policy reencode` specified)
-- **Container:** `mkv`
-- **Video:** `-c:v copy` unless DV re-encode explicitly requested `VIDEO_COPY_IF_COMPLIANT=1`
-- **Audio:** keep lossless; `--stereo-fallback=off` (toggleable) `AUDIO_LOSSLESS_PASSTHROUGH=1`, `ADD_STEREO_IF_MULTICH=0`
-- **Subs:** keep all; detect/mark forced; fix language tags; no burn
-- **Chapters/metadata:** keep and normalize `KEEP_CHAPTERS=1`, `STRIP_METADATA=0`
-- **Skip heuristic:** `--skip-if-ideal` (enabled) — no changes if file already matches target profile `SKIP_IF_IDEAL=1`
-- **Reporting:** generate JSON + human-readable report of checks/fixes `REPORT_JSON=1`
+---
+
+## Profile Details
+
+### 1) `dv-archival` — High Quality Dolby Vision Archival
+
+**For:** Collectors and Plex users with a Dolby Vision ecosystem (Apple TV 4K +
+DV display, Shield, LG WebOS) who want to preserve original quality for long-term
+storage.
+
+**Goal:** Lossless remux only. Preserve Dolby Vision + HDR10 metadata, keep all
+audio tracks (multi-track copy, no transcode), keep all subtitle tracks, keep
+chapters and metadata. Skip processing entirely if the file already matches the
+target. Generate a JSON report and SHA-256 checksum for archival integrity.
+
+**Key behaviors:**
+
+- Video is stream-copied, never re-encoded (unless the source is non-compliant
+  and a re-encode is explicitly requested via CLI override).
+- All audio tracks matching the language filter are copied losslessly. Commentary
+  tracks are excluded by default.
+- All subtitle tracks are kept. Forced tracks are detected and flagged.
+  Language tags are normalized.
+- The skip-if-ideal heuristic avoids touching files that already conform.
 
 **CLI:** `muxm --profile dv-archival input.mkv`
 
 ---
 
-## 2) `hdr10-hq` — High Quality HDR10 (No Dolby Vision)
-**Who/Where:**  
-For HDR10 TVs and mixed-device environments where DV causes quirks (e.g., older streaming devices, non-DV TVs, varied Plex clients).
+### 2) `hdr10-hq` — High Quality HDR10 (No Dolby Vision)
 
-**Goal:**  
-Maximize HDR10 quality while avoiding DV playback issues. Keep HDR10 metadata intact, remove DV layers, preserve lossless audio, and add stereo fallback.
+**For:** HDR10 displays and mixed-device setups where Dolby Vision causes playback
+quirks (older streaming devices, non-DV TVs, varied Plex clients).
 
-**Defaults:**
-- **DV policy:** `strip` `DISABLE_DV=1`
-- **Container:** `mkv`
-- **Video:** HEVC re-encode if needed:  
-  `-c:v libx265 -preset slower -crf 17` with HDR10 x265 params
-- **Pixel format:** `yuv420p10le` `HDR_TARGET_PIXFMT=yuv420p10le`, `FORCE_CHROMA_420=1`
-- **Audio:** keep lossless **and** add AAC stereo fallback (256k) `AUDIO_LOSSLESS_PASSTHROUGH=1`, `ADD_STEREO_IF_MULTICH=1`, `STEREO_BITRATE=256k`
-- **Subs:** keep all; default by language; no burn
-- **Chapters/metadata:** preserve
+**Goal:** Maximum HDR10 quality. Strip DV layers, preserve HDR10 static metadata,
+re-encode to HEVC Main10 at high quality (CRF 17 / slower), keep lossless audio
+with an AAC stereo fallback for lightweight clients.
+
+**Key behaviors:**
+
+- DV is stripped unconditionally. If the source is DV-only (no HDR10 fallback
+  layer), `muxm` warns that the output may appear dim or washed out.
+- Full HDR10 x265 parameter set is applied (colorimetry, mastering display,
+  MaxCLL passthrough).
+- Pixel format forced to `yuv420p10le`.
 
 **CLI:** `muxm --profile hdr10-hq input.mkv`
 
 ---
 
-## 3) `atv-directplay-hq` — Apple TV Direct Play (Plex) Optimized
-**Who/Where:**  
-Plex → **Apple TV 4K** setups, aiming for *true Direct Play* without remux/transcode.
+### 3) `atv-directplay-hq` — Apple TV Direct Play (Plex) Optimized
 
-**Goal:**  
-Conform to tvOS/Plex playback constraints while keeping high quality: MP4 container, HEVC Main10 (HDR10 and optional DV P8.1), E-AC-3 audio (with Atmos JOC when present), and text-based subtitles.
+**For:** Plex → Apple TV 4K setups aiming for true Direct Play with zero
+transcoding.
 
-**Defaults:**
-- **DV policy:** `auto`  
-  - Preserve DV **Profile 8.1** if present & compliant; otherwise fall back to clean **HDR10**. (Don't output P7.)
-  - `DISABLE_DV=0`, `ALLOW_DV_FALLBACK=1`, `DV_CONVERT_TO_P81_IF_FAIL=1`
-- **Container:** `mp4` (maximize Apple TV Direct Play)
-- **Video:**  
-  - Prefer copy if already compliant (`VIDEO_COPY_IF_COMPLIANT=1`); else:
-    ```
-    -c:v libx265 -preset slower -crf 17 -pix_fmt yuv420p10le
-    ```
-  - If DV kept: add `:dv-profile=8.1:dv-bl-compatible-id=1`.
-- **Audio:**  
-  - Transcode to E-AC-3 5.1 @ 640k (or 7.1 @ 768k): `EAC3_BITRATE_5_1=640k`, `EAC3_BITRATE_7_1=768k`  
-  - AAC 2.0 @ 256k fallback: `ADD_STEREO_IF_MULTICH=1`, `STEREO_BITRATE=256k`  
-  - No lossless passthrough (Apple TV can't Direct Play TrueHD): `AUDIO_LOSSLESS_PASSTHROUGH=0`
-- **Subs:**  
-  - **Forced:** burn into video (`SUB_BURN_FORCED=1`)  
-  - **Others:** embed as `mov_text` for MP4
-- **Chapters/metadata:** keep chapters; normalize language tags
-- **Skip heuristic:** on `SKIP_IF_IDEAL=1`
+**Goal:** Conform to tvOS and Plex playback constraints while keeping high
+quality. MP4 container, HEVC Main10, DV Profile 8.1 when possible (with clean
+HDR10 fallback), E-AC-3 audio (with Atmos JOC when present), AAC stereo
+fallback, and text-based subtitles.
+
+**Key behaviors:**
+
+- DV Profile 8.1 is preserved if the source is compliant; otherwise falls back
+  to clean HDR10. Profile 7 FEL sources are not output as P7.
+- Video is stream-copied when already compliant (bitrate and codec checks
+  included); otherwise re-encoded at CRF 17 / slower with level 5.1 VBV
+  constraints.
+- Surround audio is transcoded to E-AC-3 (Apple TV cannot Direct Play TrueHD).
+- Forced subtitles are burned into the video. All others are embedded as
+  `mov_text`.
+- The skip-if-ideal heuristic avoids re-processing compliant files.
 
 **CLI:** `muxm --profile atv-directplay-hq input.mkv`
 
 ---
 
-## 4) `streaming` — Modern HEVC Streaming
-**Who/Where:**  
-For Plex, Jellyfin, and Emby users targeting modern clients: Shield, Fire TV, Roku Ultra, smart TVs, and web browsers. Balances quality with file size.
+### 4) `streaming` — Modern HEVC Streaming
 
-**Goal:**  
-Smaller files with broad modern-device support. HEVC CRF 20 with streaming-friendly audio bitrates. Strip DV, keep HDR10.
+**For:** Plex, Jellyfin, and Emby users targeting modern clients — Shield, Fire
+TV, Roku Ultra, smart TVs, and web browsers. Balances quality with file size.
 
-**Defaults:**
-- **DV policy:** `strip` `DISABLE_DV=1`
-- **Container:** `mp4`
-- **Video:** HEVC re-encode:  
-  `-c:v libx265 -preset medium -crf 20` with HDR10 x265 params
-- **Pixel format:** `yuv420p10le` `HDR_TARGET_PIXFMT=yuv420p10le`, `FORCE_CHROMA_420=1`
-- **Audio:** E-AC-3 surround at streaming bitrates + AAC stereo fallback  
-  `EAC3_BITRATE_5_1=448k`, `EAC3_BITRATE_7_1=640k`, `ADD_STEREO_IF_MULTICH=1`, `STEREO_BITRATE=192k`, `AUDIO_LOSSLESS_PASSTHROUGH=0`
-- **Subs:** soft forced, full embedded, no SDH  
-  `SUB_INCLUDE_FORCED=1`, `SUB_INCLUDE_FULL=1`, `SUB_INCLUDE_SDH=0`, `SUB_BURN_FORCED=0`
-- **Chapters/metadata:** keep `KEEP_CHAPTERS=1`, `STRIP_METADATA=0`
+**Goal:** Smaller files with broad modern-device support. HEVC CRF 20 / medium,
+HDR10 preserved, DV stripped, E-AC-3 surround at streaming-friendly bitrates, AAC
+stereo fallback.
+
+**Key behaviors:**
+
+- DV is stripped; HDR10 metadata is kept.
+- Audio is transcoded to E-AC-3 at reduced bitrates (448k for 5.1, 640k for
+  7.1) plus a 192k AAC stereo track.
+- Subtitles are soft-embedded (forced + full, no SDH, no burn).
+- Chapters and metadata are preserved.
 
 **CLI:** `muxm --profile streaming input.mkv`
 
 ---
 
-## 5) `animation` — Anime & Cartoon Optimized
-**Who/Where:**  
-For anime and cartoon content where banding-free gradients, clean hard edges, and styled subtitle preservation matter. Ideal for archival-quality animation encodes.
+### 5) `animation` — Anime & Cartoon Optimized
 
-**Goal:**  
-Artifact-free animation encoding. 10-bit even for SDR to eliminate banding, animation-tuned x265 params (low psy-rd, adjusted deblock, extra b-frames), lossless audio, and MKV to preserve styled ASS/SSA subtitles.
+**For:** Anime and cartoon content where banding-free gradients, clean hard edges,
+and styled subtitle preservation matter. Ideal for archival-quality animation
+encodes.
 
-**Defaults:**
-- **DV policy:** `strip` `DISABLE_DV=1`
-- **Container:** `mkv` (ASS/SSA subtitle support, lossless audio)
-- **Video:** HEVC, quality-first, animation-tuned:  
-  `-c:v libx265 -preset slower -crf 16` with `psy-rd=1.0:psy-rdoq=0.5:deblock=-1,-1:bframes=8`
-- **Pixel format:** `yuv420p10le` (10-bit even for SDR) `SDR_USE_10BIT_IF_SRC_10BIT=1`
-- **Audio:** lossless passthrough + AAC stereo fallback  
-  `AUDIO_LOSSLESS_PASSTHROUGH=1`, `ADD_STEREO_IF_MULTICH=1`, `STEREO_BITRATE=192k`
-- **Subs:** keep all (up to 6 tracks), never burn (preserve ASS styling)  
-  `SUB_INCLUDE_FORCED=1`, `SUB_INCLUDE_FULL=1`, `SUB_INCLUDE_SDH=1`, `SUB_MAX_TRACKS=6`, `SUB_BURN_FORCED=0`
-- **Chapters/metadata:** keep (OP/ED chapter markers) `KEEP_CHAPTERS=1`, `STRIP_METADATA=0`
+**Goal:** Artifact-free animation encoding. HEVC at CRF 16 / slower with
+animation-tuned x265 parameters (reduced psy-rd, lowered aq-strength, adjusted
+deblock, extra b-frames). 10-bit output unconditionally — even for 8-bit SDR
+sources — to eliminate banding. MKV container to support styled ASS/SSA
+subtitles and lossless audio.
+
+**Key behaviors:**
+
+- 10-bit pixel depth is forced for all sources regardless of input bit depth.
+  This is the primary defense against gradient banding in flat-shaded animation.
+- Lossless audio is copied through (FLAC-first codec preference for typical
+  anime releases), with a 192k AAC stereo fallback.
+- Multi-track subtitles are kept (up to 6 tracks). Native ASS/SSA formatting
+  is preserved instead of converting to SRT. Subtitles are never burned.
+- Chapters are kept (OP/ED markers).
 
 **CLI:** `muxm --profile animation input.mkv`
 
 ---
 
-## 6) `universal` — Universal Compatibility
-**Who/Where:**  
-For playback **anywhere**: old Rokus, mobile devices, web browsers, non-HDR TVs. Ideal for sharing with friends/family without worrying about playback capability.
+### 6) `universal` — Universal Compatibility
 
-**Goal:**  
-Prioritize compatibility over fidelity. Tone-map HDR to SDR H.264, ensure AAC stereo audio, burn forced subs, and strip anything that could block playback.
+**For:** Playback anywhere — old Rokus, mobile devices, web browsers, non-HDR TVs.
+Sharing with friends and family who shouldn't have to think about playback
+capability.
 
-**Defaults:**
-- **DV policy:** `strip` `DISABLE_DV=1`
-- **Container:** `mp4`
-- **Video:** SDR H.264, tone-mapped from HDR if present:  
-  `VIDEO_CODEC=libx264`, `TONEMAP_HDR_TO_SDR=1`, `CRF_VALUE=22`, `PRESET_VALUE=slow`
-- **Audio:** AAC stereo  
-  `AUDIO_FORCE_CODEC=aac`, `MAX_AUDIO_CHANNELS=2`, `STEREO_BITRATE=256k`, `ADD_STEREO_IF_MULTICH=0`
-- **Subs:** burn forced; export all others as external `.srt`  
-  `SUB_BURN_FORCED=1`, `SUB_EXPORT_EXTERNAL=1`, `SUB_INCLUDE_SDH=0`
-- **Chapters/metadata:** strip chapters; minimal metadata  
-  `KEEP_CHAPTERS=0`, `STRIP_METADATA=1`
+**Goal:** Compatibility over fidelity. Tone-map HDR to SDR, encode to H.264, AAC
+stereo audio, burn forced subtitles, export the rest as external `.srt` files,
+strip chapters and non-essential metadata.
+
+**Key behaviors:**
+
+- HDR sources are tone-mapped to SDR via zscale + hable.
+- All audio is forced to AAC stereo at 256k (no surround output).
+- Forced subtitles are burned. Non-forced subs are exported as `.srt` sidecar
+  files. SDH tracks are excluded.
+- Chapters and non-essential metadata are stripped.
 
 **CLI:** `muxm --profile universal input.mkv`
 
 ---
 
-## Configuration Flexibility
+## Configuration Precedence
 
-These profiles are **opinionated starting points** — every option is adjustable.
+`muxm` reads configuration from multiple levels, applied in this order (each
+layer overrides the one before it):
 
-`muxm` reads configuration from multiple levels, applied in the following order  
-(**lowest precedence** → **highest precedence**):
+1. **Hardcoded defaults** — built into the script (Section 4)
+2. **System config** — `/etc/.muxmrc`
+3. **User config** — `~/.muxmrc`
+4. **Project config** — `./.muxmrc` (in the current working directory)
+5. **Profile** — `--profile <name>` (or `PROFILE_NAME` set in a config file)
+6. **CLI flags** — command-line arguments (highest precedence)
 
-1. **Hardcoded defaults** — built into the script
-2. **Global config** — system-wide `/etc/.muxmrc`
-3. **User config** — `~/.muxmrc` (personal defaults across all projects)
-4. **Project config** — `.muxmrc` in the current working directory
-5. **Profile** — `--profile <n>` (or `PROFILE_NAME` set in a config file)
-6. **CLI flags** — command-line flags (override everything above for a single run)
-
-### Setting a Default Profile in Config
+### Setting a Default Profile
 
 ```bash
 # In ~/.muxmrc
 PROFILE_NAME="atv-directplay-hq"
 ```
 
-CLI `--profile` always overrides a config-file `PROFILE_NAME`.
+`--profile` on the CLI always overrides a `PROFILE_NAME` set in a config file.
 
-### Example Precedence
+### Generating a Config File
 
-- User config sets `PROFILE_NAME="hdr10-hq"` (CRF 17, lossless audio, MKV)
-- CLI run: `muxm --profile hdr10-hq --crf 20 --output-ext mp4 input.mkv`
+```bash
+muxm --create-config user streaming
+```
 
-→ Result: `hdr10-hq` profile with `CRF_VALUE=20` and `OUTPUT_EXT=mp4` (CLI overrides).
+This writes a `~/.muxmrc` pre-filled with the `streaming` profile's defaults.
+Profile-specific variables are uncommented and active; everything else is
+commented out for you to customize. Valid scopes are `system`, `user`, and
+`project`.
 
-### Verifying Effective Configuration
+### Verifying the Effective Configuration
 
 ```bash
 muxm --profile atv-directplay-hq --crf 20 --print-effective-config
 ```
 
-Shows every variable grouped by section, which profile is active, and its source (`cli` or `config-file`).
+Shows every variable grouped by section, which profile is active, and each
+value's source (`cli`, `config-file`, or `profile`).
 
-### Conflict Warnings
-
-`muxm` detects contradictory flag + profile combinations and warns:
+### Override Example
 
 ```bash
-muxm --profile dv-archival --no-dv --print-effective-config
-# ⚠️  Profile 'dv-archival' + --no-dv: DV archival without Dolby Vision is pointless.
+# User config sets a default profile
+# ~/.muxmrc: PROFILE_NAME="hdr10-hq"
+
+# CLI overrides CRF and container
+muxm --profile hdr10-hq --crf 20 --output-ext mp4 input.mkv
 ```
 
-Warnings never block execution — the user's CLI flags always win.
+Result: `hdr10-hq` profile with `CRF_VALUE=20` and `OUTPUT_EXT=mp4`. The CLI
+flags win.
 
 ---
 
-## New Variables Introduced by Profiles
+## Conflict Warnings
 
-These variables were added to support profile functionality. They have safe defaults that preserve pre-profile behavior when no profile is selected.
+`muxm` detects contradictory profile + flag combinations and prints warnings.
+Warnings never block execution — the user's CLI flags always win.
 
-| Variable | Default | Description |
-|---|---|---|
-| `PROFILE_NAME` | `""` | Active profile name (set by `--profile` or `.muxmrc`) |
-| `VIDEO_CODEC` | `libx265` | Video encoder: `libx265` or `libx264` |
-| `VIDEO_COPY_IF_COMPLIANT` | `0` | Skip re-encode if source already matches target |
-| `TONEMAP_HDR_TO_SDR` | `0` | Tone-map HDR/HLG to SDR via zscale+hable |
-| `TONEMAP_FILTER` | *(zscale chain)* | FFmpeg filter string for tone-mapping |
-| `AUDIO_FORCE_CODEC` | `""` | Force all audio to a specific codec (e.g., `aac`) |
-| `AUDIO_LOSSLESS_PASSTHROUGH` | `0` | Allow TrueHD/DTS-HD MA/FLAC to copy through |
-| `SUB_BURN_FORCED` | `0` | Burn forced subtitles into the video stream |
-| `SUB_EXPORT_EXTERNAL` | `0` | Export subtitles as external `.srt` files |
-| `KEEP_CHAPTERS` | `1` | Keep chapter markers in output |
-| `STRIP_METADATA` | `0` | Strip non-essential metadata |
-| `SKIP_IF_IDEAL` | `0` | Skip processing if source already matches profile |
-| `REPORT_JSON` | `0` | Generate JSON report alongside output |
+Examples:
+
+```
+muxm --profile dv-archival --no-dv input.mkv
+# ⚠️  Profile 'dv-archival' + --no-dv: DV archival without Dolby Vision is pointless.
+#     Output will be a plain remux.
+
+muxm --profile atv-directplay-hq --output-ext mkv input.mkv
+# ⚠️  Profile 'atv-directplay-hq' + --output-ext mkv: MKV does not Direct Play
+#     on Apple TV. Use mp4 for ATV compatibility.
+
+muxm --profile animation --sub-burn-forced input.mkv
+# ⚠️  Profile 'animation' + --sub-burn-forced: Burning subs destroys ASS styling
+#     (typesetting, signs, karaoke). Soft subs recommended.
+
+muxm --profile universal --video-codec libx265 input.mkv
+# ⚠️  Profile 'universal' + --video-codec libx265: HEVC is less widely supported
+#     than H.264 for universal playback.
+```
+
+The full set of checked conflicts is in Section 13 of the script.
 
 ---
