@@ -979,6 +979,26 @@ _test_config_create() {
       fail "--create-config $p: did not create .muxmrc"
     fi
   done
+
+  # ---- --create-config template includes multi-track variables ----
+  # AUDIO_MULTI_TRACK, AUDIO_KEEP_COMMENTARY, and SUB_MULTI_TRACK were added to
+  # the --create-config template as part of the multi-track release.  Without them,
+  # users cannot discover or override these settings via --create-config.
+  local cfg_mt_dir="$TESTDIR/config_create_mt_vars"
+  mkdir -p "$cfg_mt_dir"
+  run_muxm_in "$cfg_mt_dir" --create-config project dv-archival >/dev/null 2>&1
+  if [[ -f "$cfg_mt_dir/.muxmrc" ]]; then
+    local mt_cfg_content
+    mt_cfg_content="$(cat "$cfg_mt_dir/.muxmrc")"
+    assert_contains "AUDIO_MULTI_TRACK" \
+      "--create-config dv-archival: template contains AUDIO_MULTI_TRACK" "$mt_cfg_content"
+    assert_contains "AUDIO_KEEP_COMMENTARY" \
+      "--create-config dv-archival: template contains AUDIO_KEEP_COMMENTARY" "$mt_cfg_content"
+    assert_contains "SUB_MULTI_TRACK" \
+      "--create-config dv-archival: template contains SUB_MULTI_TRACK" "$mt_cfg_content"
+  else
+    fail "--create-config dv-archival: did not create .muxmrc (multi-track variable check)"
+  fi
 }
 
 _test_config_layering() {
@@ -1120,6 +1140,11 @@ test_profiles() {
   assert_contains "AUDIO_MULTI_TRACK         = 1" "dv-archival: multi-track audio enabled" "$out"
   assert_contains "AUDIO_KEEP_COMMENTARY     = 0" "dv-archival: commentary excluded by default" "$out"
   assert_contains "SUB_MULTI_TRACK          = 1" "dv-archival: multi-track subtitles enabled" "$out"
+  assert_contains "CHECKSUM                  = 1" "dv-archival: checksum on by default" "$out"
+
+  # --no-checksum overrides dv-archival default
+  out="$(run_muxm --profile dv-archival --no-checksum --print-effective-config)"
+  assert_contains "CHECKSUM                  = 0" "dv-archival + --no-checksum: CLI overrides profile default" "$out"
 
   # hdr10-hq specifics
   out="$(run_muxm --profile hdr10-hq --print-effective-config)"
@@ -1709,6 +1734,16 @@ test_audio() {
   mt_demote_fc="$(run_muxm --dry-run --profile dv-archival --audio-force-codec aac "$TESTDIR/hevc_multi_audio.mkv")"
   assert_contains "demoted" "Multi-track + --audio-force-codec: demoted to single-track" "$mt_demote_fc"
 
+  # Multi-track + --stereo-fallback: warns but does NOT demote.
+  # --stereo-fallback generates a conflict warning (⚠, tested in test_conflicts)
+  # but multi-track stays active because stream-copying from source never reaches
+  # the stereo generation path.  Verify multi-track mode is preserved.
+  log "Testing multi-track + --stereo-fallback stays in multi-track mode..."
+  local mt_sf_out
+  mt_sf_out="$(run_muxm --dry-run --profile dv-archival --stereo-fallback "$TESTDIR/hevc_multi_audio.mkv")"
+  assert_contains "multi-track" "Multi-track + --stereo-fallback: multi-track mode preserved" "$mt_sf_out"
+  assert_contains "keeping" "Multi-track + --stereo-fallback: filter summary logged" "$mt_sf_out"
+
   # Multi-track language filter: --audio-lang-pref eng keeps only English tracks
   # CLI flag overrides the profile's AUDIO_LANG_PREF="" (config file would not —
   # profiles run after config files but before CLI).
@@ -1718,6 +1753,28 @@ test_audio() {
     --audio-lang-pref eng "$TESTDIR/hevc_multi_audio.mkv")"
   # eng main kept, eng commentary dropped (commentary), spa dropped (language) = keeping 1 of 3
   assert_contains "keeping 1 of 3" "Multi-track + --audio-lang-pref eng: 1 of 3 kept (spa + commentary dropped)" "$mt_lang_out"
+
+  # Multi-track commentary opt-in: AUDIO_KEEP_COMMENTARY=1 keeps all tracks
+  # All existing tests use the default AUDIO_KEEP_COMMENTARY=0 (drop). This validates
+  # the opt-in path — if accidentally inverted, the default passes but this fails.
+  # AUDIO_LANG_PREF= (empty) is required to let all languages through — the default
+  # is "eng", which would filter out the Spanish track and mask the commentary test.
+  log "Testing multi-track AUDIO_KEEP_COMMENTARY=1 (keep commentary)..."
+  local mt_keep_comm_home="$TESTDIR/mt_keep_comm_home"
+  mkdir -p "$mt_keep_comm_home"
+  cat > "$mt_keep_comm_home/.muxmrc" <<'EOF'
+AUDIO_MULTI_TRACK=1
+AUDIO_KEEP_COMMENTARY=1
+AUDIO_LANG_PREF=
+EOF
+  local mt_keep_comm
+  mt_keep_comm="$(MUXM_HOME="$mt_keep_comm_home" run_muxm_in "$TESTDIR" \
+    --dry-run "$TESTDIR/hevc_multi_audio.mkv")"
+  assert_contains "keeping 3 of 3" \
+    "Multi-track + AUDIO_KEEP_COMMENTARY=1: all 3 tracks kept" "$mt_keep_comm"
+  # Verify the commentary track is explicitly shown as kept (✓ marker)
+  assert_contains "commentary" \
+    "Multi-track + AUDIO_KEEP_COMMENTARY=1: commentary track detected" "$mt_keep_comm"
 }
 
 # === Suite: Subtitle Pipeline ===
@@ -2110,6 +2167,61 @@ test_output() {
     pass "--skip-if-ideal: produced output (may have encoded if not fully compliant)"
   else
     skip "--skip-if-ideal: inconclusive (behavior depends on compliance check)"
+  fi
+
+  # ---- skip-if-ideal + multi-track: commentary triggers remux (not ideal) ----
+  # When AUDIO_MULTI_TRACK=1 and AUDIO_KEEP_COMMENTARY=0 (dv-archival default),
+  # a source with a commentary track should NOT be considered ideal — the filter
+  # would drop it, so remuxing must proceed.
+  # Fixture: hevc_multi_audio.mkv — eng main + eng commentary + spa (3 audio tracks).
+  local sii_mt_home="$TESTDIR/sii_mt_home"
+  mkdir -p "$sii_mt_home"
+  local sii_mt_out="$TESTDIR/out_sii_mt_audio.mkv"
+  log "Testing skip-if-ideal + multi-track audio (commentary forces remux)..."
+  local sii_mt_log
+  sii_mt_log="$(MUXM_HOME="$sii_mt_home" run_muxm --profile dv-archival \
+    "$TESTDIR/hevc_multi_audio.mkv" "$sii_mt_out")"
+  # Should NOT skip — commentary track triggers audio filter, source is not ideal
+  if echo "$sii_mt_log" | grep -qiE "already matches.*skip|source already.*ideal"; then
+    fail "skip-if-ideal + multi-track: should NOT skip (commentary track present)"
+  else
+    pass "skip-if-ideal + multi-track: commentary prevents ideal skip"
+  fi
+  if [[ -f "$sii_mt_out" && -s "$sii_mt_out" ]]; then
+    assert_stream_count "skip-if-ideal + multi-track: 2 audio tracks (commentary dropped)" \
+      "$sii_mt_out" a 2 2
+  else
+    skip "skip-if-ideal + multi-track: no output file (encode may have failed)"
+  fi
+
+  # ---- skip-if-ideal per-stream gating: all subtitle streams survive ----
+  # When source is fully compliant (HEVC+MKV, all subs pass filters), skip-if-ideal
+  # fires and the metadata remux must use explicit -map flags from SII_SUB_INDICES.
+  # The old code used -map 0 (ffmpeg default = one stream per type), silently
+  # dropping all but the first subtitle.  This test catches that regression.
+  # Fixture: hevc_multi_subs.mkv — 5 subs (eng forced, eng full, eng SDH, spa, fra).
+  # dv-archival defaults: SUB_MULTI_TRACK=1, SUB_LANG_PREF="" → all 5 pass.
+  local sii_subs_home="$TESTDIR/sii_subs_home"
+  mkdir -p "$sii_subs_home"
+  local sii_subs_out="$TESTDIR/out_sii_subs.mkv"
+  log "Testing skip-if-ideal per-stream gating (multi-sub, all pass)..."
+  local sii_subs_log
+  sii_subs_log="$(MUXM_HOME="$sii_subs_home" run_muxm --profile dv-archival \
+    "$TESTDIR/hevc_multi_subs.mkv" "$sii_subs_out")"
+  if echo "$sii_subs_log" | grep -qiE "ideal|skip|already|compliant"; then
+    pass "skip-if-ideal per-stream: source recognized as ideal"
+  else
+    # Source may not be recognized as ideal if compliance check is stricter —
+    # either way the output should preserve all streams, so we continue.
+    log "skip-if-ideal per-stream: source not detected as ideal (proceeding to stream count check)"
+  fi
+  if [[ -f "$sii_subs_out" && -s "$sii_subs_out" ]]; then
+    assert_stream_count "skip-if-ideal per-stream: 5 subtitle tracks preserved" \
+      "$sii_subs_out" s 5 5
+    assert_stream_count "skip-if-ideal per-stream: 1 audio track preserved" \
+      "$sii_subs_out" a 1 1
+  else
+    skip "skip-if-ideal per-stream: no output file (encode may have failed)"
   fi
 
   # --keep-temp-always (#27)
@@ -2967,12 +3079,49 @@ _test_unit_filesize() {
   if [[ "$result" == *"MB"* ]]; then pass "filesize_pretty(~1.5 MB)"; else fail "filesize_pretty(~1.5 MB) expected 'MB', got '$result'"; fi
 }
 
+_test_unit_sii_container_safety() {
+  # ---- _sii_audio_is_container_safe ----
+  # Checks whether an audio codec can be muxed into the target container during
+  # skip-if-ideal remux.  MKV passes all codecs; MP4/MOV reject TrueHD, DTS/DCA,
+  # and raw PCM.  A regression here silently drops audio streams in the metadata
+  # remux — the most dangerous failure mode because the output file is valid but
+  # incomplete.  Mirrors the _is_text_sub_codec pattern for subtitles.
+  # Depends on MUX_FORMAT global.
+
+  # MKV passes everything
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('truehd','matroska')=safe"      0 _sii_audio_is_container_safe 'MUX_FORMAT="matroska"' "truehd"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('dts','matroska')=safe"         0 _sii_audio_is_container_safe 'MUX_FORMAT="matroska"' "dts"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('dca','matroska')=safe"         0 _sii_audio_is_container_safe 'MUX_FORMAT="matroska"' "dca"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('pcm_s16le','matroska')=safe"   0 _sii_audio_is_container_safe 'MUX_FORMAT="matroska"' "pcm_s16le"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('aac','matroska')=safe"         0 _sii_audio_is_container_safe 'MUX_FORMAT="matroska"' "aac"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('eac3','matroska')=safe"        0 _sii_audio_is_container_safe 'MUX_FORMAT="matroska"' "eac3"
+
+  # MP4 rejects TrueHD, DTS/DCA, raw PCM
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('truehd','mp4')=unsafe"         1 _sii_audio_is_container_safe 'MUX_FORMAT="mp4"' "truehd"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('dts','mp4')=unsafe"            1 _sii_audio_is_container_safe 'MUX_FORMAT="mp4"' "dts"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('dca','mp4')=unsafe"            1 _sii_audio_is_container_safe 'MUX_FORMAT="mp4"' "dca"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('pcm_s16le','mp4')=unsafe"      1 _sii_audio_is_container_safe 'MUX_FORMAT="mp4"' "pcm_s16le"
+
+  # MP4 accepts common lossy codecs + ALAC
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('aac','mp4')=safe"              0 _sii_audio_is_container_safe 'MUX_FORMAT="mp4"' "aac"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('eac3','mp4')=safe"             0 _sii_audio_is_container_safe 'MUX_FORMAT="mp4"' "eac3"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('alac','mp4')=safe"             0 _sii_audio_is_container_safe 'MUX_FORMAT="mp4"' "alac"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('ac3','mp4')=safe"              0 _sii_audio_is_container_safe 'MUX_FORMAT="mp4"' "ac3"
+
+  # MOV mirrors MP4 rejection rules
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('truehd','mov')=unsafe"         1 _sii_audio_is_container_safe 'MUX_FORMAT="mov"' "truehd"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('dca','mov')=unsafe"            1 _sii_audio_is_container_safe 'MUX_FORMAT="mov"' "dca"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('aac','mov')=safe"              0 _sii_audio_is_container_safe 'MUX_FORMAT="mov"' "aac"
+  assert_muxm_fn_exit "_sii_audio_is_container_safe('alac','mov')=safe"             0 _sii_audio_is_container_safe 'MUX_FORMAT="mov"' "alac"
+}
+
 test_unit() {
   section "Pure-Function Unit Tests"
   _test_unit_audio_helpers
   _test_unit_sub_helpers
   _test_unit_validation_helpers
   _test_unit_filesize
+  _test_unit_sii_container_safety
 }
 
 # === Suite: Profile End-to-End (real encodes with profiles) ===
@@ -3104,6 +3253,24 @@ test_profile_e2e() {
     else
       fail "dv-archival multi-track e2e: expected spa, got lang='$mt_e2e_lang1'"
     fi
+    # Audio title metadata alignment: after commentary filtering, output indices
+    # shift (source #0→out #0, source #2→out #1). The fix uses a sequential
+    # output counter instead of source indices for -metadata:s:a:N tags.
+    # A misalignment means the wrong title on the wrong track — or blank titles.
+    local mt_e2e_title0
+    mt_e2e_title0="$(probe_stream_tag "$mt_e2e_out" a:0 title)"
+    if [[ -n "$mt_e2e_title0" ]]; then
+      pass "dv-archival multi-track e2e: first audio track has title ('$mt_e2e_title0')"
+    else
+      fail "dv-archival multi-track e2e: first audio track has no title (metadata alignment bug)"
+    fi
+    local mt_e2e_title1
+    mt_e2e_title1="$(probe_stream_tag "$mt_e2e_out" a:1 title)"
+    if [[ -n "$mt_e2e_title1" ]]; then
+      pass "dv-archival multi-track e2e: second audio track has title ('$mt_e2e_title1')"
+    else
+      fail "dv-archival multi-track e2e: second audio track has no title (metadata alignment bug)"
+    fi
   fi
 
   # ---- dv-archival multi-track subtitles: verify all subs kept, dispositions correct ----
@@ -3174,6 +3341,26 @@ test_profile_e2e() {
       pass "dv-archival multi-track sub eng e2e: 3 subtitle tracks (eng only)"
     else
       fail "dv-archival multi-track sub eng e2e: expected 3 subtitle tracks, got $mt_sub_lang_scount"
+    fi
+  fi
+
+  # ---- dv-archival multi-track audio with language filter ----
+  # Dry-run shows "keeping 1 of 3" for --audio-lang-pref eng (commentary dropped
+  # by AUDIO_KEEP_COMMENTARY=0, spa dropped by language filter).  This real encode
+  # confirms the ffmpeg command is built correctly — output has exactly 1 audio track.
+  # Fixture: hevc_multi_audio.mkv — eng main + eng commentary + spa (3 audio tracks).
+  local mt_audio_lang_e2e_out="$TESTDIR/e2e_dv_archival_mt_audio_eng.mkv"
+  log "Full encode: dv-archival multi-track audio with --audio-lang-pref eng..."
+  if MUXM_HOME="$mt_e2e_home" assert_encode "dv-archival multi-track audio eng: e2e output produced" "$mt_audio_lang_e2e_out" \
+       --profile dv-archival --audio-lang-pref eng "$TESTDIR/hevc_multi_audio.mkv"; then
+    assert_stream_count "dv-archival multi-track audio eng e2e: 1 audio track (eng main only)" \
+      "$mt_audio_lang_e2e_out" a 1 1
+    local mt_audio_lang_e2e_lang0
+    mt_audio_lang_e2e_lang0="$(probe_stream_tag "$mt_audio_lang_e2e_out" a:0 language)"
+    if [[ "$mt_audio_lang_e2e_lang0" == "eng" ]]; then
+      pass "dv-archival multi-track audio eng e2e: surviving track is English"
+    else
+      fail "dv-archival multi-track audio eng e2e: expected eng, got '$mt_audio_lang_e2e_lang0'"
     fi
   fi
 }
