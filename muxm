@@ -16,7 +16,8 @@
 #   - pgsrip (or sub2srt; configurable via --ocr-tool)
 #
 # Notes:
-#   - MP4 cannot carry PGS bitmap subtitles. If OCR can't produce SRT, subtitles are omitted.
+#   - MP4 cannot carry PGS bitmap subtitles. OCR converts them to SRT for MP4 output.
+#     MKV output preserves PGS bitmaps natively (no OCR needed).
 #   - This script is written to be robust on macOS Homebrew ffmpeg builds (where vobsub muxer
 #     is often missing).
 # =============================================================================
@@ -6024,6 +6025,11 @@ _prepare_subtitle(){
       printf "[Script Info]\n; dry-run\n" >"$dry_out" 2>/dev/null || true
       note "[Subs] DRY-RUN: would extract subtitle #${idx} as native ${codec} (preserving styling)"
       echo "$dry_out"
+    elif [[ "$MUX_FORMAT" == "matroska" ]] && [[ "$codec" == hdmv_pgs_subtitle || "$codec" == pgs ]]; then
+      local dry_out="$WORKDIR/sub.${idx}.sup"
+      : >"$dry_out" 2>/dev/null || true
+      note "[Subs] DRY-RUN: would extract PGS subtitle #${idx} as bitmap (MKV native, no OCR)"
+      echo "$dry_out"
     else
       printf "1\n00:00:00,000 --> 00:00:00,500\n(dry-run)\n" >"$srt" 2>/dev/null || true
       echo "$srt"
@@ -6069,6 +6075,23 @@ _prepare_subtitle(){
       ;;
       
     hdmv_pgs_subtitle|pgs)
+      # MKV natively supports PGS bitmap subtitles — stream-copy without OCR.
+      # OCR is only needed when the output container cannot carry bitmaps (MP4/MOV).
+      if [[ "$MUX_FORMAT" == "matroska" ]]; then
+        sup="$WORKDIR/sub.${idx}.sup"
+        ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:s:"$idx" -c:s copy "$sup" 2>"$WORKDIR/sub_${idx}_extract.err" &
+        local sup_pid=$!
+        spinner "$sup_pid" "Extracting PGS subtitle #${idx} (bitmap copy)"
+        if wait "$sup_pid" 2>/dev/null; then
+          note "PGS subtitle #${idx} preserved as bitmap (MKV native, no OCR needed)."
+          echo "$sup"
+          return 0
+        fi
+        warn "Failed extracting PGS #$idx to .sup — skipping. See: $WORKDIR/sub_${idx}_extract.err"
+        echo ""
+        return 0
+      fi
+
       if (( ! SUB_ENABLE_OCR )); then
         warn "PGS subtitle #$idx requires OCR but OCR is disabled — skipping."
         echo ""
@@ -6761,15 +6784,15 @@ mux_final() {
   ff_codec+=( -c copy )
 
   # _sub_codec_for_file — Determine the ffmpeg subtitle codec flag for a prepared file.
-  # ASS/SSA files in MKV are stream-copied to preserve styling; all others convert.
+  # ASS/SSA and SUP (PGS) files in MKV are stream-copied; all others convert.
   # Args: $1 — path to prepared subtitle file
   # Stdout: codec name suitable for -c:s:N (e.g., "copy", "srt", "mov_text")
   _sub_codec_for_file(){
     local ext="${1##*.}"
     if [[ "$MUX_FORMAT" == "matroska" ]]; then
       case "$ext" in
-        ass|ssa) echo "copy" ;;   # preserve native ASS/SSA in MKV
-        *)       echo "srt" ;;
+        ass|ssa|sup) echo "copy" ;;   # preserve native formats in MKV
+        *)           echo "srt" ;;
       esac
     else
       echo "mov_text"
