@@ -16,8 +16,7 @@
 #   - pgsrip (or sub2srt; configurable via --ocr-tool)
 #
 # Notes:
-#   - MP4 cannot carry PGS bitmap subtitles. OCR converts them to SRT for MP4 output.
-#     MKV output preserves PGS bitmaps natively (no OCR needed).
+#   - MP4 cannot carry PGS bitmap subtitles. If OCR can't produce SRT, subtitles are omitted.
 #   - This script is written to be robust on macOS Homebrew ffmpeg builds (where vobsub muxer
 #     is often missing).
 # =============================================================================
@@ -1052,7 +1051,7 @@ MP4. Targets Plex/Jellyfin on Shield, Fire TV, Roku, smart TVs, web.
 .B animation
 Anime/cartoon optimized. HEVC CRF 16, 10\-bit (even SDR),
 animation\-tuned x265 (low psy\-rd, adjusted deblock, extra b\-frames),
-lossless audio, preserve all subs (ASS/SSA). MKV.
+lossless audio, multi\-track subs (ASS/SSA + PGS bitmap). MKV.
 .TP
 .B universal
 Play anywhere. H.264 SDR (tone\-map HDR), AAC stereo, burn forced subs,
@@ -1289,14 +1288,21 @@ OCR backend: pgsrip or sub2srt.
 .TP
 .BR \-\-ocr\-lang " " \fILANG\fR
 OCR language (default: eng).
-.SS Multi\-Track Subtitles (Archival)
+.SS Multi\-Track Subtitles
 The
 .B dv\-archival
-profile uses multi\-track subtitle mode
+and
+.B animation
+profiles use multi\-track subtitle mode
 .RB ( SUB_MULTI_TRACK=1 ),
 which keeps all subtitle tracks that pass a subtractive filter instead of
-selecting one per type. All surviving tracks are stream\-copied from
-source (no OCR, no format conversion, no intermediate files).
+selecting one per type. Surviving tracks are stream\-copied from
+source (no OCR, no intermediate files). The one exception is ASS/SSA
+tracks when
+.B SUB_PRESERVE_TEXT_FORMAT
+is 0 (or the output container is MP4/MOV): these are converted inline
+to SRT or mov_text respectively. All other codecs (PGS, SRT, VobSub)
+are always stream\-copied.
 .PP
 Filters (configured via
 .IR .muxmrc ):
@@ -1309,17 +1315,24 @@ all languages pass.
 .TP
 .B SUB_INCLUDE_FORCED / SUB_INCLUDE_FULL / SUB_INCLUDE_SDH
 Type filters. When 0, tracks of that type are excluded. All three
-default to 1 in
-.BR dv\-archival .
+default to 1 in both
+.B dv\-archival
+and
+.BR animation .
 .TP
 .B SUB_MAX_TRACKS
 Maximum number of subtitle tracks to keep (applied after all other
-filters as a cap).
+filters as a cap). Defaults to 99 for
+.BR dv\-archival ,
+6 for
+.BR animation .
 .PP
 Bitmap subtitles (PGS, VobSub) that cannot be muxed into the target
-container (e.g., PGS into MP4) are silently skipped.
+container (e.g., PGS into MP4) are silently skipped. Both
 .B dv\-archival
-uses MKV, which handles all subtitle formats.
+and
+.B animation
+use MKV, which handles all subtitle formats.
 .PP
 Multi\-track subtitle mode is automatically demoted to single\-track if
 .B \-\-sub\-burn\-forced
@@ -2127,7 +2140,7 @@ _create_config_emit() {
       _active+="CRF_VALUE PRESET_VALUE "
       _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 SDR_USE_10BIT_IF_SRC_10BIT SDR_FORCE_10BIT "
       _active+="AUDIO_CODEC_PREFERENCE "
-      _active+="SUB_MAX_TRACKS SUB_EXPORT_EXTERNAL "
+      _active+="SUB_MULTI_TRACK SUB_MAX_TRACKS SUB_EXPORT_EXTERNAL "
       ;;
     universal)
       _active+="TONEMAP_HDR_TO_SDR CRF_VALUE PRESET_VALUE "
@@ -2839,7 +2852,8 @@ apply_profile_animation() {
   ADD_STEREO_IF_MULTICH=1
   STEREO_BITRATE="192k"
   AUDIO_CODEC_PREFERENCE="flac,truehd,eac3,ac3,aac,alac,other"
-  # Subs: keep all, never burn (preserve ASS styling)
+  # Subs: multi-track, keep all, never burn (preserve ASS styling + PGS bitmaps)
+  SUB_MULTI_TRACK=1
   SUB_INCLUDE_FORCED=1
   SUB_INCLUDE_FULL=1
   SUB_INCLUDE_SDH=1
@@ -3221,20 +3235,31 @@ if [[ -n "${PROFILE_NAME:-}" ]]; then
       ;;
 
     animation)
-      # MP4 cannot carry styled ASS/SSA subtitles
+      # MP4 cannot carry styled ASS/SSA or PGS bitmap subtitles
       [[ "$OUTPUT_EXT" == "mp4" ]] && \
         _warn_conflict "$PROFILE_NAME" "--output-ext mp4" \
-          "MP4 cannot carry styled ASS/SSA subtitles. MKV recommended for animation."
+          "MP4 cannot carry styled ASS/SSA or PGS bitmap subtitles. MKV recommended for animation."
 
       # MOV has similar subtitle limitations
       [[ "$OUTPUT_EXT" == "mov" ]] && \
         _warn_conflict "$PROFILE_NAME" "--output-ext mov" \
-          "MOV cannot carry styled ASS/SSA subtitles. MKV recommended for animation."
+          "MOV cannot carry styled ASS/SSA or PGS bitmap subtitles. MKV recommended for animation."
 
       # Burning subs destroys ASS styling
       (( SUB_BURN_FORCED )) && \
         _warn_conflict "$PROFILE_NAME" "--sub-burn-forced" \
           "Burning subs destroys ASS styling (typesetting, signs, karaoke). Soft subs recommended."
+
+      # Multi-track subtitle conflicts: flags that force single-track behavior
+      if (( SUB_MULTI_TRACK )); then
+        (( SUB_BURN_FORCED )) && \
+          _warn_conflict "$PROFILE_NAME" "--sub-burn-forced" \
+            "Multi-track subtitle mode copies all subs from source. --sub-burn-forced forces single-track."
+
+        (( SUB_EXPORT_EXTERNAL )) && \
+          _warn_conflict "$PROFILE_NAME" "--sub-export-external" \
+            "Multi-track subtitle mode embeds all subs via stream-copy. External export is ignored."
+      fi
 
       # Disabling format preservation converts ASS to plain-text SRT
       (( ! SUB_PRESERVE_TEXT_FORMAT )) && \
@@ -6025,11 +6050,6 @@ _prepare_subtitle(){
       printf "[Script Info]\n; dry-run\n" >"$dry_out" 2>/dev/null || true
       note "[Subs] DRY-RUN: would extract subtitle #${idx} as native ${codec} (preserving styling)"
       echo "$dry_out"
-    elif [[ "$MUX_FORMAT" == "matroska" ]] && [[ "$codec" == hdmv_pgs_subtitle || "$codec" == pgs ]]; then
-      local dry_out="$WORKDIR/sub.${idx}.sup"
-      : >"$dry_out" 2>/dev/null || true
-      note "[Subs] DRY-RUN: would extract PGS subtitle #${idx} as bitmap (MKV native, no OCR)"
-      echo "$dry_out"
     else
       printf "1\n00:00:00,000 --> 00:00:00,500\n(dry-run)\n" >"$srt" 2>/dev/null || true
       echo "$srt"
@@ -6075,23 +6095,6 @@ _prepare_subtitle(){
       ;;
       
     hdmv_pgs_subtitle|pgs)
-      # MKV natively supports PGS bitmap subtitles — stream-copy without OCR.
-      # OCR is only needed when the output container cannot carry bitmaps (MP4/MOV).
-      if [[ "$MUX_FORMAT" == "matroska" ]]; then
-        sup="$WORKDIR/sub.${idx}.sup"
-        ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:s:"$idx" -c:s copy "$sup" 2>"$WORKDIR/sub_${idx}_extract.err" &
-        local sup_pid=$!
-        spinner "$sup_pid" "Extracting PGS subtitle #${idx} (bitmap copy)"
-        if wait "$sup_pid" 2>/dev/null; then
-          note "PGS subtitle #${idx} preserved as bitmap (MKV native, no OCR needed)."
-          echo "$sup"
-          return 0
-        fi
-        warn "Failed extracting PGS #$idx to .sup — skipping. See: $WORKDIR/sub_${idx}_extract.err"
-        echo ""
-        return 0
-      fi
-
       if (( ! SUB_ENABLE_OCR )); then
         warn "PGS subtitle #$idx requires OCR but OCR is disabled — skipping."
         echo ""
@@ -6441,6 +6444,20 @@ run_subtitle_pipeline_multi(){
   done
   report_add "sub_kept_tracks" "$track_summary"
 
+  # Note when ASS/SSA tracks will be converted (SUB_PRESERVE_TEXT_FORMAT=0)
+  if (( ! SUB_PRESERVE_TEXT_FORMAT )); then
+    local _ass_convert_count=0
+    for (( i=0; i<n_kept; i++ )); do
+      case "${SUB_MT_CODECS[$i]}" in
+        ass|ssa) _ass_convert_count=$(( _ass_convert_count + 1 )) ;;
+      esac
+    done
+    if (( _ass_convert_count > 0 )); then
+      note "[Subs] Multi-track: ${_ass_convert_count} ASS/SSA track(s) will be converted to SRT (SUB_PRESERVE_TEXT_FORMAT=0)"
+      report_add "sub_ass_convert" "$_ass_convert_count"
+    fi
+  fi
+
   mark_done "Subtitle filter plan (multi-track, ${n_kept} tracks)"
 }
 
@@ -6784,15 +6801,15 @@ mux_final() {
   ff_codec+=( -c copy )
 
   # _sub_codec_for_file — Determine the ffmpeg subtitle codec flag for a prepared file.
-  # ASS/SSA and SUP (PGS) files in MKV are stream-copied; all others convert.
+  # ASS/SSA files in MKV are stream-copied to preserve styling; all others convert.
   # Args: $1 — path to prepared subtitle file
   # Stdout: codec name suitable for -c:s:N (e.g., "copy", "srt", "mov_text")
   _sub_codec_for_file(){
     local ext="${1##*.}"
     if [[ "$MUX_FORMAT" == "matroska" ]]; then
       case "$ext" in
-        ass|ssa|sup) echo "copy" ;;   # preserve native formats in MKV
-        *)           echo "srt" ;;
+        ass|ssa) echo "copy" ;;   # preserve native ASS/SSA in MKV
+        *)       echo "srt" ;;
       esac
     else
       echo "mov_text"
@@ -6810,8 +6827,23 @@ mux_final() {
       local _mt_stitle="${SUB_MT_TITLES[$_mt_si]}"
       local _mt_stype="${SUB_MT_TYPES[$_mt_si]}"
 
-      # Codec: copy (stream-copy from source, no conversion)
-      ff_codec+=( "-c:s:${out_s_idx}" copy )
+      # Codec: copy by default; convert ASS/SSA when SUB_PRESERVE_TEXT_FORMAT=0
+      # or when the container can't carry ASS (MP4/MOV).
+      local _mt_scodec="${SUB_MT_CODECS[$_mt_si]}"
+      case "$_mt_scodec" in
+        ass|ssa)
+          if (( SUB_PRESERVE_TEXT_FORMAT )) && [[ "$MUX_FORMAT" == "matroska" ]]; then
+            ff_codec+=( "-c:s:${out_s_idx}" copy )
+          elif [[ "$MUX_FORMAT" == "matroska" ]]; then
+            ff_codec+=( "-c:s:${out_s_idx}" srt )
+          else
+            ff_codec+=( "-c:s:${out_s_idx}" mov_text )
+          fi
+          ;;
+        *)
+          ff_codec+=( "-c:s:${out_s_idx}" copy )
+          ;;
+      esac
 
       # Language
       [[ -n "$_mt_slang" ]] && ff_codec+=( "-metadata:s:s:${out_s_idx}" "language=$_mt_slang" )

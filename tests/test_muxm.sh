@@ -1176,6 +1176,7 @@ test_profiles() {
   assert_contains "SDR_FORCE_10BIT           = 1" "animation: force 10-bit SDR" "$out"
   assert_contains "flac,truehd" "animation: FLAC-first codec preference" "$out"
   assert_contains "SUB_PRESERVE_TEXT_FORMAT  = 1" "animation: ASS/SSA preservation enabled" "$out"
+  assert_contains "SUB_MULTI_TRACK          = 1" "animation: multi-track subtitles enabled" "$out"
 
   # universal specifics
   out="$(run_muxm --profile universal --print-effective-config)"
@@ -1267,6 +1268,11 @@ test_conflicts() {
   # --- animation conflicts ---
   out="$(run_muxm --profile animation --sub-burn-forced --print-effective-config)"
   assert_contains "⚠" "animation + --sub-burn-forced warns" "$out"
+  assert_contains "Multi-track subtitle" "animation + --sub-burn-forced: warning mentions multi-track subtitle demotion" "$out"
+
+  out="$(run_muxm --profile animation --sub-export-external --print-effective-config)"
+  assert_contains "⚠" "animation + --sub-export-external warns (multi-track sub conflict)" "$out"
+  assert_contains "Multi-track subtitle" "animation + --sub-export-external: warning mentions multi-track subtitle" "$out"
 
   out="$(run_muxm --profile animation --video-codec libx264 --print-effective-config)"
   assert_contains "⚠" "animation + libx264 warns" "$out"
@@ -1334,6 +1340,15 @@ test_dryrun() {
   # Dry-run with animation profile + ASS source completes cleanly
   out="$(run_muxm --dry-run --profile animation "$TESTDIR/ass_subs.mkv")"
   assert_contains "DRY-RUN" "Dry-run animation + ASS completes" "$out"
+
+  # Dry-run with animation profile multi-track subtitles
+  out="$(run_muxm --dry-run --profile animation "$TESTDIR/hevc_multi_subs.mkv")"
+  assert_contains "DRY-RUN" "Dry-run animation + multi-subs completes" "$out"
+  assert_contains "multi-track" "Dry-run animation multi-subs: announces multi-track mode" "$out"
+
+  # Dry-run with animation + --sub-burn-forced demotes to single-track
+  out="$(run_muxm --dry-run --profile animation --sub-burn-forced "$TESTDIR/hevc_multi_subs.mkv")"
+  assert_contains "demoted" "Dry-run animation + --sub-burn-forced: multi-track demoted to single-track" "$out"
 
   # Dry-run with dv-archival multi-track audio
   out="$(run_muxm --dry-run --profile dv-archival "$TESTDIR/hevc_multi_audio.mkv")"
@@ -2057,6 +2072,39 @@ EOF
   mt_sub_export="$(run_muxm --dry-run --no-skip-if-ideal --profile dv-archival --sub-export-external "$TESTDIR/hevc_multi_subs.mkv")"
   assert_contains "multi-track" "Multi-track sub + --sub-export-external: stays in multi-track" "$mt_sub_export"
   assert_contains "export-external ignored" "Multi-track sub + --sub-export-external: notes export ignored" "$mt_sub_export"
+
+  # ---- Multi-track subtitle tests (animation SUB_MULTI_TRACK=1) ----
+  # animation profile: same multi-track pipeline, different defaults (SUB_MAX_TRACKS=6).
+  # NOTE: animation inherits the default SUB_LANG_PREF=eng (unlike dv-archival which
+  # clears it to ""). The hevc_multi_subs fixture has 3 eng + 1 spa + 1 fra = 5 tracks,
+  # so only 3 English tracks survive the language filter by default.
+
+  # Animation multi-track dry-run: announces multi-track mode, keeps eng tracks only
+  log "Testing animation multi-track subtitle dry-run..."
+  local mt_sub_anim
+  mt_sub_anim="$(run_muxm --dry-run --profile animation "$TESTDIR/hevc_multi_subs.mkv")"
+  assert_contains "multi-track" "animation multi-track sub: announces multi-track mode" "$mt_sub_anim"
+  assert_contains "keeping 3 of 5" "animation multi-track sub: 3 eng tracks kept (SUB_LANG_PREF=eng)" "$mt_sub_anim"
+
+  # Animation multi-track + --sub-burn-forced demotes to single-track
+  log "Testing animation multi-track subtitle demotion on --sub-burn-forced..."
+  local mt_sub_anim_demote
+  mt_sub_anim_demote="$(run_muxm --dry-run --profile animation --sub-burn-forced "$TESTDIR/hevc_multi_subs.mkv")"
+  assert_contains "demoted" "animation multi-track sub + --sub-burn-forced: demoted to single-track" "$mt_sub_anim_demote"
+
+  # Animation multi-track + language filter override: --sub-lang-pref "" keeps all 5
+  log "Testing animation multi-track subtitle language filter override..."
+  local mt_sub_anim_lang
+  mt_sub_anim_lang="$(run_muxm --dry-run --profile animation \
+    --sub-lang-pref "" "$TESTDIR/hevc_multi_subs.mkv")"
+  assert_contains "keeping 5 of 5" "animation multi-track sub + --sub-lang-pref '': all 5 kept" "$mt_sub_anim_lang"
+
+  # Animation multi-track + --sub-export-external: stays in multi-track, logs note
+  log "Testing animation multi-track subtitle with --sub-export-external..."
+  local mt_sub_anim_export
+  mt_sub_anim_export="$(run_muxm --dry-run --profile animation --sub-export-external "$TESTDIR/hevc_multi_subs.mkv")"
+  assert_contains "multi-track" "animation multi-track sub + --sub-export-external: stays in multi-track" "$mt_sub_anim_export"
+  assert_contains "export-external ignored" "animation multi-track sub + --sub-export-external: notes export ignored" "$mt_sub_anim_export"
 }
 
 # === Suite: Output Features ===
@@ -3341,6 +3389,43 @@ test_profile_e2e() {
       pass "dv-archival multi-track sub eng e2e: 3 subtitle tracks (eng only)"
     else
       fail "dv-archival multi-track sub eng e2e: expected 3 subtitle tracks, got $mt_sub_lang_scount"
+    fi
+  fi
+
+  # ---- animation multi-track subtitles: verify eng subs kept ----
+  # animation profile: SUB_MULTI_TRACK=1, SUB_MAX_TRACKS=6, all SUB_INCLUDE_*=1
+  # SUB_LANG_PREF=eng (default) — only English tracks survive the language filter.
+  # hevc_multi_subs.mkv: 3 eng + 1 spa + 1 fra = 5 total → 3 kept.
+  # This is the core regression test: previously animation routed PGS/bitmap subs
+  # through the single-track OCR pipeline and silently dropped them when OCR failed.
+  local mt_sub_anim_e2e_out="$TESTDIR/e2e_animation_multi_subs.mkv"
+  log "Full encode: animation profile multi-track subtitles..."
+  if assert_encode "animation multi-track subs: e2e output produced" "$mt_sub_anim_e2e_out" \
+       --profile animation --crf 28 --preset ultrafast "$TESTDIR/hevc_multi_subs.mkv"; then
+    local mt_sub_anim_scount
+    mt_sub_anim_scount="$(count_streams "$mt_sub_anim_e2e_out" s)"
+    if [[ "$mt_sub_anim_scount" -eq 3 ]]; then
+      pass "animation multi-track sub e2e: 3 subtitle tracks preserved (eng only)"
+    else
+      fail "animation multi-track sub e2e: expected 3 subtitle tracks (eng only), got $mt_sub_anim_scount"
+    fi
+    # Video should be re-encoded to HEVC (animation always re-encodes)
+    assert_probe "animation multi-track sub e2e: video is HEVC" "$mt_sub_anim_e2e_out" codec_name hevc
+    # First sub should have eng language
+    local mt_sub_anim_lang0
+    mt_sub_anim_lang0="$(probe_stream_tag "$mt_sub_anim_e2e_out" s:0 language)"
+    if [[ "$mt_sub_anim_lang0" == "eng" ]]; then
+      pass "animation multi-track sub e2e: first subtitle is English"
+    else
+      fail "animation multi-track sub e2e: expected eng, got lang='$mt_sub_anim_lang0'"
+    fi
+    # Third sub (s:2) should also be eng (SDH) — no spa/fra tracks survive
+    local mt_sub_anim_lang2
+    mt_sub_anim_lang2="$(probe_stream_tag "$mt_sub_anim_e2e_out" s:2 language)"
+    if [[ "$mt_sub_anim_lang2" == "eng" ]]; then
+      pass "animation multi-track sub e2e: third subtitle is English (SDH)"
+    else
+      fail "animation multi-track sub e2e: expected eng, got lang='$mt_sub_anim_lang2'"
     fi
   fi
 

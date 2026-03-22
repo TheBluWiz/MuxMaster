@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com), and this 
 
 ## [Unreleased]
 
-Multi-track audio and subtitles for `dv-archival`: the profile now keeps all audio and subtitle tracks from the source instead of scoring and selecting one. Commentary/descriptive audio tracks are dropped by default. All surviving tracks are stream-copied (never transcoded). Configurable via `.muxmrc`.
+Multi-track audio and subtitles for `dv-archival` and `animation`: both profiles now keep all matching audio/subtitle tracks from the source instead of scoring and selecting one. Commentary/descriptive audio tracks are dropped by default in `dv-archival`. All surviving tracks are stream-copied (never transcoded). Configurable via `.muxmrc`.
 
 ### Added
 
@@ -18,6 +18,7 @@ Multi-track audio and subtitles for `dv-archival`: the profile now keeps all aud
   - Uses existing `SUB_INCLUDE_FORCED`, `SUB_INCLUDE_FULL`, `SUB_INCLUDE_SDH` as type filters and `SUB_LANG_PREF` as language filter. `SUB_MAX_TRACKS` is respected as a cap.
   - Bitmap subtitles (PGS, VobSub) that cannot be muxed into the target container are silently skipped. MKV handles all formats.
 - **`dv-archival` profile updated** — Now sets `AUDIO_MULTI_TRACK=1`, `AUDIO_KEEP_COMMENTARY=0`, and `SUB_MULTI_TRACK=1`. Language filtering uses the existing `AUDIO_LANG_PREF` and `SUB_LANG_PREF` variables: when empty (the dv-archival default), all languages pass; when set (e.g., `eng,jpn`), only matching tracks are kept.
+- **`animation` profile updated** — Now sets `SUB_MULTI_TRACK=1` so all matching subtitle tracks (including PGS bitmap streams) are stream-copied from source without OCR or format conversion. Previously, PGS subtitles were routed through the single-track OCR pipeline and silently dropped when OCR tooling was unavailable, despite the output container (MKV) supporting PGS natively. `SUB_MAX_TRACKS` defaults to 6.
 - **Graceful demotion** — If `--audio-track` or `--audio-force-codec` is set alongside `AUDIO_MULTI_TRACK=1`, multi-track audio mode is automatically demoted to single-track with an informational note. If `--sub-burn-forced` is set alongside `SUB_MULTI_TRACK=1`, multi-track subtitle mode is demoted to single-track. The explicit CLI flag always wins.
 - **Conflict warnings** (Section 13) for `dv-archival` + `--audio-track`, `--audio-force-codec`, `--stereo-fallback`, `--sub-burn-forced`, and `--sub-export-external` when multi-track modes are active.
 - **`skip-if-ideal` updated** — When `AUDIO_MULTI_TRACK=1` or `SUB_MULTI_TRACK=1`, the ideal check verifies that every source audio/subtitle track would survive the respective filter. If any would be dropped, the source is not ideal and remuxing proceeds.
@@ -25,11 +26,13 @@ Multi-track audio and subtitles for `dv-archival`: the profile now keeps all aud
 - **`_sii_audio_is_container_safe()` helper** — Checks whether an audio codec can be muxed into the target container. MKV passes all codecs; MP4/MOV rejects TrueHD, DTS/DCA, and raw PCM. Mirrors the existing `_is_text_sub_codec` pattern for subtitles.
 - **`dv-archival` profile now enables `CHECKSUM=1` by default** — SHA-256 integrity verification is a natural part of the archival workflow and was a missing default. Can be suppressed with `--no-checksum`.
 - **Shared source input in `mux_final`** — `VIDEO_COPY_FROM_SOURCE`, `AUDIO_COPY_FROM_SOURCE`, `SUB_COPY_FROM_SOURCE`, and direct subtitle mapping now share a single `-i "$SRC_ABS"` ffmpeg input via `_src_input_idx`, eliminating duplicate source file inputs.
-- New man page subsections "Multi-Track Audio (Archival)" and "Multi-Track Subtitles (Archival)" under AUDIO OPTIONS and SUBTITLE OPTIONS, documenting filter behavior, config variables, and demotion rules.
+- New man page subsections "Multi-Track Audio (Archival)" and "Multi-Track Subtitles" under AUDIO OPTIONS and SUBTITLE OPTIONS, documenting filter behavior, config variables, demotion rules, and per-profile defaults for both `dv-archival` and `animation`.
 - `AUDIO_MULTI_TRACK`, `AUDIO_KEEP_COMMENTARY`, and `SUB_MULTI_TRACK` added to `--print-effective-config`, `--create-config` template, and man page CONFIGURATION variable groups.
+- 21 new test assertions in `test_muxm.sh` across `test_profiles`, `test_conflicts`, `test_dryrun`, `test_subs`, and `test_profile_e2e` suites validating animation profile multi-track subtitle behavior: profile variable assignment, conflict warnings (burn-forced demotion, export-external), dry-run announcements, language filtering, and a full e2e encode verifying all 5 subtitle tracks are preserved in output.
 
 ### Fixed
 
+- **`--no-sub-preserve-format` silently ignored in multi-track subtitle mode.** The multi-track pipeline used blanket `-c:s copy` for all streams, bypassing the `SUB_PRESERVE_TEXT_FORMAT` check entirely. ASS/SSA subtitles were always stream-copied regardless of the flag. The multi-track codec assignment in `mux_final` now makes per-stream decisions: ASS/SSA tracks are converted to SRT (MKV) or mov_text (MP4/MOV) when `SUB_PRESERVE_TEXT_FORMAT=0`, while all other codecs (PGS, SRT, VobSub) remain stream-copied. `run_subtitle_pipeline_multi` logs an informational note when ASS/SSA conversion will occur.
 - **Skip-if-ideal metadata remux silently dropped streams.** The ffmpeg copy-remux used to stamp audio titles and profile comments had no `-map` flag, causing ffmpeg's default stream selection to keep only one stream per type. On a 39-stream source (video + TrueHD + AC-3 + PGS + 35 SRT tracks), `dv-archival` output retained only 3 streams — the AC-3 compatibility track, PGS SDH subtitle, and all non-first-selected SRT tracks were silently lost. The remux now uses explicit per-stream maps built from the validated keep-lists populated by `check_skip_if_ideal`.
 - **Audio title metadata misaligned when streams are filtered.** The skip-if-ideal remux referenced source audio indices for `-metadata:s:a:N` tags, but when streams are filtered out, output indices shift. Tags now use a sequential output counter, matching the proven pattern in `mux_final`.
 - **No visual feedback during skip-if-ideal remux.** The ffmpeg copy-remux, `cp` fallback, and SHA-256 checksum all ran in the foreground with no spinner, causing the CLI to appear hung for 10–30+ seconds on multi-GB files. All three now run in the background with `spinner` progress indicators.
@@ -38,6 +41,8 @@ Multi-track audio and subtitles for `dv-archival`: the profile now keeps all aud
 ### Changed
 
 - `dv-archival` profile description updated in man page, usage text, and `--help` output to reflect multi-track audio and subtitle behavior.
+- `animation` profile description updated in man page to reflect multi-track subtitle mode (ASS/SSA + PGS bitmap). MP4/MOV compatibility warnings now mention PGS bitmap subtitles alongside ASS/SSA.
+- Man page "Multi-Track Subtitles" section updated: ASS/SSA tracks are converted to SRT when `SUB_PRESERVE_TEXT_FORMAT=0`, even in multi-track mode. Previously stated "no format conversion" unconditionally.
 
 ## [1.0.2] - 2026-03-20
 
