@@ -60,14 +60,14 @@ Profiles are named presets that configure `muxm` for a specific use case in a si
 muxm --profile <n> input.mkv
 ```
 
-| Profile | Goal | Container | Video | Audio | DV |
-| --- | --- | --- | --- | --- | --- |
-| `dv-archival` | Lossless preservation | MKV | Copy (no re-encode) | All tracks, lossless passthrough | Preserve |
-| `hdr10-hq` | Max HDR10 quality | MKV | HEVC CRF 17 | Lossless + stereo fallback | Strip |
-| `atv-directplay-hq` | Apple TV Direct Play | MP4 | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | P8.1 auto |
-| `streaming` | Modern HEVC streaming | MP4 | HEVC CRF 20 | E-AC-3 448k + AAC stereo | Strip |
-| `animation` | Anime/cartoon optimized | MKV | HEVC CRF 16, 10-bit | Lossless + stereo fallback | Strip |
-| `universal` | Play anywhere | MP4 | H.264 SDR (tone-map HDR) | AAC stereo | Strip |
+| Profile | Goal | Container | Video | Audio | Subtitles | DV |
+| --- | --- | --- | --- | --- | --- | --- |
+| `dv-archival` | Lossless preservation | MKV | Copy (no re-encode) | All tracks, lossless passthrough | Multi-track stream-copy (all types, up to 99) | Preserve |
+| `hdr10-hq` | Max HDR10 quality | MKV | HEVC CRF 17 | Lossless + stereo fallback | Single-track per type, soft subs | Strip |
+| `atv-directplay-hq` | Apple TV Direct Play | MP4 | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | Burn forced; others as mov_text; PGS→OCR | P8.1 auto |
+| `streaming` | Modern HEVC streaming | MP4 | HEVC CRF 20 | E-AC-3 448k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
+| `animation` | Anime/cartoon optimized | MKV | HEVC CRF 16, 10-bit | Lossless + stereo fallback | Multi-track stream-copy (up to 6); preserve ASS/SSA | Strip |
+| `universal` | Play anywhere | MP4 | H.264 SDR (tone-map HDR) | AAC stereo | Burn forced; export others as external SRT | Strip |
 
 ### `dv-archival` — Dolby Vision Archival
 
@@ -122,14 +122,14 @@ muxm --profile universal movie.mkv
 Profiles are starting points — every setting can be overridden with CLI flags:
 
 ```
+# Use dv-archival but keep only English and Japanese audio (drops all other languages)
+muxm --profile dv-archival --audio-lang-pref eng,jpn movie.mkv
+
 # Use hdr10-hq but with a different CRF and no stereo fallback
 muxm --profile hdr10-hq --crf 20 --no-stereo-fallback movie.mkv
 
 # Use universal but keep chapters
 muxm --profile universal --keep-chapters movie.mkv
-
-# Use atv-directplay-hq but output to MKV (you'll get a warning)
-muxm --profile atv-directplay-hq --output-ext mkv movie.mkv
 ```
 
 ---
@@ -451,7 +451,7 @@ Full license text available in [LICENSE.md](LICENSE.md)
 
 Found a bug? Please [open an issue on GitHub](https://github.com/TheBluWiz/MuxMaster/issues). Include the output of `muxm --version`, the profile and flags you used, and any relevant log output. A `--dry-run` dump or `--report-json` output is especially helpful.
 
-This is a solo-maintained project and I'm not accepting outside code contributions at this time. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+This is a solo-maintained project and I'm not accepting outside code contributions at this time.
 
 ---
 

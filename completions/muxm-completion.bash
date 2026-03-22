@@ -61,8 +61,8 @@ _muxm_completions() {
             --crf -p --preset --x265-params -l --level
             --video-codec --tonemap --no-tonemap
             --sdr-force-10bit --no-sdr-force-10bit
-            --no-conservative-vbv
-            --no-dv --allow-dv-fallback --no-allow-dv-fallback
+            --conservative-vbv --no-conservative-vbv
+            --dv --no-dv --allow-dv-fallback --no-allow-dv-fallback
             --dv-convert-p81 --no-dv-convert-p81
             --video-copy-if-compliant --no-video-copy-if-compliant
             --max-copy-bitrate
@@ -75,6 +75,7 @@ _muxm_completions() {
 
             --sub-burn-forced --no-sub-burn-forced
             --sub-export-external --no-sub-export-external
+            --sub-preserve-format --no-sub-preserve-format
             --sub-lang-pref --no-sub-sdh --no-subtitles
             --ocr-lang --no-ocr --ocr-tool
 
@@ -83,6 +84,7 @@ _muxm_completions() {
             --output-ext
             --keep-chapters --no-keep-chapters
             --strip-metadata --no-strip-metadata
+            --profile-comment --no-profile-comment
             --skip-if-ideal --no-skip-if-ideal
             --report-json --no-report-json
             --checksum --no-checksum
