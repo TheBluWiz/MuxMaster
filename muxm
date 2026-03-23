@@ -370,6 +370,34 @@ ffmpeg_progress_bar() {
   return $?
 }
 
+# _ffmpeg_run_with_ui — launch ffmpeg with a progress bar when possible, else spinner.
+# Args: $1 = nameref to command array (args after "ffmpeg", without -progress flag),
+#       $2 = label string, $3 = error file path, $4 = total duration in seconds.
+# Returns: ffmpeg exit status. Caller is responsible for die/warn on failure.
+_ffmpeg_run_with_ui() {
+  local -n _ffui_cmd=$1
+  local _ffui_label="$2"
+  local _ffui_err="$3"
+  local _ffui_secs="${4:-0}"
+  local _ffui_pipe="$WORKDIR/_ffui.$$.pipe"
+
+  if _make_progress_pipe "$_ffui_pipe"; then
+    ffmpeg "${_ffui_cmd[@]}" -progress "$_ffui_pipe" 2>"$_ffui_err" &
+    local _ffui_pid=$!
+    # ffmpeg_progress_bar calls wait internally and returns ffmpeg's exit status
+    ffmpeg_progress_bar "$_ffui_pid" "$_ffui_pipe" "$_ffui_secs" "$_ffui_label"
+    local _ffui_rc=$?
+    rm -f "$_ffui_pipe" 2>/dev/null || true
+    return $_ffui_rc
+  else
+    ffmpeg "${_ffui_cmd[@]}" 2>"$_ffui_err" &
+    local _ffui_pid=$!
+    spinner "$_ffui_pid" "$_ffui_label"
+    wait "$_ffui_pid" 2>/dev/null
+    return $?
+  fi
+}
+
 # _get_source_duration_secs — extract source video duration in whole seconds.
 #
 # Three-tier lookup (each tier falls through on null, "N/A", or non-numeric):
@@ -2905,38 +2933,36 @@ apply_profile() {
 # But first: pre-scan for --create-config / --force-create-config.
 # This must run after profile functions are defined (above) so the config
 # generator can call them. It halts all other operations.
-_cc_force=0
-_cc_scope=""
-_cc_profile=""
-_cc_found=0
-_cc_i=0
-_cc_args=("$@")
-while (( _cc_i < ${#_cc_args[@]} )); do
-  case "${_cc_args[$_cc_i]}" in
-    --create-config|--force-create-config)
-      _cc_found=1
-      [[ "${_cc_args[$_cc_i]}" == "--force-create-config" ]] && _cc_force=1
-      # Next arg must be scope
-      if (( _cc_i + 1 >= ${#_cc_args[@]} )); then
-        printf '❌ ERROR: %s requires a scope: system, user, or project\n' "${_cc_args[$_cc_i]}" >&2
-        printf '   Usage: muxm %s <system|user|project> [profile]\n' "${_cc_args[$_cc_i]}" >&2
-        exit 11
-      fi
-      _cc_scope="${_cc_args[$((_cc_i + 1))]}"
-      # Optional: profile as third arg
-      if (( _cc_i + 2 < ${#_cc_args[@]} )) && [[ "${_cc_args[$((_cc_i + 2))]}" != -* ]]; then
-        _cc_profile="${_cc_args[$((_cc_i + 2))]}"
-      fi
-      break
-      ;;
-  esac
-  _cc_i=$((_cc_i + 1))
-done
-if (( _cc_found )); then
-  _create_config "$_cc_scope" "$_cc_profile" "$_cc_force"
-  # _create_config always exits; this line is unreachable
-fi
-unset _cc_force _cc_scope _cc_profile _cc_found _cc_i _cc_args
+_create_config_prescan() {
+  local _cc_force=0 _cc_scope="" _cc_profile="" _cc_found=0 _cc_i=0
+  local -a _cc_args=("$@")
+  while (( _cc_i < ${#_cc_args[@]} )); do
+    case "${_cc_args[$_cc_i]}" in
+      --create-config|--force-create-config)
+        _cc_found=1
+        [[ "${_cc_args[$_cc_i]}" == "--force-create-config" ]] && _cc_force=1
+        # Next arg must be scope
+        if (( _cc_i + 1 >= ${#_cc_args[@]} )); then
+          printf '❌ ERROR: %s requires a scope: system, user, or project\n' "${_cc_args[$_cc_i]}" >&2
+          printf '   Usage: muxm %s <system|user|project> [profile]\n' "${_cc_args[$_cc_i]}" >&2
+          exit 11
+        fi
+        _cc_scope="${_cc_args[$((_cc_i + 1))]}"
+        # Optional: profile as third arg
+        if (( _cc_i + 2 < ${#_cc_args[@]} )) && [[ "${_cc_args[$((_cc_i + 2))]}" != -* ]]; then
+          _cc_profile="${_cc_args[$((_cc_i + 2))]}"
+        fi
+        break
+        ;;
+    esac
+    _cc_i=$((_cc_i + 1))
+  done
+  if (( _cc_found )); then
+    _create_config "$_cc_scope" "$_cc_profile" "$_cc_force"
+    # _create_config always exits; this line is unreachable
+  fi
+}
+_create_config_prescan "$@"
 
 apply_profile
 
@@ -3637,12 +3663,40 @@ _print_completed_steps(){
 #
 # Globals read: FAILED, DRY_RUN, TMP_OUT, OUT, CHECKSUM, WORKDIR, DEBUG,
 #               KEEP_TEMP, KEEP_TEMP_ALWAYS, EXIT_CODE, FAIL_MSG, TERM_FD
+# _cleanup_workdir — Remove WORKDIR after a run, with safety guard.
+# Args: $1 = 1 to also honour KEEP_TEMP (failure path), 0 for success path.
+# Globals read: WORKDIR, DEBUG, KEEP_TEMP, KEEP_TEMP_ALWAYS
+_cleanup_workdir() {
+  local keep_on_failure="${1:-0}"
+  if [[ -n "$WORKDIR" && -d "$WORKDIR" && "${DEBUG:-0}" != "1" && $KEEP_TEMP_ALWAYS -eq 0 ]]; then
+    if (( keep_on_failure && KEEP_TEMP )); then
+      note "Keeping failure artifacts at: $WORKDIR"
+      return
+    fi
+    if (( ! keep_on_failure )); then
+      (( KEEP_TEMP )) && note "--keep-temp preserves workdir on failure only; use -K/--keep-temp-always to keep on success."
+    fi
+    # Safety: only remove if path matches expected .muxm.tmp. pattern
+    if [[ "$WORKDIR" == *"/.muxm.tmp."* ]]; then
+      rm -rf "$WORKDIR"
+    else
+      warn "Refusing to remove unexpected workdir path: $WORKDIR"
+    fi
+  else
+    if (( keep_on_failure )); then
+      note "Keeping failure artifacts at: $WORKDIR"
+    else
+      note "Keeping workdir: $WORKDIR"
+    fi
+  fi
+}
+
 on_exit() {
   # Clean up subtitle burn-in temp file (lives outside WORKDIR in /tmp)
   [[ -n "${_BURN_SRT_FILTER:-}" && -f "$_BURN_SRT_FILTER" ]] && rm -f "$_BURN_SRT_FILTER"
 
   local have_result=0
-  
+
   if (( DRY_RUN )); then
     have_result=1
   elif [[ -n "${TMP_OUT:-}" && -s "$TMP_OUT" ]]; then
@@ -3650,6 +3704,9 @@ on_exit() {
   elif [[ -n "${OUT:-}" && -s "$OUT" ]]; then
     have_result=1
   fi
+
+  # Close the raw-terminal FD now that spinner output is complete (Section 17)
+  [[ -n "${TERM_FD:-}" ]] && exec 3>&- 2>/dev/null || true
 
   if (( FAILED == 0 && have_result == 1 )); then
     if (( DRY_RUN )); then
@@ -3668,46 +3725,20 @@ on_exit() {
       note "Build SUCCEEDED."
     fi
 
-    # Close the raw-terminal FD now that spinner output is complete (Section 17)
-    [[ -n "${TERM_FD:-}" ]] && exec 3>&- 2>/dev/null || true
-
     _print_completed_steps
-
-    if [[ -n "$WORKDIR" && -d "$WORKDIR" && "${DEBUG:-0}" != "1" && $KEEP_TEMP_ALWAYS -eq 0 ]]; then
-      (( KEEP_TEMP )) && note "--keep-temp preserves workdir on failure only; use -K/--keep-temp-always to keep on success."
-      # Safety: only remove if path matches expected .muxm.tmp. pattern
-      if [[ "$WORKDIR" == *"/.muxm.tmp."* ]]; then
-        rm -rf "$WORKDIR"
-      else
-        warn "Refusing to remove unexpected workdir path: $WORKDIR"
-      fi
-    else
-      note "Keeping workdir: $WORKDIR"
-    fi
+    _cleanup_workdir 0
     exit 0
   else
     [[ -z "$FAIL_MSG" ]] && FAIL_MSG="No output produced (likely earlier parse/runtime error)."
     printf "❌ Build FAILED. %s\n" "$FAIL_MSG"
 
-    # Close the raw-terminal FD (Section 17)
-    [[ -n "${TERM_FD:-}" ]] && exec 3>&- 2>/dev/null || true
-    
     _print_completed_steps
     echo "See log: $LOGFILE"
 
     # Clean up temp output file on failure
     [[ -f "$TMP_OUT" ]] && rm -f "$TMP_OUT"
 
-    if [[ -n "$WORKDIR" && -d "$WORKDIR" && "${DEBUG:-0}" != "1" && $KEEP_TEMP -eq 0 && $KEEP_TEMP_ALWAYS -eq 0 ]]; then
-      # Safety: only remove if path matches expected .muxm.tmp. pattern
-      if [[ "$WORKDIR" == *"/.muxm.tmp."* ]]; then
-        rm -rf "$WORKDIR"
-      else
-        warn "Refusing to remove unexpected workdir path: $WORKDIR"
-      fi
-    else
-      note "Keeping failure artifacts at: $WORKDIR"
-    fi
+    _cleanup_workdir 1
     exit "${EXIT_CODE:-1}"
   fi
 }
@@ -3816,8 +3847,9 @@ check_skip_if_ideal() {
     local _ideal_keep
     _ideal_keep="$(_build_audio_keep_list)"
     local _ideal_n_keep _ideal_n_total
-    # shellcheck disable=SC2086  # intentional word-splitting for count
-    _ideal_n_keep=$(echo $_ideal_keep | wc -w | tr -d ' ')
+    local -a _ideal_keep_arr
+    read -r -a _ideal_keep_arr <<< "$_ideal_keep"
+    _ideal_n_keep="${#_ideal_keep_arr[@]}"
     _ideal_n_total="$(_audio_stream_count)"
     if [[ "$_ideal_n_keep" != "$_ideal_n_total" ]]; then
       ideal=0; reason="audio filter would drop $(( _ideal_n_total - _ideal_n_keep )) of $_ideal_n_total tracks"
@@ -3842,8 +3874,9 @@ check_skip_if_ideal() {
     local _ideal_sub_keep
     _ideal_sub_keep="$(_build_subtitle_keep_list)"
     local _ideal_sub_n_keep _ideal_sub_n_total
-    # shellcheck disable=SC2086  # intentional word-splitting for count
-    _ideal_sub_n_keep=$(echo $_ideal_sub_keep | wc -w | tr -d ' ')
+    local -a _ideal_sub_keep_arr
+    read -r -a _ideal_sub_keep_arr <<< "$_ideal_sub_keep"
+    _ideal_sub_n_keep="${#_ideal_sub_keep_arr[@]}"
     _ideal_sub_n_total="$(_sub_count)"
     if [[ "$_ideal_sub_n_keep" != "$_ideal_sub_n_total" ]]; then
       ideal=0; reason="subtitle filter would drop $(( _ideal_sub_n_total - _ideal_sub_n_keep )) of $_ideal_sub_n_total tracks"
@@ -4037,10 +4070,13 @@ build_x265_params() {
   if [[ "$PROFILE_DESC" == "HDR10" ]]; then
     # Strip any instances already present in X265_PARAMS_BASE (some profiles
     # bake these in) to avoid duplicate keys that confuse x265.
-    local key
-    for key in hdr10 hdr10-opt colorprim transfer colormatrix range; do
-      X265_PARAMS="$(printf '%s' "$X265_PARAMS" | sed "s/:${key}=[^:]*//g; s/^${key}=[^:]*://")"
-    done
+    X265_PARAMS="$(printf '%s' "$X265_PARAMS" | sed \
+      's/:hdr10=[^:]*//g; s/^hdr10=[^:]*://
+       s/:hdr10-opt=[^:]*//g; s/^hdr10-opt=[^:]*://
+       s/:colorprim=[^:]*//g; s/^colorprim=[^:]*://
+       s/:transfer=[^:]*//g; s/^transfer=[^:]*://
+       s/:colormatrix=[^:]*//g; s/^colormatrix=[^:]*://
+       s/:range=[^:]*//g; s/^range=[^:]*://')"
     X265_PARAMS="${X265_PARAMS}:hdr10=1:hdr10-opt=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:range=limited"
   fi
 }
@@ -4683,22 +4719,8 @@ run_video_pipeline() {
     local progress_pipe="$WORKDIR/encode_progress.pipe"
 
     log "ffmpeg encode command: ffmpeg ${ff_cmd[*]}"
-    if _make_progress_pipe "$progress_pipe"; then
-      ffmpeg "${ff_cmd[@]}" -progress "$progress_pipe" 2>"$WORKDIR/encode.err" &
-      local enc_pid=$!
-      # ffmpeg_progress_bar calls wait internally and returns ffmpeg's exit status
-      if ! ffmpeg_progress_bar "$enc_pid" "$progress_pipe" "$total_secs" "Encoding video"; then
-        rm -f "$progress_pipe" 2>/dev/null || true
-        die 40 "Base video encode failed. See: $WORKDIR/encode.err"
-      fi
-      rm -f "$progress_pipe" 2>/dev/null || true
-    else
-      ffmpeg "${ff_cmd[@]}" 2>"$WORKDIR/encode.err" &
-      local enc_pid=$!
-      spinner "$enc_pid" "Encoding video"
-      if ! wait "$enc_pid" 2>/dev/null; then
-        die 40 "Base video encode failed. See: $WORKDIR/encode.err"
-      fi
+    if ! _ffmpeg_run_with_ui ff_cmd "Encoding video" "$WORKDIR/encode.err" "$total_secs"; then
+      die 40 "Base video encode failed. See: $WORKDIR/encode.err"
     fi
 
     # Validate encoded output
@@ -5328,8 +5350,9 @@ select_best_audio(){
     warn "Requested --audio-track $AUDIO_TRACK_OVERRIDE is invalid (must be 0-$((n-1))). Using auto-selection."
   fi
 
-  # Score all tracks and select best
+  # Score all tracks, select best, and collect summary in one pass
   local -a score_lines=()
+  local s_score s_idx s_codec s_ch s_lang s_title
   for (( i=0; i<n; i++ )); do
     local line score
     line="$(_score_audio_stream "$i")"
@@ -5343,15 +5366,12 @@ select_best_audio(){
 
   # Log score breakdown when multiple tracks exist (aids debugging)
   if (( n >= 2 )); then
-    local best_idx
+    local best_idx score_summary=""
     best_idx="${best_line#*$'\t'}"; best_idx="${best_idx%%$'\t'*}"
-    local score_summary=""
     for (( i=0; i<n; i++ )); do
-      local sl="${score_lines[$i]}"
-      local s_score s_idx s_codec s_ch s_lang s_title
-      # shellcheck disable=SC2034  # s_title completes the IFS destructure
-      IFS=$'\t' read -r s_score s_idx s_codec s_ch s_lang s_title <<< "$sl"
       local marker=""
+      # shellcheck disable=SC2034  # s_title completes the IFS destructure
+      IFS=$'\t' read -r s_score s_idx s_codec s_ch s_lang s_title <<< "${score_lines[$i]}"
       [[ "$s_idx" == "$best_idx" ]] && marker=" ★"
       score_summary+="#${s_idx}: ${s_codec} ${s_ch}ch [${s_lang}] = ${s_score}${marker}  "
     done
@@ -5590,6 +5610,7 @@ run_audio_pipeline_multi(){
   n_kept="${#AUDIO_MT_INDICES[@]}"
   n_dropped=$(( n_total - n_kept ))
 
+  # SYNC: mirror of display loop in run_audio_pipeline — keep both in sync
   say "→ Scanning audio streams (multi-track mode):"
   local i
   for (( i=0; i<n_total; i++ )); do
@@ -5688,6 +5709,7 @@ run_audio_pipeline(){
   br="$(_audio_bitrate "$idx")"
   title="$(_audio_title "$idx")"
 
+  # SYNC: mirror of display loop in run_audio_pipeline_multi — keep both in sync
   log "• Detected audio streams:"
   local i
   for (( i=0; i<n; i++ )); do
@@ -5698,7 +5720,7 @@ run_audio_pipeline(){
     _l="${_l,,}"
     [[ -z "$_l" ]] && _l="$TAG_LANGUAGE_DEFAULT"
     [[ -z "$_br_i" || ! "$_br_i" =~ ^[0-9]+$ ]] && _br_i=0
-    
+
     pretty="#$i: $_c ${_ch_i}ch [$_l]"
     [[ -n "$_t" ]] && pretty="$pretty — $_t"
     _audio_is_commentary "$_t" && pretty="$pretty [commentary]"
@@ -5838,24 +5860,8 @@ run_audio_pipeline(){
 
     local total_secs
     total_secs="$(_get_source_duration_secs)"
-    local a_progress_pipe="$WORKDIR/audio_progress.pipe"
-
-    if _make_progress_pipe "$a_progress_pipe"; then
-      ffmpeg "${transcode_args[@]}" -progress "$a_progress_pipe" 2>"$WORKDIR/audio_primary.err" &
-      local atx_pid=$!
-      # ffmpeg_progress_bar calls wait internally and returns ffmpeg's exit status
-      if ! ffmpeg_progress_bar "$atx_pid" "$a_progress_pipe" "$total_secs" "Transcoding audio"; then
-        rm -f "$a_progress_pipe" 2>/dev/null || true
-        die 43 "Audio transcode to $tgt_codec failed. See: $WORKDIR/audio_primary.err"
-      fi
-      rm -f "$a_progress_pipe" 2>/dev/null || true
-    else
-      ffmpeg "${transcode_args[@]}" 2>"$WORKDIR/audio_primary.err" &
-      local atx_pid=$!
-      spinner "$atx_pid" "Transcoding audio"
-      if ! wait "$atx_pid" 2>/dev/null; then
-        die 43 "Audio transcode to $tgt_codec failed. See: $WORKDIR/audio_primary.err"
-      fi
+    if ! _ffmpeg_run_with_ui transcode_args "Transcoding audio" "$WORKDIR/audio_primary.err" "$total_secs"; then
+      die 43 "Audio transcode to $tgt_codec failed. See: $WORKDIR/audio_primary.err"
     fi
   fi
 
@@ -5871,33 +5877,13 @@ run_audio_pipeline(){
     log "→ Preparing stereo fallback → $AAC_STEREO"
     local stereo_total_secs
     stereo_total_secs="$(_get_source_duration_secs)"
-    local stereo_progress_pipe="$WORKDIR/stereo_progress.pipe"
-
-    if _make_progress_pipe "$stereo_progress_pipe"; then
-      ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
-        -c:a aac -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO" \
-        -progress "$stereo_progress_pipe" 2>"$WORKDIR/audio_stereo.err" &
-      local stereo_pid=$!
-      # ffmpeg_progress_bar calls wait internally and returns ffmpeg's exit status
-      if ! ffmpeg_progress_bar "$stereo_pid" "$stereo_progress_pipe" "$stereo_total_secs" "Creating stereo fallback"; then
-        warn "Stereo fallback creation failed - continuing without it. See: $WORKDIR/audio_stereo.err"
-        AAC_STEREO=""
-      else
-        mark_done "Stereo fallback prepared"
-      fi
-      rm -f "$stereo_progress_pipe" 2>/dev/null || true
+    local -a stereo_cmd=("${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
+      -c:a aac -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO")
+    if ! _ffmpeg_run_with_ui stereo_cmd "Creating stereo fallback" "$WORKDIR/audio_stereo.err" "$stereo_total_secs"; then
+      warn "Stereo fallback creation failed - continuing without it. See: $WORKDIR/audio_stereo.err"
+      AAC_STEREO=""
     else
-      ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
-        -c:a aac -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO" \
-        2>"$WORKDIR/audio_stereo.err" &
-      local stereo_pid=$!
-      spinner "$stereo_pid" "Creating stereo fallback"
-      if ! wait "$stereo_pid" 2>/dev/null; then
-        warn "Stereo fallback creation failed - continuing without it. See: $WORKDIR/audio_stereo.err"
-        AAC_STEREO=""
-      else
-        mark_done "Stereo fallback prepared"
-      fi
+      mark_done "Stereo fallback prepared"
     fi
   else
     note "Primary audio is stereo (or fallback disabled); no extra stereo needed."

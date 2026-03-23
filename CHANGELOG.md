@@ -4,6 +4,20 @@ All notable changes to MuxMaster will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com), and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+Internal refactors only — no user-facing behavior changes.
+
+### Changed
+
+- **Extract `_create_config_prescan()`** — The `--create-config` pre-scan block was extracted into its own function. Its 6 temporary variables are now local to the function, eliminating the corresponding `unset` calls in the main flow.
+- **Extract `_cleanup_workdir()` from `on_exit`** — Deduplicated the WORKDIR removal safety guard into a single helper. `exec 3>&-` is now unconditionally issued before the success/failure branch so FD 3 is always closed in the same place regardless of exit path.
+- **Add `# SYNC:` cross-reference comments to duplicated audio stream display loops** — The parallel loops in `run_audio_pipeline` and `run_audio_pipeline_multi` now carry `# SYNC:` annotations pointing at each other, making the duplication intentional and visible to future editors.
+- **Extract `_ffmpeg_run_with_ui()`** — Consolidated the repeated pipe / progress-bar / spinner boilerplate that appeared across the video encode, audio transcode, and stereo fallback paths into a single shared helper. Call sites pass their ffmpeg arguments and a label; the helper owns the subprocess, UI wiring, and exit-code propagation.
+- **Consolidate `printf | sed` calls in `build_x265_params`** — Six separate `printf | sed` subprocess invocations have been merged into a single `sed` call with multiple `-e` expressions, reducing subprocess overhead and centralizing the parameter-sanitization logic.
+- **Eliminate double-scan in `select_best_audio`** — The previous two-pass implementation (one pass to build the score summary, a second to find the best stream) has been merged into a single loop that tracks the running best while accumulating the summary, halving the number of iterations over the stream list.
+- **Replace `wc -w` word counting with pure Bash array expansion** — Three-subprocess chains (`echo | wc | tr`) used to count whitespace-delimited tokens have been replaced with `read -r -a arr` followed by `${#arr[@]}`, eliminating subshells and external process forks for this operation.
+
 ## [1.1.0] - 2026-03-22
 
 Multi-track audio and subtitles for `dv-archival` and `animation`: both profiles now keep all matching audio/subtitle tracks from the source instead of scoring and selecting one. Commentary/descriptive audio tracks are dropped by default in `dv-archival`. All surviving tracks are stream-copied (never transcoded). Configurable via `.muxmrc`.
@@ -169,6 +183,7 @@ Initial public release.
 - Structured exit codes for scripting and automation (10 = missing tool, 11 = bad arguments, 12 = corrupt source, 40–43 = pipeline failures)
 - Comprehensive test harness (`test_muxm.sh`) with 18 test suites and ~165 assertions
 
+[Unreleased]: https://github.com/TheBluWiz/MuxMaster/compare/v1.1.0...HEAD
 [1.1.0]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.1.0
 [1.0.2]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.0.2
 [1.0.1]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.0.1
