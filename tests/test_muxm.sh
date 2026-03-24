@@ -16,11 +16,7 @@
 set -euo pipefail
 
 # ---- Configuration ----
-# Resolve MUXM to an absolute path so run_muxm works after cd-ing to TESTDIR.
 MUXM="${MUXM:-./muxm}"
-if [[ "$MUXM" != /* ]]; then
-  MUXM="$(cd "$(dirname -- "$MUXM")" && pwd)/$(basename -- "$MUXM")"
-fi
 SUITE="${SUITE:-all}"
 VERBOSE=0
 TESTDIR=""
@@ -106,6 +102,12 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown option: $1 (try --help)"; exit 1 ;;
   esac
 done
+
+# Resolve MUXM to an absolute path so run_muxm works after cd-ing to TESTDIR.
+# Done AFTER arg parsing so --muxm ./muxm is resolved from the correct directory.
+if [[ "$MUXM" != /* ]]; then
+  MUXM="$(cd "$(dirname -- "$MUXM")" && pwd)/$(basename -- "$MUXM")"
+fi
 
 # ---- Helpers ----
 log()  { printf "%b  → %s%b\n" "$BLUE" "$*" "$NC"; }
@@ -1497,14 +1499,14 @@ test_video() {
   # --x265-params custom parameter (#21)
   outfile="$TESTDIR/vid_x265_params.mp4"
   log "Encoding with --x265-params..."
-  assert_encode "--x265-params: encode succeeded" "$outfile" \
-    --crf 28 --preset ultrafast --x265-params "aq-mode=3" "$src"
+  if assert_encode "--x265-params: encode succeeded" "$outfile" \
+    --crf 28 --preset ultrafast --x265-params "aq-mode=3" "$src"; then :; fi
 
   # --threads (#22)
   outfile="$TESTDIR/vid_threads.mp4"
   log "Encoding with --threads 2..."
-  assert_encode "--threads 2: encode succeeded" "$outfile" \
-    --crf 28 --preset ultrafast --threads 2 "$src"
+  if assert_encode "--threads 2: encode succeeded" "$outfile" \
+    --crf 28 --preset ultrafast --threads 2 "$src"; then :; fi
 
   # --video-copy-if-compliant with HEVC source (#19)
   outfile="$TESTDIR/vid_copy_compliant.mp4"
@@ -2585,26 +2587,21 @@ test_metadata() {
 
   # --ffmpeg-loglevel (#30)
   # Validates the flag is accepted by the parser without error.
-  # Actual loglevel behavior is verified by manual inspection of ffmpeg output.
-  out="$(run_muxm --ffmpeg-loglevel warning --print-effective-config 2>&1)" || true
-  if [[ -n "$out" ]]; then
-    pass "--ffmpeg-loglevel: accepted without error"
-  fi
+  # Check that the effective config registers the loglevel (not just any non-empty output,
+  # which would also pass if muxm rejected the flag and printed an error message).
+  out="$(run_muxm --ffmpeg-loglevel warning --print-effective-config)"
+  assert_contains "FFMPEG_LOGLEVEL" "--ffmpeg-loglevel: flag registered in effective config" "$out"
 
   # --no-hide-banner (#29)
   # Validates the flag is accepted without error.
   # When active, ffmpeg's version/config banner should appear in encode output.
-  out="$(run_muxm --no-hide-banner --dry-run "$TESTDIR/basic_sdr_subs.mkv" 2>&1)" || true
-  if [[ -n "$out" ]]; then
-    pass "--no-hide-banner: accepted without error"
-  fi
+  out="$(run_muxm --no-hide-banner --dry-run "$TESTDIR/basic_sdr_subs.mkv")"
+  assert_contains "DRY-RUN" "--no-hide-banner: accepted without error (dry-run proceeds)" "$out"
 
   # --ffprobe-loglevel (R23)
   # Validates the flag is accepted by the parser without error.
-  out="$(run_muxm --ffprobe-loglevel warning --print-effective-config 2>&1)" || true
-  if [[ -n "$out" ]]; then
-    pass "--ffprobe-loglevel: accepted without error"
-  fi
+  out="$(run_muxm --ffprobe-loglevel warning --print-effective-config)"
+  assert_contains "FFPROBE_LOGLEVEL" "--ffprobe-loglevel: flag registered in effective config" "$out"
 }
 
 # === Suite: Edge Cases & Security ===
@@ -2820,7 +2817,11 @@ test_edge() {
   # --skip-video: muxm cannot produce a valid output without a video stream,
   # so this should error or warn. We validate it doesn't silently succeed.
   out="$(run_muxm --skip-video "$TESTDIR/basic_sdr_subs.mkv")"
-  log "--skip-video behavior validated"
+  if echo "$out" | grep -qiE "skip|video|warn|error|cannot|invalid|disabled"; then
+    pass "--skip-video: muxm acknowledges flag (not silent success)"
+  else
+    fail "--skip-video: expected error, warning, or skip notice; got: '${out:0:200}'"
+  fi
 
   # Non-readable source file (#55)
   local unreadable="$TESTDIR/unreadable.mkv"

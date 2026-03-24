@@ -323,9 +323,9 @@ _make_progress_pipe() {
 # Returns: the exit status of the ffmpeg process.
 #
 # IMPORTANT: This function calls `wait "$pid"` internally. The caller should NOT
-# call wait again. The wait at the end of this function (line ~280) is the
-# authoritative collection of the ffmpeg exit status — it fires after the
-# progress pipe is fully drained or the process has exited.
+# call wait again. The wait at the end of this function is the authoritative
+# collection of the ffmpeg exit status — it fires after the progress pipe is
+# fully drained or the process has exited.
 ffmpeg_progress_bar() {
   local pid=$1 pipe=$2 total_secs=$3 label=$4
   local pct=0 bar="" elapsed_us=0
@@ -3041,10 +3041,15 @@ apply_profile() {
   note "Applied profile: $PROFILE_NAME (source: ${_PROFILE_SOURCE:-unknown})"
 }
 
-# Apply profile now (after config files, before CLI flags)
-# But first: pre-scan for --create-config / --force-create-config.
-# This must run after profile functions are defined (above) so the config
-# generator can call them. It halts all other operations.
+# _create_config_prescan — Pre-scan CLI args for --create-config/--force-create-config before full parsing.
+#
+# Scans "$@" for the config-generation flags, then calls _create_config and
+# exits. Must run after profile apply functions are defined so the config
+# generator can invoke them. Halts all other operations if the flag is found.
+#
+# Args: "$@" — the raw CLI arguments passed to main.
+# Returns: exits 0 after writing config; returns normally (no-op) if flag absent.
+# Globals: PROFILE_NAME (read)
 _create_config_prescan() {
   local _cc_force=0 _cc_scope="" _cc_profile="" _cc_found=0 _cc_i=0
   local -a _cc_args=("$@")
@@ -3567,6 +3572,10 @@ Effective config (post config-files + profile + CLI):
   KEEP_TEMP_ALWAYS          = $KEEP_TEMP_ALWAYS
   REPLACE_SOURCE            = $REPLACE_SOURCE
   FORCE_REPLACE_SOURCE      = $FORCE_REPLACE_SOURCE
+
+  [Toolchain]
+  FFMPEG_LOGLEVEL           = $FFMPEG_LOGLEVEL
+  FFPROBE_LOGLEVEL          = $FFPROBE_LOGLEVEL
 EOF
   exit 0
 }
@@ -3769,16 +3778,6 @@ _print_completed_steps(){
   for s in "${COMPLETED_STEPS[@]}"; do echo "  • $s"; done
 }
 
-# on_exit — EXIT trap handler. Performs all end-of-run cleanup and reporting.
-#
-# Success path: atomically moves temp output to final path, writes checksum,
-#   prints completed steps, cleans up workdir (unless --keep-temp-always).
-# Failure path: prints failure message + completed steps, cleans up temp output,
-#   preserves workdir for debugging (if --keep-temp or --keep-temp-always).
-# Dry-run path: removes temp placeholder, reports completion.
-#
-# Globals read: FAILED, DRY_RUN, TMP_OUT, OUT, CHECKSUM, WORKDIR, DEBUG,
-#               KEEP_TEMP, KEEP_TEMP_ALWAYS, EXIT_CODE, FAIL_MSG, TERM_FD
 # _cleanup_workdir — Remove WORKDIR after a run, with safety guard.
 # Args: $1 = 1 to also honour KEEP_TEMP (failure path), 0 for success path.
 # Globals read: WORKDIR, DEBUG, KEEP_TEMP, KEEP_TEMP_ALWAYS
@@ -3807,6 +3806,16 @@ _cleanup_workdir() {
   fi
 }
 
+# on_exit — EXIT trap handler. Performs all end-of-run cleanup and reporting.
+#
+# Success path: atomically moves temp output to final path, writes checksum,
+#   prints completed steps, cleans up workdir (unless --keep-temp-always).
+# Failure path: prints failure message + completed steps, cleans up temp output,
+#   preserves workdir for debugging (if --keep-temp or --keep-temp-always).
+# Dry-run path: removes temp placeholder, reports completion.
+#
+# Globals read: FAILED, DRY_RUN, TMP_OUT, OUT, CHECKSUM, WORKDIR, DEBUG,
+#               KEEP_TEMP, KEEP_TEMP_ALWAYS, EXIT_CODE, FAIL_MSG, TERM_FD
 on_exit() {
   # Clean up subtitle burn-in temp file (lives outside WORKDIR in /tmp)
   [[ -n "${_BURN_SRT_FILTER:-}" && -f "$_BURN_SRT_FILTER" ]] && rm -f "$_BURN_SRT_FILTER"
@@ -5457,7 +5466,6 @@ _score_audio_stream(){
   printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$score" "$idx" "$codec" "$ch" "$lang" "${title:-}"
 }
 
-# Select best audio track based on scoring algorithm
 # select_best_audio — Pick the best audio track using the scoring algorithm.
 #
 # Respects AUDIO_TRACK_OVERRIDE if set (with bounds validation).
