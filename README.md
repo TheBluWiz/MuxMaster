@@ -16,12 +16,12 @@ muxm --profile atv-directplay-hq movie.mkv
 
 ## Table of Contents
 
-- [Why MuxMaster?](#why-muxmaster)
 - [Format Profiles](#format-profiles)
 - [How It Works](#how-it-works)
 - [Installation](#installation)
 - [Upgrading](#upgrading)
 - [Usage](#usage)
+- [Why MuxMaster?](#why-muxmaster)
 - [Configuration](#configuration)
 - [Additional Features](#additional-features)
 - [FAQ](#faq)
@@ -29,24 +29,7 @@ muxm --profile atv-directplay-hq movie.mkv
 - [Bug Reports](#bug-reports)
 - [Contact](#contact)
 - [Author](#author)
-
----
-
-<a id="why-muxmaster"></a>
-
-## 💡 Why MuxMaster?
-
-Getting a Blu-ray rip to direct-play correctly on an Apple TV, a Roku, or through Plex — without the server transcoding on the fly — is a surprisingly deep problem. The video might be Dolby Vision Profile 7 that needs conversion to Profile 8.1. The audio might be TrueHD, which your player can't direct-play, so you need E-AC-3 — but you also want a stereo AAC fallback for when you're watching on a phone. The forced subtitles need to be burned in because MP4 containers don't handle PGS bitmaps. And the color space metadata needs to survive the whole process.
-
-You can solve all of this with raw ffmpeg, but the command will be 15+ flags long, different for every source file, and you'll need to inspect the source with ffprobe first to decide what half of those flags should be. Every new file is a new puzzle.
-
-**HandBrake** is the go-to GUI for video encoding, and it's excellent for what it does. But its preset system doesn't adapt to what's actually in the file. It can't detect that your source is already Apple TV-compliant and skip the encode. It doesn't extract Dolby Vision RPUs, convert between DV profiles, or inject them back into re-encoded video. It won't selectively OCR your PGS subtitles to SRT when the output container can't carry bitmaps. And it won't generate a JSON report of everything it did for your records. HandBrake gives you a good encode; MuxMaster gives you an opinionated pipeline that understands the relationship between your source, your target device, and every stream in the file.
-
-**Tdarr** solves the batch-processing and automation problem well, especially at library scale. But it requires a server, a database, a web UI, and Node.js — it's infrastructure. If you want to process a single file, or a handful of files, with precise control over DV handling, audio track selection, and subtitle policy, Tdarr's plugin system means writing JavaScript to configure what `muxm` handles with a single `--profile` flag. Tdarr is a media library manager; MuxMaster is a per-file encoding tool that aims to make every decision correctly so you don't have to inspect the output.
-
-MuxMaster sits in the gap between "I know ffmpeg well enough to do this manually" and "I need a server-based automation platform." It's a single Bash script with only three required packages (ffmpeg, jq, and bc) and optional tooling for Dolby Vision and subtitle OCR. It understands Dolby Vision at the RPU level, and its profile system encodes the tribal knowledge of what actually works on real hardware into repeatable, overridable presets.
-
-Configuration is where the design philosophy comes together. Most CLI tools expect you to read the source code to learn which variables exist, then hand-build a dotfile from scratch. `muxm --create-config` generates a complete, commented config file pre-seeded with a real profile's values — you start from a working baseline and customize, not from a blank page. Configs cascade through three tiers (system, user, project) so an encoding team can lock organization defaults in `/etc/.muxmrc` while individuals override their preferred CRF or audio settings in `~/.muxmrc` and specific project directories can pin a streaming profile. And `--print-effective-config` shows you the fully resolved result of all those layers *before* you commit to an encode, so you always know exactly what's about to happen.
+- [Changelog](#changelog)
 
 ---
 
@@ -180,7 +163,7 @@ brew install TheBluWiz/muxm/muxm
 muxm --install-completions      # bash/zsh tab completion
 ```
 
-This installs `muxm` with its required dependencies (bash 4.3+, ffmpeg, jq) and the man page automatically.
+This installs `muxm` with its required dependencies (bash 4.3+, ffmpeg, jq, bc) and the man page automatically.
 
 **Optional dependencies** — for Dolby Vision, subtitle OCR, and subtitle burn-in:
 
@@ -323,6 +306,24 @@ Run `muxm --help` for the full flag reference.
 
 ---
 
+<a id="why-muxmaster"></a>
+
+## 💡 Why MuxMaster?
+
+Getting a Blu-ray rip to direct-play correctly on an Apple TV, a Roku, or through Plex — without the server transcoding on the fly — is a surprisingly deep problem. The video might be Dolby Vision Profile 7 that needs conversion to Profile 8.1. The audio might be TrueHD, which your player can't direct-play, so you need E-AC-3 — but you also want a stereo AAC fallback for when you're watching on a phone. The forced subtitles need to be burned in because MP4 containers don't handle PGS bitmaps. And the color space metadata needs to survive the whole process.
+
+You can solve all of this with raw ffmpeg, but the command will be 15+ flags long, different for every source file, and you'll need to inspect the source with ffprobe first to decide what half of those flags should be. Every new file is a new puzzle.
+
+**HandBrake** is the go-to GUI for video encoding, and it's excellent for what it does. But its preset system doesn't adapt to what's actually in the file. It can't detect that your source is already Apple TV-compliant and skip the encode. It doesn't extract Dolby Vision RPUs, convert between DV profiles, or inject them back into re-encoded video. It won't selectively OCR your PGS subtitles to SRT when the output container can't carry bitmaps. And it won't generate a JSON report of everything it did for your records. HandBrake gives you a good encode; MuxMaster gives you an opinionated pipeline that understands the relationship between your source, your target device, and every stream in the file.
+
+**Tdarr** solves the batch-processing and automation problem well, especially at library scale. But it requires a server, a database, a web UI, and Node.js — it's infrastructure. If you want to process a single file, or a handful of files, with precise control over DV handling, audio track selection, and subtitle policy, Tdarr's plugin system means writing JavaScript to configure what `muxm` handles with a single `--profile` flag. Tdarr is a media library manager; MuxMaster is a per-file encoding tool that aims to make every decision correctly so you don't have to inspect the output.
+
+MuxMaster sits in the gap between "I know ffmpeg well enough to do this manually" and "I need a server-based automation platform." It's a single Bash script with only three required packages (ffmpeg, jq, and bc) and optional tooling for Dolby Vision and subtitle OCR. It understands Dolby Vision at the RPU level, and its profile system encodes the tribal knowledge of what actually works on real hardware into repeatable, overridable presets.
+
+Configuration is where the design philosophy comes together. Most CLI tools expect you to read the source code to learn which variables exist, then hand-build a dotfile from scratch. `muxm --create-config` generates a complete, commented config file pre-seeded with a real profile's values — you start from a working baseline and customize, not from a blank page. Configs cascade through three tiers (system, user, project) so an encoding team can lock organization defaults in `/etc/.muxmrc` while individuals override their preferred CRF or audio settings in `~/.muxmrc` and specific project directories can pin a streaming profile. And `--print-effective-config` shows you the fully resolved result of all those layers *before* you commit to an encode, so you always know exactly what's about to happen.
+
+---
+
 <a id="configuration"></a>
 
 ## ⚙️ Configuration
@@ -396,8 +397,13 @@ Beyond profiles and the core encoding pipeline, `muxm` ships with a set of opera
 - **Dry-Run Mode** – `--dry-run` executes the entire decision pipeline (profile resolution, codec detection, DV identification, audio selection) and prints what it would do, without writing any output files.
 - **JSON Reporting** – `--report-json` generates a machine-readable JSON report alongside the output file, documenting every decision, warning, codec mapping, and stream disposition from the run.
 - **Checksum Verification** – Writes a SHA-256 checksum file for the output to verify integrity after transfer or archival. Enabled by default for `dv-archival`; available for other profiles via `--checksum`.
+- **External Subtitle Discovery** – At startup, `muxm` automatically scans for sidecar subtitle files alongside the source: `.srt`, `.ass`, `.ssa`, `.vtt`, `.sup`, and `.idx`. Common filename conventions are recognized — `movie.en.srt`, `movie.forced.en.srt`, and similar patterns — and discovered tracks are fed into the subtitle pipeline alongside embedded streams, subject to the same language and type filters already in effect. Enabled by default; use `--no-ext-subs` to opt out, or `--ext-subs-dir` to point at a different search directory. See `man muxm` for the full filename convention reference.
 - **Man Page** – `muxm --install-man` installs a full `muxm(1)` manual page with complete flag reference, profile documentation, and examples accessible via `man muxm`.
 - **Tab Completion** – `muxm --install-completions` installs bash/zsh tab completion for all flags, profiles, presets, and config scopes. Completes media file extensions when providing input files.
+- **Live Progress Bar** – During encoding, `muxm` displays a live progress bar showing percentage complete and elapsed time via Unicode block characters (▏▎▍▌▋▊▉█), updated in real-time through a named FIFO. A clean single-line indicator replaces the raw ffmpeg output and clears automatically when the encode finishes.
+- **Disk Space Preflight** – Before starting an encode, `muxm` estimates the required output size and checks that the destination volume has sufficient free space. If the disk is likely to fill during encoding, the run is aborted early with a clear error rather than failing mid-encode and leaving a partial file.
+- **Signal Handling** – `muxm` catches `SIGINT` (Ctrl-C), `SIGTERM`, and `SIGHUP` and performs a clean shutdown: partial output files and temp files are removed, the named FIFO is cleaned up, and a brief summary is printed before exit. No stray temp files left behind.
+- **DEBUG=1 Trace Mode** – Set `DEBUG=1` in your environment (`DEBUG=1 muxm --profile streaming movie.mkv`) to enable verbose trace output. Every major decision point — profile resolution, codec detection, DV identification, stream selection — is logged to stderr, making it straightforward to diagnose unexpected behavior without modifying the script.
 
 ---
 
@@ -471,3 +477,11 @@ If you're using MuxMaster, I'd love to hear about it — what's working, what's 
 ## 👤 Author
 
 Jamey Wicklund ([@TheBluWiz](https://github.com/TheBluWiz))
+
+---
+
+<a id="changelog"></a>
+
+## 📝 Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.

@@ -36,8 +36,7 @@ Apply a named format profile.
 Available profiles:
 .TP
 .B dv\-archival
-Preserve DV + HDR10 + all audio and subtitle tracks (multi\-track, copy
-only). MKV. Commentary/descriptive audio tracks dropped by default.
+Remux\-first archival. DV + HDR10, multi\-track, copy only. MKV. Commentary/descriptive audio tracks dropped by default.
 Audio filterable via
 .BR AUDIO_LANG_PREF " and " AUDIO_KEEP_COMMENTARY ;
 subtitles filterable via
@@ -45,25 +44,24 @@ subtitles filterable via
 Skip if already ideal. JSON report.
 .TP
 .B hdr10\-hq
-Strip DV, keep HDR10. HEVC CRF 17, preset slower. Lossless audio +
-stereo fallback. MKV.
+Strip DV, keep HDR10. CRF 17, lossless audio + stereo fallback. MKV.
 .TP
 .B atv\-directplay\-hq
-Apple TV Direct Play. MP4, HEVC Main10, DV P8.1, E\-AC\-3 audio,
+Apple TV Direct Play. DV\-aware, E\-AC\-3. MP4. HEVC Main10, DV P8.1,
 AAC stereo fallback, burn forced subs.
 .TP
 .B streaming
-Modern HEVC streaming. CRF 20, preset medium, E\-AC\-3 448k, AAC stereo.
-MP4. Targets Plex/Jellyfin on Shield, Fire TV, Roku, smart TVs, web.
+HEVC CRF 20 for Plex/Jellyfin. HDR10, E\-AC\-3. MP4. Preset medium,
+AAC stereo. Targets Shield, Fire TV, Roku, smart TVs, web.
 .TP
 .B animation
-Anime/cartoon optimized. HEVC CRF 16, 10\-bit (even SDR),
+Anime/cartoon. CRF 16, lossless audio, ASS subs. MKV. HEVC 10\-bit (even SDR),
 animation\-tuned x265 (low psy\-rd, adjusted deblock, extra b\-frames),
-lossless audio, multi\-track subs (ASS/SSA + PGS bitmap). MKV.
+multi\-track subs (ASS/SSA + PGS bitmap).
 .TP
 .B universal
-Play anywhere. H.264 SDR (tone\-map HDR), AAC stereo, burn forced subs,
-strip chapters/metadata. MP4.
+H.264 SDR, AAC stereo. Lean, play anywhere. MP4. Tone\-map HDR, burn forced subs,
+strip chapters/metadata.
 .SH COMMON OPTIONS
 .TP
 .BR \-h ", " \-\-help
@@ -297,6 +295,84 @@ OCR backend: pgsrip or sub2srt.
 .TP
 .BR \-\-ocr\-lang " " \fILANG\fR
 OCR language (default: eng).
+.TP
+.BR \-\-no\-ext\-subs
+Disable external subtitle sidecar discovery. When set, muxm ignores any
+subtitle files found alongside the source and uses only embedded streams.
+.TP
+.BR \-\-ext\-subs
+Re\-enable external subtitle sidecar discovery after
+.B \-\-no\-ext\-subs
+(or after a config file sets
+.BR EXT_SUB_ENABLED=0 ).
+Discovery is on by default; this flag is only needed to override an
+explicit disable.
+.TP
+.BR \-\-ext\-subs\-dir " " \fIDIR\fR
+Search
+.I DIR
+for subtitle sidecar files instead of the source file's own directory.
+The directory must exist; muxm exits with status\~11 if it does not.
+.SS External Subtitle Discovery
+muxm automatically scans the source file's directory (or the directory
+given by
+.BR \-\-ext\-subs\-dir )
+for subtitle sidecar files whose basename begins with the source file's
+stem followed by a dot.
+.PP
+Supported sidecar extensions:
+.BR .srt ", " .ass ", " .ssa ", " .vtt ", " .sup ", " .idx
+(\fB.idx\fR requires a matching
+.B .sub
+partner file in the same directory).
+.PP
+.B Filename parsing convention
+.PP
+.in +4n
+.nf
+\fI{stem}\fR[\fI.qualifier\fR\&...]\fI.ext\fR
+.fi
+.in
+.PP
+Qualifiers are the dot\-separated segments between the source stem and the
+file extension, matched case\-insensitively:
+.TP
+.BR forced ", " signs ", " foreign
+Track type is set to
+.BR forced .
+.TP
+.BR sdh ", " hi ", " hearing ", " cc
+Track type is set to
+.BR sdh .
+.TP
+.I "2- or 3-letter alpha code"
+Treated as an ISO\~639 language code and normalised to ISO\~639\-2/T
+(e.g.,
+.BR en " \(-> " eng ,
+.BR es " \(-> " spa ).
+.PP
+Qualifiers not matching any of the above are ignored.
+If no language qualifier is found, the language defaults to
+.BR TAG_LANGUAGE_DEFAULT .
+.PP
+Examples:
+.in +4n
+.nf
+movie.srt            \(-> lang=TAG_LANGUAGE_DEFAULT, type=full
+movie.en.srt         \(-> lang=eng,  type=full
+movie.forced.en.srt  \(-> lang=eng,  type=forced
+movie.en.sdh.srt     \(-> lang=eng,  type=sdh
+movie.fr.forced.sup  \(-> lang=fra,  type=forced
+.fi
+.in
+.PP
+Discovered external subtitles are merged with embedded subtitle streams
+before any filtering takes place.
+They then pass through the same filter pipeline as embedded tracks:
+.BR SUB_LANG_PREF ", " SUB_INCLUDE_FORCED / FULL / SDH ", and " SUB_MAX_TRACKS .
+Using
+.B \-\-no\-subtitles
+suppresses all subtitle processing including external sidecar discovery.
 .SS Multi\-Track Subtitles
 The
 .B dv\-archival
@@ -444,6 +520,14 @@ forced subs. Plays on virtually any device.
 Custom encode without any profile: CRF 18, slow preset, strip all
 subtitles, explicit output filename.
 .TP
+.B muxm \-\-ext\-subs\-dir /media/subs Movie.mkv
+Encode Movie.mkv and pick up subtitle sidecar files from /media/subs
+instead of the same directory as the source.
+.TP
+.B muxm \-\-no\-ext\-subs Movie.mkv
+Encode Movie.mkv using only subtitle tracks embedded in the source;
+ignore any .srt/.ass/.sup files in the same directory.
+.TP
 .B muxm \-\-profile hdr10\-hq \-\-audio\-lossless\-passthrough Movie.mkv
 HDR10 encode keeping lossless audio (TrueHD/DTS\-HD MA) passed through
 instead of transcoding.
@@ -573,6 +657,10 @@ Major variable groups:
 .TP
 .B Multi\-track subtitles (archival)
 .BR SUB_MULTI_TRACK .
+.TP
+.B External subtitle discovery
+.BR EXT_SUB_ENABLED " (default\ 1; set to 0 to disable sidecar discovery),"
+.BR EXT_SUB_DIR " (directory to scan; defaults to source file's directory)."
 .TP
 .B Output / operational
 .BR OUTPUT_EXT ", " KEEP_CHAPTERS ", " STRIP_METADATA ", "

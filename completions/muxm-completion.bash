@@ -34,7 +34,7 @@ _muxm_completions() {
         # Flags that take a free-form value — offer no completion, fall through to files
         --crf|--stereo-bitrate|--threads|-l|--level|--x265-params|\
         --audio-track|--audio-lang-pref|--audio-force-codec|\
-        --max-copy-bitrate|--sub-lang-pref|--ocr-lang)
+        --max-copy-bitrate|--sub-lang-pref|--ocr-lang|--ext-subs-dir)
             COMPREPLY=()
             return ;;
     esac
@@ -78,6 +78,7 @@ _muxm_completions() {
             --sub-preserve-format --no-sub-preserve-format
             --sub-lang-pref --no-sub-sdh --no-subtitles
             --ocr-lang --no-ocr --ocr-tool
+            --ext-subs --no-ext-subs --ext-subs-dir
 
             --skip-video --skip-audio --skip-subs
 

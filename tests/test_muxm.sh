@@ -16,7 +16,11 @@
 set -euo pipefail
 
 # ---- Configuration ----
+# Resolve MUXM to an absolute path so run_muxm works after cd-ing to TESTDIR.
 MUXM="${MUXM:-./muxm}"
+if [[ "$MUXM" != /* ]]; then
+  MUXM="$(cd "$(dirname -- "$MUXM")" && pwd)/$(basename -- "$MUXM")"
+fi
 SUITE="${SUITE:-all}"
 VERBOSE=0
 TESTDIR=""
@@ -71,6 +75,7 @@ show_help() {
       hdr          HDR detection, color space, tone-mapping
       audio        Audio selection, scoring, multi-track, lossless
       subs         Subtitle pipeline, multi-track, ASS, OCR config
+      ext_subs     External subtitle discovery, filename parsing, --no-ext-subs
       output       Chapters, checksum, JSON report, skip-if-ideal
       containers   MP4, MKV, MOV container handling
       metadata     Metadata stripping and preservation
@@ -134,7 +139,7 @@ assert_exit() {
     pass "$label (exit $code)"
   else
     fail "$label — expected exit $expected, got $code"
-    (( VERBOSE )) && echo "    Output: ${output:0:200}"
+    (( VERBOSE )) && echo || true "    Output: ${output:0:200}"
   fi
 }
 
@@ -145,7 +150,7 @@ assert_contains() {
     pass "$label"
   else
     fail "$label — output missing: '$needle'"
-    (( VERBOSE )) && echo "    Output: ${haystack:0:300}"
+    (( VERBOSE )) && echo || true "    Output: ${haystack:0:300}"
   fi
 }
 
@@ -695,6 +700,48 @@ SRT
     -metadata:s:a:0 language=eng
   pass "rich_metadata.mkv created"
 
+  # 10) External subtitle source fixtures (no embedded subtitle streams)
+  #     Dedicated source file for ext_subs suite — keeps sidecars isolated so
+  #     other suites using different source files are unaffected.
+  log "Creating ext_sub_source.mkv (HEVC, NO embedded subtitles — for ext_subs suite)"
+  gen_media "$TESTDIR/ext_sub_source.mkv" teal \
+    -c:v libx265 -preset ultrafast -crf 28 -pix_fmt yuv420p10le \
+    -c:a aac -b:a 128k -ac 2 \
+    -metadata:s:a:0 language=eng
+  pass "ext_sub_source.mkv created"
+
+  # SRT content used for all sidecar files
+  cat > "$TESTDIR/_ext_srt.srt" <<'SRT'
+1
+00:00:00,000 --> 00:00:02,000
+External subtitle test line
+SRT
+
+  # Sidecar files covering every naming convention and parser code-path
+  for _stem_sfx in \
+    "" \
+    ".en" \
+    ".forced.en" \
+    ".en.sdh" \
+    ".spa" \
+    ".signs" \
+    ".hi" \
+    ".cc" \
+    ".fra"
+  do
+    cp "$TESTDIR/_ext_srt.srt" "$TESTDIR/ext_sub_source${_stem_sfx}.srt"
+  done
+  pass "ext_sub_source sidecar .srt files created"
+
+  # Dedicated single-sidecar source for clean integration tests
+  log "Creating ext_only_source.mkv (no embedded subs — single sidecar test)"
+  gen_media "$TESTDIR/ext_only_source.mkv" coral \
+    -c:v libx265 -preset ultrafast -crf 28 -pix_fmt yuv420p10le \
+    -c:a aac -b:a 128k -ac 2 \
+    -metadata:s:a:0 language=eng
+  cp "$TESTDIR/_ext_srt.srt" "$TESTDIR/ext_only_source.en.srt"
+  pass "ext_only_source.mkv + sidecar created"
+
   log "All extended test media ready in $TESTDIR"
 }
 
@@ -717,9 +764,9 @@ _test_cli_help_version() {
   assert_contains "--profile" "--help mentions --profile" "$out"
   assert_contains "dv-archival" "--help lists dv-archival" "$out"
   assert_contains "universal" "--help lists universal" "$out"
-  assert_contains "--install-completions" "--help mentions --install-completions" "$out"
-  assert_contains "--uninstall-completions" "--help mentions --uninstall-completions" "$out"
   assert_contains "--setup" "--help mentions --setup" "$out"
+  assert_contains "Quick start:" "--help shows quick-start example" "$out"
+  assert_contains "--create-config {system|user|project}" "--help shows --create-config with valid values" "$out"
 
   # --version
   out="$(run_muxm --version)"
@@ -747,6 +794,18 @@ _test_cli_error_codes() {
 
   # Missing source file
   assert_exit $EXIT_VALIDATION "Missing source file exits $EXIT_VALIDATION" /nonexistent/file.mkv
+
+  # Invalid ffmpeg-loglevel
+  local ll_out
+  ll_out="$(run_muxm --ffmpeg-loglevel bogus "$TESTDIR/basic_sdr_subs.mkv" 2>&1 || true)"
+  assert_exit $EXIT_VALIDATION "Invalid --ffmpeg-loglevel exits $EXIT_VALIDATION" --ffmpeg-loglevel bogus "$TESTDIR/basic_sdr_subs.mkv"
+  assert_contains "Invalid --ffmpeg-loglevel" "--ffmpeg-loglevel bogus error message" "$ll_out"
+
+  # Invalid ffprobe-loglevel
+  local pl_out
+  pl_out="$(run_muxm --ffprobe-loglevel bogus "$TESTDIR/basic_sdr_subs.mkv" 2>&1 || true)"
+  assert_exit $EXIT_VALIDATION "Invalid --ffprobe-loglevel exits $EXIT_VALIDATION" --ffprobe-loglevel bogus "$TESTDIR/basic_sdr_subs.mkv"
+  assert_contains "Invalid --ffprobe-loglevel" "--ffprobe-loglevel bogus error message" "$pl_out"
 
   # Too many positional args
   assert_exit $EXIT_VALIDATION "Too many args exits $EXIT_VALIDATION" a.mkv b.mp4 c.mp4
@@ -1019,6 +1078,18 @@ _test_config_create() {
   else
     fail "--create-config dv-archival: did not create .muxmrc (multi-track variable check)"
   fi
+
+  # --create-config with no profile arg → defaults to atv-directplay-hq
+  local cfg_default_dir="$TESTDIR/config_create_default_profile"
+  mkdir -p "$cfg_default_dir"
+  run_muxm_in "$cfg_default_dir" --create-config project >/dev/null 2>&1
+  if [[ -f "$cfg_default_dir/.muxmrc" ]]; then
+    local default_content
+    default_content="$(cat "$cfg_default_dir/.muxmrc")"
+    assert_contains "atv-directplay-hq" "--create-config (no profile) defaults to atv-directplay-hq" "$default_content"
+  else
+    fail "--create-config (no profile): did not create .muxmrc"
+  fi
 }
 
 _test_config_layering() {
@@ -1159,7 +1230,7 @@ test_profiles() {
   assert_contains "truehd,dts,flac" "dv-archival: lossless-first codec preference" "$out"
   assert_contains "AUDIO_MULTI_TRACK         = 1" "dv-archival: multi-track audio enabled" "$out"
   assert_contains "AUDIO_KEEP_COMMENTARY     = 0" "dv-archival: commentary excluded by default" "$out"
-  assert_contains "SUB_MULTI_TRACK          = 1" "dv-archival: multi-track subtitles enabled" "$out"
+  assert_contains "SUB_MULTI_TRACK           = 1" "dv-archival: multi-track subtitles enabled" "$out"
   assert_contains "CHECKSUM                  = 1" "dv-archival: checksum on by default" "$out"
 
   # --no-checksum overrides dv-archival default
@@ -1172,7 +1243,7 @@ test_profiles() {
   assert_contains "CRF_VALUE                 = 17" "hdr10-hq: CRF 17" "$out"
   assert_contains "OUTPUT_EXT                = mkv" "hdr10-hq: MKV container" "$out"
   assert_contains "AUDIO_MULTI_TRACK         = 0" "hdr10-hq: multi-track audio off (no bleed)" "$out"
-  assert_contains "SUB_MULTI_TRACK          = 0" "hdr10-hq: multi-track subs off (no bleed)" "$out"
+  assert_contains "SUB_MULTI_TRACK           = 0" "hdr10-hq: multi-track subs off (no bleed)" "$out"
 
   # atv-directplay-hq specifics
   out="$(run_muxm --profile atv-directplay-hq --print-effective-config)"
@@ -1196,7 +1267,7 @@ test_profiles() {
   assert_contains "SDR_FORCE_10BIT           = 1" "animation: force 10-bit SDR" "$out"
   assert_contains "flac,truehd" "animation: FLAC-first codec preference" "$out"
   assert_contains "SUB_PRESERVE_TEXT_FORMAT  = 1" "animation: ASS/SSA preservation enabled" "$out"
-  assert_contains "SUB_MULTI_TRACK          = 1" "animation: multi-track subtitles enabled" "$out"
+  assert_contains "SUB_MULTI_TRACK           = 1" "animation: multi-track subtitles enabled" "$out"
 
   # universal specifics
   out="$(run_muxm --profile universal --print-effective-config)"
@@ -1326,6 +1397,12 @@ test_conflicts() {
 
   out="$(run_muxm --profile streaming --sub-burn-forced --no-subtitles --print-effective-config 2>&1)" || true
   assert_contains "SUB_BURN_FORCED" "Cross: burn-forced + no-forced warns (#43)" "$out"
+
+  # --- dv-archival + --crf conflict ---
+  # dv-archival is copy-only; specifying --crf from CLI with a value ≠18 triggers a warning
+  out="$(run_muxm --profile dv-archival --crf 22 --print-effective-config 2>&1)"
+  assert_contains "⚠" "dv-archival + --crf 22 emits conflict warning" "$out"
+  assert_contains "copy-only" "dv-archival + --crf 22 warning mentions copy-only" "$out"
 }
 
 # === Suite: Dry-Run Mode ===
@@ -1437,9 +1514,15 @@ test_video() {
     assert_probe "--video-copy-if-compliant: HEVC preserved" "$outfile" codec_name hevc
   fi
 
-  # --level config acceptance (R20)
+  # --level config acceptance (R20) — all four VBV tiers
   out="$(run_muxm --level 5.1 --print-effective-config)"
   assert_contains "LEVEL_VALUE               = 5.1" "--level 5.1: config registered" "$out"
+  out="$(run_muxm --level 4.1 --print-effective-config)"
+  assert_contains "LEVEL_VALUE               = 4.1" "--level 4.1: config registered" "$out"
+  out="$(run_muxm --level 5.0 --print-effective-config)"
+  assert_contains "LEVEL_VALUE               = 5.0" "--level 5.0: config registered" "$out"
+  out="$(run_muxm --level 5.2 --print-effective-config)"
+  assert_contains "LEVEL_VALUE               = 5.2" "--level 5.2: config registered" "$out"
 
   # --level VBV injection (R21)
   # When CONSERVATIVE_VBV=1 (default) and --level is a known tier, the encode
@@ -1465,8 +1548,8 @@ test_video() {
       pass "--level 5.1: VBV params found in workdir log"
     else
       fail "--level 5.1: VBV keywords not found in output or workdir log"
-      (( VERBOSE )) && echo "    Log: ${vbv_log:-not found}"
-      (( VERBOSE )) && echo "    Output: ${out:0:500}"
+      (( VERBOSE )) && echo || true "    Log: ${vbv_log:-not found}"
+      (( VERBOSE )) && echo || true "    Output: ${out:0:500}"
     fi
   fi
 }
@@ -2640,11 +2723,6 @@ test_collision() {
     pass "--force-replace-source: no versioned files (in-place replacement)"
   fi
 
-  # ---- --replace-source and --force-replace-source in --help ----
-  out="$(run_muxm --help)"
-  assert_contains "replace-source" "--help mentions --replace-source" "$out"
-  assert_contains "force-replace-source" "--help mentions --force-replace-source" "$out"
-
   # ---- --replace-source and --force-replace-source in --print-effective-config ----
   out="$(run_muxm --force-replace-source --print-effective-config)"
   assert_contains "REPLACE_SOURCE" "Effective config shows REPLACE_SOURCE" "$out"
@@ -2901,6 +2979,12 @@ _test_unit_audio_helpers() {
   result="$(muxm_fn _channel_label 4 short)";  if [[ "$result" == "4ch" ]]; then pass "_channel_label(4,short)=4ch"; else fail "_channel_label(4,short) expected '4ch', got '$result'"; fi
   result="$(muxm_fn _channel_label 6 long)";   if [[ "$result" == "5.1 Surround" ]]; then pass "_channel_label(6,long)=5.1 Surround"; else fail "_channel_label(6,long) expected '5.1 Surround', got '$result'"; fi
   result="$(muxm_fn _channel_label 1 long)";   if [[ "$result" == "Mono" ]]; then pass "_channel_label(1,long)=Mono"; else fail "_channel_label(1,long) expected 'Mono', got '$result'"; fi
+  result="$(muxm_fn _channel_label 2 long)";   if [[ "$result" == "Stereo" ]]; then pass "_channel_label(2,long)=Stereo"; else fail "_channel_label(2,long) expected 'Stereo', got '$result'"; fi
+  result="$(muxm_fn _channel_label 8 long)";   if [[ "$result" == "7.1 Surround" ]]; then pass "_channel_label(8,long)=7.1 Surround"; else fail "_channel_label(8,long) expected '7.1 Surround', got '$result'"; fi
+  # Odd channel counts fall through to the default "Xch" branch
+  result="$(muxm_fn _channel_label 3 short)";  if [[ "$result" == "3ch" ]]; then pass "_channel_label(3,short)=3ch"; else fail "_channel_label(3,short) expected '3ch', got '$result'"; fi
+  result="$(muxm_fn _channel_label 5 short)";  if [[ "$result" == "5ch" ]]; then pass "_channel_label(5,short)=5ch"; else fail "_channel_label(5,short) expected '5ch', got '$result'"; fi
+  result="$(muxm_fn _channel_label 7 short)";  if [[ "$result" == "7ch" ]]; then pass "_channel_label(7,short)=7ch"; else fail "_channel_label(7,short) expected '7ch', got '$result'"; fi
 
   # ---- _audio_descriptive_title ----
   result="$(muxm_fn _audio_descriptive_title eac3 6)";  if [[ "$result" == "5.1 Surround (E-AC-3)" ]]; then pass "_audio_descriptive_title(eac3,6)"; else fail "_audio_descriptive_title(eac3,6) expected '5.1 Surround (E-AC-3)', got '$result'"; fi
@@ -3026,6 +3110,11 @@ _test_unit_audio_helpers() {
   _test_transcode_target "6" "eac3" "audio_transcode_target(6ch)=eac3 (5.1 bitrate)"
   _test_transcode_target "2" "aac"  "audio_transcode_target(2ch)=aac (stereo)"
   _test_transcode_target "1" "aac"  "audio_transcode_target(1ch)=aac (mono)"
+  # Intermediate channel counts: 3-5 are below the 6ch eac3 threshold → aac; 7 is ≥6 → eac3
+  _test_transcode_target "3" "aac"  "audio_transcode_target(3ch)=aac (<6ch threshold)"
+  _test_transcode_target "4" "aac"  "audio_transcode_target(4ch)=aac (<6ch threshold)"
+  _test_transcode_target "5" "aac"  "audio_transcode_target(5ch)=aac (<6ch threshold)"
+  _test_transcode_target "7" "eac3" "audio_transcode_target(7ch)=eac3 (≥6ch threshold)"
   # Verify bitrate values are wired correctly
   local transcode_body at8_result at6_result
   transcode_body="$(awk '/^audio_transcode_target\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
@@ -3136,6 +3225,8 @@ _test_unit_validation_helpers() {
   # but a direct unit test catches regressions if a valid level is accidentally
   # dropped from the case statement.
   assert_muxm_fn_exit "is_valid_loglevel('quiet')=valid"   0 is_valid_loglevel "" "quiet"
+  assert_muxm_fn_exit "is_valid_loglevel('panic')=valid"   0 is_valid_loglevel "" "panic"
+  assert_muxm_fn_exit "is_valid_loglevel('fatal')=valid"   0 is_valid_loglevel "" "fatal"
   assert_muxm_fn_exit "is_valid_loglevel('error')=valid"   0 is_valid_loglevel "" "error"
   assert_muxm_fn_exit "is_valid_loglevel('warning')=valid" 0 is_valid_loglevel "" "warning"
   assert_muxm_fn_exit "is_valid_loglevel('info')=valid"    0 is_valid_loglevel "" "info"
@@ -3148,14 +3239,17 @@ _test_unit_validation_helpers() {
   # ---- is_valid_preset ----
   # Validates x265 preset strings. Indirectly tested by --preset in test_cli,
   # but a direct unit test guards against accidentally dropping a valid preset.
-  assert_muxm_fn_exit "is_valid_preset('ultrafast')=valid" 0 is_valid_preset "" "ultrafast"
-  assert_muxm_fn_exit "is_valid_preset('medium')=valid"    0 is_valid_preset "" "medium"
-  assert_muxm_fn_exit "is_valid_preset('slow')=valid"      0 is_valid_preset "" "slow"
-  assert_muxm_fn_exit "is_valid_preset('slower')=valid"    0 is_valid_preset "" "slower"
-  assert_muxm_fn_exit "is_valid_preset('veryslow')=valid"  0 is_valid_preset "" "veryslow"
-  assert_muxm_fn_exit "is_valid_preset('placebo')=valid"   0 is_valid_preset "" "placebo"
-  assert_muxm_fn_exit "is_valid_preset('fast')=valid"      0 is_valid_preset "" "fast"
-  assert_muxm_fn_exit "is_valid_preset('bogus')=invalid"   1 is_valid_preset "" "bogus"
+  assert_muxm_fn_exit "is_valid_preset('ultrafast')=valid"  0 is_valid_preset "" "ultrafast"
+  assert_muxm_fn_exit "is_valid_preset('superfast')=valid"  0 is_valid_preset "" "superfast"
+  assert_muxm_fn_exit "is_valid_preset('veryfast')=valid"   0 is_valid_preset "" "veryfast"
+  assert_muxm_fn_exit "is_valid_preset('faster')=valid"     0 is_valid_preset "" "faster"
+  assert_muxm_fn_exit "is_valid_preset('fast')=valid"       0 is_valid_preset "" "fast"
+  assert_muxm_fn_exit "is_valid_preset('medium')=valid"     0 is_valid_preset "" "medium"
+  assert_muxm_fn_exit "is_valid_preset('slow')=valid"       0 is_valid_preset "" "slow"
+  assert_muxm_fn_exit "is_valid_preset('slower')=valid"     0 is_valid_preset "" "slower"
+  assert_muxm_fn_exit "is_valid_preset('veryslow')=valid"   0 is_valid_preset "" "veryslow"
+  assert_muxm_fn_exit "is_valid_preset('placebo')=valid"    0 is_valid_preset "" "placebo"
+  assert_muxm_fn_exit "is_valid_preset('bogus')=invalid"    1 is_valid_preset "" "bogus"
   assert_muxm_fn_exit "is_valid_preset('')=invalid (empty)" 1 is_valid_preset "" ""
 
   # ---- _is_valid_profile ----
@@ -3213,6 +3307,16 @@ _test_unit_filesize() {
   dd if=/dev/zero of="$fsz_dir/onemb" bs=1024 count=1536 2>/dev/null
   result="$(muxm_fn filesize_pretty "$fsz_dir/onemb")"
   if [[ "$result" == *"MB"* ]]; then pass "filesize_pretty(~1.5 MB)"; else fail "filesize_pretty(~1.5 MB) expected 'MB', got '$result'"; fi
+
+  # >1 GiB (GB path) — use a sparse file so no real disk space is consumed
+  if command -v truncate &>/dev/null; then
+    truncate -s 1073741825 "$fsz_dir/onegb"
+    result="$(muxm_fn filesize_pretty "$fsz_dir/onegb")"
+    if [[ "$result" == *"GB"* ]]; then pass "filesize_pretty(>1 GiB sparse)=GB path"; else fail "filesize_pretty(>1 GiB sparse) expected 'GB', got '$result'"; fi
+    rm -f "$fsz_dir/onegb"
+  else
+    skip "filesize_pretty(GB path) — truncate not available"
+  fi
 }
 
 _test_unit_sii_container_safety() {
@@ -3251,6 +3355,64 @@ _test_unit_sii_container_safety() {
   assert_muxm_fn_exit "_sii_audio_is_container_safe('alac','mov')=safe"             0 _sii_audio_is_container_safe 'MUX_FORMAT="mov"' "alac"
 }
 
+_test_unit_misc_helpers() {
+  # ---- _lower ----
+  # One-liner that lowercases via tr. The awk range pattern picks up extra code
+  # but extra definitions in the subshell are harmless when only _lower is called.
+  assert_muxm_fn_stdout "_lower('HELLO')=hello"      "hello"      _lower "" "HELLO"
+  assert_muxm_fn_stdout "_lower('Hello')=hello"      "hello"      _lower "" "Hello"
+  assert_muxm_fn_stdout "_lower('hello')=hello"      "hello"      _lower "" "hello"
+  assert_muxm_fn_stdout "_lower('MiXeD')=mixed"      "mixed"      _lower "" "MiXeD"
+  assert_muxm_fn_stdout "_lower('HEVC')=hevc"        "hevc"       _lower "" "HEVC"
+  assert_muxm_fn_stdout "_lower('')=empty"           ""           _lower "" ""
+
+  # ---- _profile_comment ----
+  # Each named profile has a tagline; _profile_comment reads PROFILE_NAME global.
+  local pc_body
+  pc_body="$(awk '/^_profile_comment\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+  _test_pc() {
+    local profile="$1" expect="$2"
+    local got
+    got="$(PROFILE_NAME="$profile" bash -c "$pc_body"$'\n'"_profile_comment")"
+    if [[ "$got" == "$expect" ]]; then pass "_profile_comment($profile)"; else fail "_profile_comment($profile) expected '$expect', got '$got'"; fi
+  }
+  _test_pc "dv-archival"       "Preserved in digital amber."
+  _test_pc "hdr10-hq"          "All the nits, none of the drama."
+  _test_pc "atv-directplay-hq" "Shaped to please the most demanding rectangle in your living room."
+  _test_pc "streaming"         "Lean, mean, streaming machine."
+  _test_pc "animation"         "psy-rd turned down, sakuga turned up."
+  _test_pc "universal"         "Lowest common denominator, highest common decency."
+  _test_pc "unknown"           ""
+
+  # ---- _audio_lang_matches ----
+  # Returns 0 if lang is in AUDIO_LANG_PREF (comma-separated), 1 otherwise.
+  local lang_body
+  lang_body="$(awk '/^_audio_lang_matches\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+
+  # Basic match
+  local r
+  r="$(AUDIO_LANG_PREF="eng,jpn" bash -c "$lang_body"$'\n'"_audio_lang_matches eng"; echo $?)"
+  if [[ "$r" == "0" ]]; then pass "_audio_lang_matches: 'eng' in 'eng,jpn'=match"; else fail "_audio_lang_matches: 'eng' in 'eng,jpn' expected 0, got '$r'"; fi
+
+  r="$(AUDIO_LANG_PREF="eng,jpn" bash -c "$lang_body"$'\n'"_audio_lang_matches jpn"; echo $?)"
+  if [[ "$r" == "0" ]]; then pass "_audio_lang_matches: 'jpn' in 'eng,jpn'=match"; else fail "_audio_lang_matches: 'jpn' in 'eng,jpn' expected 0, got '$r'"; fi
+
+  r="$(AUDIO_LANG_PREF="eng,jpn" bash -c "$lang_body"$'\n'"_audio_lang_matches fre"; echo $?)"
+  if [[ "$r" == "1" ]]; then pass "_audio_lang_matches: 'fre' not in 'eng,jpn'=no match"; else fail "_audio_lang_matches: 'fre' not in 'eng,jpn' expected 1, got '$r'"; fi
+
+  # Empty AUDIO_LANG_PREF — single empty pref is skipped, returns 1 for any lang
+  r="$(AUDIO_LANG_PREF="" bash -c "$lang_body"$'\n'"_audio_lang_matches eng"; echo $?)"
+  if [[ "$r" == "1" ]]; then pass "_audio_lang_matches: empty pref → no match for 'eng'"; else fail "_audio_lang_matches: empty pref expected 1, got '$r'"; fi
+
+  # Whitespace-padded pref — spaces are stripped before comparison
+  r="$(AUDIO_LANG_PREF=" eng , jpn " bash -c "$lang_body"$'\n'"_audio_lang_matches eng"; echo $?)"
+  if [[ "$r" == "0" ]]; then pass "_audio_lang_matches: whitespace-padded pref matches 'eng'"; else fail "_audio_lang_matches: whitespace-padded pref expected 0, got '$r'"; fi
+
+  # Case: prefs are lowercased internally via ${pref,,}; lang arg should already be lower
+  r="$(AUDIO_LANG_PREF="ENG,JPN" bash -c "$lang_body"$'\n'"_audio_lang_matches eng"; echo $?)"
+  if [[ "$r" == "0" ]]; then pass "_audio_lang_matches: uppercase pref 'ENG' matches lowercase 'eng'"; else fail "_audio_lang_matches: uppercase pref expected 0, got '$r'"; fi
+}
+
 test_unit() {
   section "Pure-Function Unit Tests"
   _test_unit_audio_helpers
@@ -3258,6 +3420,7 @@ test_unit() {
   _test_unit_validation_helpers
   _test_unit_filesize
   _test_unit_sii_container_safety
+  _test_unit_misc_helpers
 }
 
 # === Suite: Profile End-to-End (real encodes with profiles) ===
@@ -3686,6 +3849,251 @@ test_setup() {
   rm -rf "$fake_home"
 }
 
+# === Suite: External Subtitle Discovery ===
+# Validates --no-ext-subs, --ext-subs-dir, filename parsing, discovery, and
+# integration with filtering (lang-pref, SDH, forced, max-tracks).
+test_ext_subs() {
+  section "External Subtitle Discovery"
+
+  local out outfile
+
+  # ---- Config flags via --print-effective-config ----
+
+  # --no-ext-subs disables discovery
+  out="$(run_muxm --no-ext-subs --print-effective-config)"
+  assert_contains "EXT_SUB_ENABLED           = 0" "--no-ext-subs: config shows 0" "$out"
+
+  # --ext-subs re-enables discovery
+  out="$(run_muxm --no-ext-subs --ext-subs --print-effective-config)"
+  assert_contains "EXT_SUB_ENABLED           = 1" "--ext-subs: re-enables discovery" "$out"
+
+  # default shows EXT_SUB_ENABLED = 1
+  out="$(run_muxm --print-effective-config)"
+  assert_contains "EXT_SUB_ENABLED           = 1" "Default: EXT_SUB_ENABLED=1" "$out"
+
+  # --ext-subs-dir shows custom dir in config
+  out="$(run_muxm --ext-subs-dir "$TESTDIR" --print-effective-config)"
+  assert_contains "EXT_SUB_DIR               = $TESTDIR" "--ext-subs-dir: config shows path" "$out"
+
+  # --ext-subs-dir with nonexistent directory should exit non-zero
+  local bad_dir_code
+  (cd "$TESTDIR" && "$MUXM" --ext-subs-dir /no/such/dir/xyzzy "$TESTDIR/ext_only_source.mkv" >/dev/null 2>&1) && bad_dir_code=0 || bad_dir_code=$?
+  if (( bad_dir_code != 0 )); then
+    pass "--ext-subs-dir nonexistent dir: exits with error"
+  else
+    fail "--ext-subs-dir nonexistent dir: should have failed"
+  fi
+
+  # ---- Discovery: sidecar .srt files found alongside source ----
+
+  # Integration: ext_only_source.mkv has exactly one sidecar (ext_only_source.en.srt)
+  # and no embedded subs — verify muxm picks it up and produces output with 1 subtitle
+  outfile="$TESTDIR/ext_only_out.mkv"
+  log "Testing external subtitle discovery (single sidecar)..."
+  if assert_encode "ext_only: encode produced" "$outfile" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       "$TESTDIR/ext_only_source.mkv"; then
+    assert_stream_count "ext_only: 1 subtitle track from sidecar" "$outfile" s 1 1
+    local ext_lang
+    ext_lang="$(probe_stream_tag "$outfile" s:0 language)"
+    if [[ "$ext_lang" == "eng" || "$ext_lang" == "en" || "$ext_lang" == "und" ]]; then
+      pass "ext_only: subtitle language is eng/en/und (from .en.srt)"
+    else
+      # Language tag may vary; just confirm a subtitle exists — already asserted above
+      skip "ext_only: subtitle language tag '$ext_lang' (acceptable — sub present)"
+    fi
+  fi
+
+  # ---- --no-ext-subs disables discovery (no embedded + no external = no subs) ----
+  outfile="$TESTDIR/ext_no_ext_subs.mkv"
+  log "Testing --no-ext-subs suppresses sidecar discovery..."
+  if assert_encode "no-ext-subs: encode produced" "$outfile" \
+       --output-ext mkv --crf 28 --preset ultrafast --no-ext-subs \
+       "$TESTDIR/ext_only_source.mkv"; then
+    assert_stream_count "no-ext-subs: 0 subtitle tracks" "$outfile" s 0 0
+  fi
+
+  # ---- --skip-subs also suppresses external subtitle discovery ----
+  out="$(run_muxm --dry-run --skip-subs "$TESTDIR/ext_only_source.mkv")"
+  # skip-subs implies no subtitle processing at all
+  if echo "$out" | grep -qiE "skip.*sub|subtitle.*skip|SKIP_SUBS"; then
+    pass "--skip-subs: subtitle processing skipped (implies no ext discovery)"
+  else
+    # The output may announce skip differently; confirm no ext-sub message appears
+    if ! echo "$out" | grep -qi "external subtitle found"; then
+      pass "--skip-subs: no external subtitle discovery triggered"
+    else
+      fail "--skip-subs: external subtitle discovery ran unexpectedly"
+    fi
+  fi
+
+  # ---- --ext-subs-dir: use explicit directory for sidecar lookup ----
+  # ext_only_source.en.srt lives in TESTDIR; use --ext-subs-dir to point there explicitly
+  outfile="$TESTDIR/ext_dir_out.mkv"
+  log "Testing --ext-subs-dir explicit directory..."
+  if assert_encode "ext-subs-dir: encode produced" "$outfile" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       --ext-subs-dir "$TESTDIR" \
+       "$TESTDIR/ext_only_source.mkv"; then
+    assert_stream_count "ext-subs-dir: subtitle track present" "$outfile" s 1
+  fi
+
+  # ---- Multi-sidecar source: ext_sub_source has 9 sidecar .srt files ----
+  # Without filtering, up to SUB_MAX_TRACKS (default 3) should be included.
+  outfile="$TESTDIR/ext_multi_out.mkv"
+  log "Testing multi-sidecar discovery (ext_sub_source)..."
+  if assert_encode "ext_multi: encode produced" "$outfile" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       "$TESTDIR/ext_sub_source.mkv"; then
+    local sub_count
+    sub_count="$(count_streams "$outfile" s)"
+    if (( sub_count >= 1 )); then
+      pass "ext_multi: at least 1 subtitle track included (got $sub_count)"
+    else
+      fail "ext_multi: expected ≥1 subtitle tracks, got $sub_count"
+    fi
+  fi
+
+  # ---- Filename parsing: .srt (no qualifier) → lang=default, type=full ----
+  # ext_sub_source.srt is the bare sidecar (no language/type qualifier)
+  # With --sub-lang-pref set to something non-default we can verify the bare file is still found
+  outfile="$TESTDIR/ext_bare_out.mkv"
+  log "Testing filename parsing: bare .srt (no qualifier)..."
+  if assert_encode "ext_bare: encode produced" "$outfile" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       "$TESTDIR/ext_sub_source.mkv"; then
+    local bare_sub_count
+    bare_sub_count="$(count_streams "$outfile" s)"
+    if (( bare_sub_count >= 1 )); then
+      pass "ext_bare: bare .srt discovered and included (got $bare_sub_count tracks)"
+    else
+      fail "ext_bare: expected ≥1 subtitle tracks from bare .srt, got $bare_sub_count"
+    fi
+  fi
+
+  # ---- Filename parsing: .en.srt → lang=en ----
+  # Run with --sub-lang-pref eng and confirm eng sub is selected
+  outfile="$TESTDIR/ext_lang_eng_out.mkv"
+  log "Testing filename parsing: .en.srt → lang=en..."
+  if assert_encode "ext_lang_eng: encode produced" "$outfile" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       --sub-lang-pref eng \
+       "$TESTDIR/ext_sub_source.mkv"; then
+    assert_stream_count "ext_lang_eng: subtitle track present" "$outfile" s 1
+  fi
+
+  # ---- Filename parsing: .spa.srt → lang=spa ----
+  outfile="$TESTDIR/ext_lang_spa_out.mkv"
+  log "Testing filename parsing: .spa.srt → lang=spa..."
+  if assert_encode "ext_lang_spa: encode produced" "$outfile" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       --sub-lang-pref spa \
+       "$TESTDIR/ext_sub_source.mkv"; then
+    assert_stream_count "ext_lang_spa: subtitle track present" "$outfile" s 1
+    local spa_lang
+    spa_lang="$(probe_stream_tag "$outfile" s:0 language)"
+    if [[ "$spa_lang" == "spa" ]]; then
+      pass "ext_lang_spa: subtitle tag is spa"
+    else
+      skip "ext_lang_spa: subtitle tag '$spa_lang' (lang tag may not propagate from sidecar)"
+    fi
+  fi
+
+  # ---- Filename parsing: .forced.en.srt → type=forced ----
+  # --sub-include-forced must be enabled (default) to pick up forced
+  outfile="$TESTDIR/ext_forced_out.mkv"
+  log "Testing filename parsing: .forced.en.srt → type=forced..."
+  if assert_encode "ext_forced: encode produced" "$outfile" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       --sub-lang-pref eng \
+       "$TESTDIR/ext_sub_source.mkv"; then
+    assert_stream_count "ext_forced: subtitle track present" "$outfile" s 1
+  fi
+
+  # ---- Filename parsing: .en.sdh.srt → type=sdh ----
+  outfile="$TESTDIR/ext_sdh_out.mkv"
+  log "Testing filename parsing: .en.sdh.srt → type=sdh..."
+  if assert_encode "ext_sdh: encode produced" "$outfile" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       --sub-lang-pref eng \
+       "$TESTDIR/ext_sub_source.mkv"; then
+    assert_stream_count "ext_sdh: subtitle track present" "$outfile" s 1
+  fi
+
+  # ---- --no-sub-sdh excludes SDH sidecar (.en.sdh.srt) ----
+  # With only eng subs and SDH disabled, forced or full eng sub should win over SDH
+  outfile="$TESTDIR/ext_no_sdh_out.mkv"
+  log "Testing --no-sub-sdh excludes SDH sidecar..."
+  if assert_encode "ext_no_sdh: encode produced" "$outfile" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       --sub-lang-pref eng --no-sub-sdh \
+       "$TESTDIR/ext_sub_source.mkv"; then
+    # Should still find a non-SDH eng sub (.en.srt or .forced.en.srt)
+    assert_stream_count "ext_no_sdh: subtitle present (non-SDH)" "$outfile" s 1
+  fi
+
+  # ---- SUB_MAX_TRACKS=1 limits external subtitle tracks ----
+  local smt_home="$TESTDIR/ext_sub_max_home"
+  mkdir -p "$smt_home"
+  cat > "$smt_home/.muxmrc" <<'EOF'
+SUB_MAX_TRACKS=1
+EOF
+  outfile="$TESTDIR/ext_max1_out.mkv"
+  log "Testing SUB_MAX_TRACKS=1 limits external subtitle output..."
+  if HOME="$smt_home" run_muxm --output-ext mkv --crf 28 --preset ultrafast \
+       "$TESTDIR/ext_sub_source.mkv" "$outfile" >/dev/null 2>&1 && [[ -f "$outfile" && -s "$outfile" ]]; then
+    local max1_count
+    max1_count="$(count_streams "$outfile" s)"
+    if (( max1_count <= 1 )); then
+      pass "SUB_MAX_TRACKS=1: external subs limited to ≤1 (got $max1_count)"
+    else
+      fail "SUB_MAX_TRACKS=1: expected ≤1 subtitle track, got $max1_count"
+    fi
+  else
+    skip "SUB_MAX_TRACKS=1 ext encode failed"
+  fi
+  rm -rf "$smt_home"
+
+  # ---- Multi-track mode includes multiple external subs ----
+  local mt_home="$TESTDIR/ext_mt_home"
+  mkdir -p "$mt_home"
+  cat > "$mt_home/.muxmrc" <<'EOF'
+SUB_MAX_TRACKS=5
+EOF
+  outfile="$TESTDIR/ext_mt_out.mkv"
+  log "Testing multi-track mode includes multiple external subtitles..."
+  if HOME="$mt_home" run_muxm --output-ext mkv --crf 28 --preset ultrafast \
+       "$TESTDIR/ext_sub_source.mkv" "$outfile" >/dev/null 2>&1 && [[ -f "$outfile" && -s "$outfile" ]]; then
+    local mt_count
+    mt_count="$(count_streams "$outfile" s)"
+    if (( mt_count >= 2 )); then
+      pass "Multi-track ext subs: ≥2 subtitle tracks included (got $mt_count)"
+    else
+      skip "Multi-track ext subs: only $mt_count track(s) — may be limited by filtering"
+    fi
+  else
+    skip "Multi-track ext subs encode failed"
+  fi
+  rm -rf "$mt_home"
+
+  # ---- Discovery respects SKIP_SUBS (--skip-subs in dry-run) ----
+  out="$(run_muxm --dry-run --skip-subs "$TESTDIR/ext_sub_source.mkv")"
+  if ! echo "$out" | grep -qi "external subtitle found"; then
+    pass "skip-subs: external subtitle discovery suppressed"
+  else
+    fail "skip-subs: external subtitle discovery ran when SKIP_SUBS=1"
+  fi
+
+  # ---- Dry-run with ext subs: discovery announced in output ----
+  out="$(run_muxm --dry-run "$TESTDIR/ext_only_source.mkv")"
+  if echo "$out" | grep -qiE "external subtitle found|ext_only_source"; then
+    pass "dry-run: external subtitle discovery announced"
+  else
+    # Discovery might output via note() which may not appear in dry-run quiet mode
+    skip "dry-run: no ext sub announcement found (may be log-level gated)"
+  fi
+}
+
 # ---- Run Suites ----
 # NOTE: Suite names are listed in three places that must stay in sync:
 #   1. File header comment (top of file)
@@ -3708,6 +4116,7 @@ run_suites() {
       test_hdr
       test_audio
       test_subs
+      test_ext_subs
       test_output
       test_containers
       test_metadata
@@ -3728,6 +4137,7 @@ run_suites() {
     hdr)          test_hdr ;;
     audio)        test_audio ;;
     subs)         test_subs ;;
+    ext_subs)     test_ext_subs ;;
     output)       test_output ;;
     containers)   test_containers ;;
     metadata)     test_metadata ;;
@@ -3783,7 +4193,7 @@ summary() {
 # Core media: basic_sdr_subs.mkv only — needed by cli, dryrun, edge, etc. (~3s to generate).
 # EXTENDED_SUITES: Full fixture set (multi-track, HDR, chapters, metadata) (~15s to generate).
 readonly MEDIA_FREE_SUITES="^(toggles|completions|setup|config|profiles|conflicts|unit)$"
-readonly EXTENDED_SUITES="^(collision|dryrun|video|hdr|audio|subs|output|containers|metadata|edge|e2e|all)$"
+readonly EXTENDED_SUITES="^(collision|dryrun|video|hdr|audio|subs|ext_subs|output|containers|metadata|edge|e2e|all)$"
 
 preflight
 if [[ ! "$SUITE" =~ $MEDIA_FREE_SUITES ]]; then

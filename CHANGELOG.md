@@ -6,10 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com), and this 
 
 ## [Unreleased]
 
-Internal refactors only — no user-facing behavior changes.
+External subtitle discovery: muxm now automatically finds and muxes sidecar subtitle files (.srt, .ass, .ssa, .vtt, .sup, .idx/.sub) alongside the source. Language codes in filenames are normalized to ISO 639-2/T and routed through all existing subtitle filters. Internal refactors (no user-facing behavior changes) also included.
+
+### Added
+
+- **External subtitle discovery** (`EXT_SUB_ENABLED`) — muxm now automatically discovers sidecar subtitle files (.srt, .ass, .ssa, .vtt, .sup, .idx/.sub) in the same directory as the source file and muxes them as additional subtitle tracks. Filename parsing extracts language codes and type qualifiers (e.g., `movie.en.srt`, `movie.forced.en.srt`, `movie.sdh.srt`). 2-letter ISO 639-1 codes are normalized to 3-letter ISO 639-2/T codes. External subtitles pass through all existing subtitle filters (`SUB_LANG_PREF`, `SUB_INCLUDE_FORCED`/`FULL`/`SDH`, `SUB_MAX_TRACKS`) and work in both single-track and multi-track subtitle modes.
+- **`--ext-subs` / `--no-ext-subs`** — Enable or disable external subtitle discovery at the CLI. `--ext-subs-dir <dir>` overrides the search directory (defaults to the source file's directory).
+- **`EXT_SUB_ENABLED` / `EXT_SUB_DIR`** — New config variables for external subtitle discovery. `--create-config` now includes these variables (commented out) in the generated template for all profiles.
+- **58 new external subtitle discovery tests** in a new `ext_subs` test suite.
+- **~430 additional tests** covering previously untested features (total test count now 702).
 
 ### Changed
 
+- **README** — Added `bc` to the Homebrew dependencies list, highlighted the live progress bar, documented disk space preflight, signal handling, and `DEBUG=1`, added a CHANGELOG link, fixed the table of contents, and moved the "Why MuxMaster?" section after the usage section.
+- **Man page** (`docs/muxm.1` and embedded `--install-man` copy) — Updated with external subtitle discovery documentation covering new flags, config variables, filename parsing behavior, and filter interaction.
 - **Extract `_create_config_prescan()`** — The `--create-config` pre-scan block was extracted into its own function. Its 6 temporary variables are now local to the function, eliminating the corresponding `unset` calls in the main flow.
 - **Extract `_cleanup_workdir()` from `on_exit`** — Deduplicated the WORKDIR removal safety guard into a single helper. `exec 3>&-` is now unconditionally issued before the success/failure branch so FD 3 is always closed in the same place regardless of exit path.
 - **Add `# SYNC:` cross-reference comments to duplicated audio stream display loops** — The parallel loops in `run_audio_pipeline` and `run_audio_pipeline_multi` now carry `# SYNC:` annotations pointing at each other, making the duplication intentional and visible to future editors.
