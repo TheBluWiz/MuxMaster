@@ -1,4 +1,4 @@
-.TH MUXM 1 "2026-03-25" "MuxMaster v1.2.0" "User Commands"
+.TH MUXM 1 "2026-03-26" "MuxMaster v1.2.0" "User Commands"
 .SH NAME
 muxm \- Universal DV/HLG/HDR10/SDR video encoder/muxer with format profiles
 .SH SYNOPSIS
@@ -475,6 +475,23 @@ Generate/suppress JSON report alongside output.
 .BR \-\-checksum " , " \-\-no\-checksum
 Write/suppress SHA\-256 checksum for final output.
 .TP
+.BR \-\-disk\-check " , " \-\-no\-disk\-check
+Enable/disable the smart disk\-space preflight (default: on).
+When enabled, muxm estimates the encoded output size from the source bitrate,
+CRF value, preset, and audio configuration before encoding begins, then warns
+if the available space on the output or temp volume appears insufficient.
+Estimation uses per\-codec CRF\-to\-bitrate\-ratio tables and preset size
+multipliers; a 25\ % safety margin and a floor of
+.BR DISK_FREE_WARN_GB
+are applied.
+Set
+.B DISK_CHECK=0
+in
+.I .muxmrc
+or pass
+.B \-\-no\-disk\-check
+to silence the warning.
+.TP
 .BR \-K ", " \-\-keep\-temp\-always
 Keep temporary workdir even on success.
 .TP
@@ -693,7 +710,8 @@ Major variable groups:
 .B Output / operational
 .BR OUTPUT_EXT ", " KEEP_CHAPTERS ", " STRIP_METADATA ", "
 .BR SKIP_IF_IDEAL ", " REPORT_JSON ", " CHECKSUM ", "
-.BR DISK_FREE_WARN_GB " (default\ 5; warn when free space is below this many GB),"
+.BR DISK_FREE_WARN_GB " (default\ 5; minimum free\-space floor in GB),"
+.BR DISK_CHECK " (default\ 1; set to 0 to disable smart disk preflight),"
 .BR TAG_LANGUAGE_DEFAULT .
 .TP
 .B ffmpeg / ffprobe

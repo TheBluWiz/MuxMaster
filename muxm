@@ -193,6 +193,7 @@ declare -i DRY_RUN=0
 declare -i KEEP_TEMP=0
 declare -i KEEP_TEMP_ALWAYS=0
 declare -i DISK_FREE_WARN_GB=5
+declare -i DISK_CHECK=1          # Set to 0 via --no-disk-check to suppress preflight estimation
 
 # ---- ffmpeg/ffprobe UX
 declare -i FFMPEG_HIDE_BANNER=1
@@ -1033,7 +1034,7 @@ _man_target_dir(){
 # <<< embedded man page >>>
 _man_emit(){
   cat <<'MANPAGE_EOF'
-.TH MUXM 1 "2026-03-25" "MuxMaster v1.2.0" "User Commands"
+.TH MUXM 1 "2026-03-26" "MuxMaster v1.2.0" "User Commands"
 .SH NAME
 muxm \- Universal DV/HLG/HDR10/SDR video encoder/muxer with format profiles
 .SH SYNOPSIS
@@ -1510,6 +1511,23 @@ Generate/suppress JSON report alongside output.
 .BR \-\-checksum " , " \-\-no\-checksum
 Write/suppress SHA\-256 checksum for final output.
 .TP
+.BR \-\-disk\-check " , " \-\-no\-disk\-check
+Enable/disable the smart disk\-space preflight (default: on).
+When enabled, muxm estimates the encoded output size from the source bitrate,
+CRF value, preset, and audio configuration before encoding begins, then warns
+if the available space on the output or temp volume appears insufficient.
+Estimation uses per\-codec CRF\-to\-bitrate\-ratio tables and preset size
+multipliers; a 25\ % safety margin and a floor of
+.BR DISK_FREE_WARN_GB
+are applied.
+Set
+.B DISK_CHECK=0
+in
+.I .muxmrc
+or pass
+.B \-\-no\-disk\-check
+to silence the warning.
+.TP
 .BR \-K ", " \-\-keep\-temp\-always
 Keep temporary workdir even on success.
 .TP
@@ -1728,7 +1746,8 @@ Major variable groups:
 .B Output / operational
 .BR OUTPUT_EXT ", " KEEP_CHAPTERS ", " STRIP_METADATA ", "
 .BR SKIP_IF_IDEAL ", " REPORT_JSON ", " CHECKSUM ", "
-.BR DISK_FREE_WARN_GB " (default\ 5; warn when free space is below this many GB),"
+.BR DISK_FREE_WARN_GB " (default\ 5; minimum free\-space floor in GB),"
+.BR DISK_CHECK " (default\ 1; set to 0 to disable smart disk preflight),"
 .BR TAG_LANGUAGE_DEFAULT .
 .TP
 .B ffmpeg / ffprobe
@@ -2009,6 +2028,7 @@ _muxm_completions() {
             --skip-if-ideal --no-skip-if-ideal
             --report-json --no-report-json
             --checksum --no-checksum
+            --disk-check --no-disk-check
             --no-overwrite
             --replace-source --force-replace-source
 
@@ -2696,6 +2716,9 @@ HEADER
   echo "# Warn when free disk space drops below this many GB during encode"
   printf '#DISK_FREE_WARN_GB=5\n'
   echo ""
+  echo "# Enable smart disk space preflight estimation (1 = enabled, 0 = disable with --no-disk-check)"
+  printf '#DISK_CHECK=1\n'
+  echo ""
   echo "# Keep temporary workdir on failure (for debugging)"
   printf '#KEEP_TEMP=0\n'
   echo ""
@@ -3267,6 +3290,8 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1; shift ;;
     --checksum) CHECKSUM=1; shift ;;
     --no-checksum) CHECKSUM=0; shift ;;
+    --disk-check) DISK_CHECK=1; shift ;;
+    --no-disk-check) DISK_CHECK=0; shift ;;
 
     --ffmpeg-loglevel)
       FFMPEG_LOGLEVEL="${2:-}"
@@ -3743,6 +3768,7 @@ Effective config (post config-files + profile + CLI):
   SKIP_IF_IDEAL             = $SKIP_IF_IDEAL
   REPORT_JSON               = $REPORT_JSON
   DRY_RUN                   = $DRY_RUN
+  DISK_CHECK                = $DISK_CHECK
   CHECKSUM                  = $CHECKSUM
   KEEP_TEMP                 = $KEEP_TEMP
   KEEP_TEMP_ALWAYS          = $KEEP_TEMP_ALWAYS
@@ -4081,15 +4107,176 @@ on_exit() {
 trap 'on_exit' EXIT
 
 # ===== Section 19: Disk space preflight =======================================================
+
+# _crf_ratio CODEC CRF — echo output/source bitrate ratio ×1000
+# Used by disk_free_warn to estimate encoded video size from source bitrate.
+_crf_ratio() {
+  local codec="$1"
+  local -i crf="${2:-18}"
+  case "$codec" in
+    libx265)
+      case "$crf" in
+        14) echo 720 ;; 15) echo 600 ;; 16) echo 480 ;; 17) echo 400 ;;
+        18) echo 330 ;; 19) echo 270 ;; 20) echo 220 ;; 21) echo 180 ;;
+        22) echo 160 ;; 23) echo 130 ;; 24) echo 100 ;; 25) echo 85  ;;
+        26) echo 72  ;; 27) echo 58  ;; 28) echo 50  ;;
+        *) (( crf < 14 )) && echo 850 || echo 35 ;;
+      esac ;;
+    libx264)
+      case "$crf" in
+        14) echo 1100 ;; 15) echo 920 ;; 16) echo 780 ;; 17) echo 650 ;;
+        18) echo 550  ;; 19) echo 460 ;; 20) echo 390 ;; 21) echo 330 ;;
+        22) echo 270  ;; 23) echo 230 ;; 24) echo 200 ;; 25) echo 160 ;;
+        26) echo 140  ;; 27) echo 110 ;; 28) echo 100 ;;
+        *) (( crf < 14 )) && echo 1300 || echo 70 ;;
+      esac ;;
+    *) echo 330 ;;  # fallback: x265 CRF 18 equivalent
+  esac
+}
+
+# _preset_multiplier PRESET — echo encode-size multiplier ×1000 relative to medium
+# Faster presets typically produce larger files at the same CRF.
+_preset_multiplier() {
+  case "${1:-medium}" in
+    ultrafast) echo 2000 ;;
+    superfast) echo 1400 ;;
+    veryfast)  echo 1000 ;;
+    faster)    echo 1050 ;;
+    fast)      echo 1050 ;;
+    medium)    echo 1000 ;;
+    slow)      echo 1000 ;;
+    slower)    echo 1000 ;;
+    veryslow)  echo 950  ;;
+    *)         echo 1000 ;;
+  esac
+}
+
+# disk_free_warn — smart disk space preflight
+# Estimates output size from source bitrate + CRF/preset tables, then warns
+# if estimated required space exceeds available space on the output (or temp) volume.
+# Must be called AFTER cache_stream_metadata() so METADATA_CACHE is populated.
+# Set DISK_CHECK=0 (--no-disk-check) to skip entirely.
 disk_free_warn() {
-  local avail_kb
-  # Use POSIX-compliant df -P for portability
+  (( DISK_CHECK )) || return 0
+
+  # ---- Duration (integer seconds, via three-tier cached lookup) ----
+  local -i dur
+  dur="$(_get_source_duration_secs)"
+  (( dur <= 0 )) && dur=1
+
+  # ---- Video estimate ----
+  local -i est_video_bytes=0
+  local vbr_raw
+  vbr_raw="$(_jq_cache -r \
+    '[.streams[] | select(.codec_type=="video")] | .[0].bit_rate // empty' | head -n1 || true)"
+  local -i vbr=0
+  if [[ "$vbr_raw" =~ ^[0-9]+$ ]]; then
+    vbr="$vbr_raw"
+  else
+    # Fall back to container bit_rate (includes audio — still a useful upper bound)
+    local fbr_raw
+    fbr_raw="$(_jq_cache -r '.format.bit_rate // empty' | head -n1 || true)"
+    [[ "$fbr_raw" =~ ^[0-9]+$ ]] && vbr="$fbr_raw"
+  fi
+
+  if (( vbr > 0 )); then
+    if (( VIDEO_COPY_IF_COMPLIANT )); then
+      # Copy mode: output ≈ source size (no CRF reduction)
+      est_video_bytes=$(( (vbr / 8) * dur ))
+    else
+      local -i ratio preset_mult
+      ratio="$(_crf_ratio "$VIDEO_CODEC" "$CRF_VALUE")"
+      preset_mult="$(_preset_multiplier "$PRESET_VALUE")"
+      # All multiplications before any division to avoid integer truncation (SC2017); safe for practical bitrates
+      est_video_bytes=$(( vbr * dur * ratio * preset_mult / 8000000 ))
+    fi
+  fi
+
+  # ---- Audio estimate ----
+  # Multi-track mode: estimate all streams; single-track mode: first stream only (approximation).
+  local -i est_audio_bytes=0
+  local -i n_audio
+  n_audio="$(_audio_stream_count)"
+  if (( n_audio > 0 )); then
+    local -i max_tracks=$n_audio
+    (( AUDIO_MULTI_TRACK )) || max_tracks=1
+    local -i i
+    for (( i=0; i<max_tracks; i++ )); do
+      local a_info a_codec a_channels _a_lang a_bitrate _a_title
+      a_info="$(_audio_stream_info "$i")"
+      IFS=$'\t' read -r a_codec a_channels _a_lang a_bitrate _a_title <<< "$a_info"
+
+      local -i ch=0
+      [[ "$a_channels" =~ ^[0-9]+$ ]] && ch="$a_channels"
+
+      # Passthrough if codec is already a compatible format and no forced transcode
+      local -i is_passthrough=0
+      if [[ -z "${AUDIO_FORCE_CODEC:-}" ]]; then
+        case "${a_codec:-}" in
+          eac3|ac3|aac|dts|truehd|mlp|flac) is_passthrough=1 ;;
+        esac
+      fi
+
+      if (( is_passthrough )); then
+        if [[ "$a_bitrate" =~ ^[0-9]+$ ]] && (( a_bitrate > 0 )); then
+          est_audio_bytes=$(( est_audio_bytes + (a_bitrate / 8) * dur ))
+        elif (( ch > 0 )); then
+          # Estimate from channel count: ~96 kbps per channel
+          est_audio_bytes=$(( est_audio_bytes + ch * 96000 * dur / 8 ))
+        fi
+      else
+        # Transcoding to EAC-3: 64 kbps per channel (conservative)
+        local -i ach=$(( ch > 0 ? ch : 6 ))
+        est_audio_bytes=$(( est_audio_bytes + ach * 64000 * dur / 8 ))
+      fi
+    done
+  fi
+
+  # ---- Total with 25% safety margin and 5 MB subtitle overhead ----
+  local -i sub_overhead=$(( 5 * 1024 * 1024 ))
+  local -i est_total=$(( (est_video_bytes + est_audio_bytes + sub_overhead) * 125 / 100 ))
+
+  # Floor: always require at least DISK_FREE_WARN_GB to be free
+  local -i floor_bytes=$(( DISK_FREE_WARN_GB * 1024 * 1024 * 1024 ))
+  local -i required=$(( est_total > floor_bytes ? est_total : floor_bytes ))
+
+  # Format estimate as X.X GB for display
+  local est_gb
+  est_gb="$(printf '%.1f' "$(echo "scale=2; $required / 1073741824" | bc 2>/dev/null)" 2>/dev/null)" || \
+    est_gb="$(( required / 1024 / 1024 / 1024 ))"
+
+  log "Disk preflight: video_bytes=${est_video_bytes} audio_bytes=${est_audio_bytes}" \
+      "est_total=${est_total} required=${required} (~${est_gb}GB)"
+
+  # ---- Check output volume ----
+  local avail_kb out_dev
   avail_kb="$(df -Pk "$OUT_DIR" 2>/dev/null | awk 'NR==2{print $4}')"
-  if [[ -n "$avail_kb" ]] && (( avail_kb < DISK_FREE_WARN_GB*1024*1024 )); then
-    warn "Less than ~${DISK_FREE_WARN_GB}GB free on output volume ($OUT_DIR). Encode may fail."
+  out_dev="$(df -Pk "$OUT_DIR" 2>/dev/null | awk 'NR==2{print $1}')"
+  if [[ -n "$avail_kb" ]] && (( avail_kb * 1024 < required )); then
+    local avail_gb
+    avail_gb="$(printf '%.1f' "$(echo "scale=2; $avail_kb / 1048576" | bc 2>/dev/null)" 2>/dev/null)" || \
+      avail_gb="$(( avail_kb / 1024 / 1024 ))"
+    warn "Estimated output ~${est_gb}GB but only ${avail_gb}GB free on output volume ($OUT_DIR)."
+    warn "Use --no-disk-check to suppress this warning."
+  fi
+
+  # ---- Check temp volume (only when on a different device than output) ----
+  if [[ -n "${WORKDIR:-}" && -d "${WORKDIR:-}" ]]; then
+    local work_dev
+    work_dev="$(df -Pk "$WORKDIR" 2>/dev/null | awk 'NR==2{print $1}')"
+    if [[ -n "${out_dev:-}" && -n "$work_dev" && "$out_dev" != "$work_dev" ]]; then
+      local work_avail_kb
+      work_avail_kb="$(df -Pk "$WORKDIR" 2>/dev/null | awk 'NR==2{print $4}')"
+      if [[ -n "$work_avail_kb" ]] && (( work_avail_kb * 1024 < required )); then
+        local tmp_avail_gb
+        tmp_avail_gb="$(printf '%.1f' "$(echo "scale=2; $work_avail_kb / 1048576" | bc 2>/dev/null)" 2>/dev/null)" || \
+          tmp_avail_gb="$(( work_avail_kb / 1024 / 1024 ))"
+        warn "Estimated output ~${est_gb}GB but only ${tmp_avail_gb}GB free on temp volume ($WORKDIR)."
+        warn "Use --no-disk-check to suppress this warning."
+      fi
+    fi
   fi
 }
-disk_free_warn
 
 # ===== Section 20: Metadata caching & ffprobe helpers =========================================
 # Cache all stream metadata in one call for performance
@@ -7837,6 +8024,9 @@ main() {
 
   # Cache metadata once for all operations
   cache_stream_metadata
+
+  # Smart disk space preflight — runs here so METADATA_CACHE is available for estimation
+  disk_free_warn
 
   # Validate source contains at least one video stream
   _has_stream video || die 12 "Source file contains no video streams"

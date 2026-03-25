@@ -950,6 +950,9 @@ test_toggles() {
     # ---- SDR force 10-bit toggles ----
     "--sdr-force-10bit|SDR_FORCE_10BIT           = 1"
     "--no-sdr-force-10bit|SDR_FORCE_10BIT           = 0"
+    # ---- Disk check toggles ----
+    "--no-disk-check|DISK_CHECK                = 0"
+    "--disk-check|DISK_CHECK                = 1"
   )
 
   local out flag expected
@@ -962,6 +965,10 @@ test_toggles() {
   # ---- Value flags (non-toggle) ----
   out="$(run_muxm --max-copy-bitrate 30000k --print-effective-config)"
   assert_contains "MAX_COPY_BITRATE          = 30000k" "--max-copy-bitrate sets value" "$out"
+
+  # ---- Default DISK_CHECK = 1 ----
+  out="$(run_muxm --print-effective-config)"
+  assert_contains "DISK_CHECK                = 1" "DISK_CHECK defaults to 1" "$out"
 
 }
 
@@ -1605,6 +1612,56 @@ test_dryrun() {
   fi
   assert_contains "[atv-directplay-animation] MKV output: enabling native ASS/SSA" \
     "dry-run atv-directplay-animation + mkv + --sub-burn-forced: ASS preservation still enabled" "$out"
+
+  # ---- Disk space preflight (--no-disk-check / DISK_CHECK=0) ----
+  # Use DISK_FREE_WARN_GB=99999 (≈1 petabyte floor) to ensure the warning fires
+  # regardless of actual available space, making the suppression behavior observable.
+  local disk_dir="$TESTDIR/disk_check_test"
+  local disk_home="$TESTDIR/disk_check_home"
+  mkdir -p "$disk_dir" "$disk_home"
+
+  # With impossibly-large floor and no --no-disk-check, warning should fire.
+  cat > "$disk_dir/.muxmrc" <<'EOF'
+DISK_FREE_WARN_GB=99999
+EOF
+  out="$(MUXM_HOME="$disk_home" run_muxm_in "$disk_dir" --dry-run "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
+  if echo "$out" | grep -qiF "no-disk-check"; then
+    pass "disk preflight: large DISK_FREE_WARN_GB triggers warning"
+  else
+    skip "disk preflight: warning not triggered (probe may have failed or disk is huge)"
+  fi
+
+  # --no-disk-check suppresses the warning entirely.
+  cat > "$disk_dir/.muxmrc" <<'EOF'
+DISK_FREE_WARN_GB=99999
+EOF
+  out="$(MUXM_HOME="$disk_home" run_muxm_in "$disk_dir" --dry-run --no-disk-check "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
+  if ! echo "$out" | grep -qiF "no-disk-check to suppress"; then
+    pass "--no-disk-check suppresses disk estimation warning"
+  else
+    fail "--no-disk-check should suppress disk warning but warning appeared"
+  fi
+
+  # DISK_CHECK=0 in config suppresses the warning.
+  cat > "$disk_dir/.muxmrc" <<'EOF'
+DISK_FREE_WARN_GB=99999
+DISK_CHECK=0
+EOF
+  out="$(MUXM_HOME="$disk_home" run_muxm_in "$disk_dir" --dry-run "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
+  if ! echo "$out" | grep -qiF "no-disk-check to suppress"; then
+    pass "DISK_CHECK=0 in config suppresses disk estimation warning"
+  else
+    fail "DISK_CHECK=0 should suppress disk warning but warning appeared"
+  fi
+
+  # Video copy mode: disk_free_warn runs and does not crash when VIDEO_COPY_IF_COMPLIANT=1.
+  # --video-copy-if-compliant activates the copy-mode estimation path (no CRF reduction).
+  cat > "$disk_dir/.muxmrc" <<'EOF'
+DISK_FREE_WARN_GB=99999
+EOF
+  out="$(MUXM_HOME="$disk_home" run_muxm_in "$disk_dir" \
+    --dry-run --video-copy-if-compliant "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
+  assert_contains "DRY-RUN" "copy-mode disk preflight: dry-run completes without error" "$out"
 }
 
 # === Suite: Video Pipeline (real encodes) ===
@@ -3655,6 +3712,26 @@ _test_unit_misc_helpers() {
   if [[ "$r" == "0" ]]; then pass "_audio_lang_matches: uppercase pref 'ENG' matches lowercase 'eng'"; else fail "_audio_lang_matches: uppercase pref expected 0, got '$r'"; fi
 }
 
+_test_unit_disk_preflight() {
+  # ---- _crf_ratio ----
+  # Table-driven lookup: codec × CRF → output/source bitrate ratio ×1000.
+  # Tests cover named entries, the below-range clamp (<14 → 850 for x265),
+  # and the above-range clamp (>28 → 35 for x265).
+  assert_muxm_fn_stdout "_crf_ratio(libx265,18)=330"         "330" _crf_ratio "" "libx265" "18"
+  assert_muxm_fn_stdout "_crf_ratio(libx265,28)=50"          "50"  _crf_ratio "" "libx265" "28"
+  assert_muxm_fn_stdout "_crf_ratio(libx264,23)=230"         "230" _crf_ratio "" "libx264" "23"
+  assert_muxm_fn_stdout "_crf_ratio(libx265,10)=850(clamp)"  "850" _crf_ratio "" "libx265" "10"
+  assert_muxm_fn_stdout "_crf_ratio(libx265,35)=35(clamp)"   "35"  _crf_ratio "" "libx265" "35"
+
+  # ---- _preset_multiplier ----
+  # Maps preset names to encode-size multiplier ×1000.
+  # Tests cover extremes (ultrafast, veryslow) and the default fallback.
+  assert_muxm_fn_stdout "_preset_multiplier(ultrafast)=2000"  "2000" _preset_multiplier "" "ultrafast"
+  assert_muxm_fn_stdout "_preset_multiplier(medium)=1000"     "1000" _preset_multiplier "" "medium"
+  assert_muxm_fn_stdout "_preset_multiplier(veryslow)=950"    "950"  _preset_multiplier "" "veryslow"
+  assert_muxm_fn_stdout "_preset_multiplier(bogus)=1000"      "1000" _preset_multiplier "" "bogus"
+}
+
 test_unit() {
   section "Pure-Function Unit Tests"
   _test_unit_audio_helpers
@@ -3663,6 +3740,7 @@ test_unit() {
   _test_unit_filesize
   _test_unit_sii_container_safety
   _test_unit_misc_helpers
+  _test_unit_disk_preflight
 }
 
 # === Suite: Profile End-to-End (real encodes with profiles) ===

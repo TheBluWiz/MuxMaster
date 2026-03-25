@@ -90,6 +90,7 @@ _muxm_completions() {
             --skip-if-ideal --no-skip-if-ideal
             --report-json --no-report-json
             --checksum --no-checksum
+            --disk-check --no-disk-check
             --no-overwrite
             --replace-source --force-replace-source
 

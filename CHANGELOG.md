@@ -4,7 +4,9 @@ All notable changes to MuxMaster will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com), and this project adheres to [Semantic Versioning](https://semver.org).
 
-## [1.2.0] - 2026-03-25
+## [1.2.0] - 2026-03-26
+
+Smart disk space preflight: `disk_free_warn` now estimates expected output size from source video bitrate, CRF, codec, preset, audio tracks, and duration instead of using a static free-space floor. Adds `--no-disk-check` / `--disk-check` to suppress or re-enable the check at the CLI.
 
 External subtitle discovery: muxm now automatically finds and muxes sidecar subtitle files (.srt, .ass, .ssa, .vtt, .sup, .idx/.sub) alongside the source. Language codes in filenames are normalized to ISO 639-2/T and routed through all existing subtitle filters. Internal refactors (no user-facing behavior changes) also included.
 
@@ -16,6 +18,9 @@ New profile `atv-directplay-animation`: combines `atv-directplay-hq` ATV Direct 
 
 ### Added
 
+- **Smart disk-space preflight** — `disk_free_warn()` now estimates encoded output size before encoding begins rather than just checking a fixed free-space floor. Estimation uses per-codec CRF-to-bitrate-ratio tables (`_crf_ratio`, with a baked-in 1.3× light grain pessimism factor) and preset-size multipliers (`_preset_multiplier`). When `VIDEO_COPY_IF_COMPLIANT=1`, the source video bitrate is used directly (no CRF reduction). Audio estimation uses source bitrate for passthrough codecs (eac3, ac3, aac, dts, truehd, mlp, flac) and 64 kbps × channel-count for transcode targets. A 5 MB subtitle overhead and a 1.25× safety margin are applied. `DISK_FREE_WARN_GB` acts as a minimum floor. Both the output volume and the temp/workdir volume (when on a separate device from output) are checked. Warning messages now include `Use --no-disk-check to suppress this warning.`
+- **`--disk-check` / `--no-disk-check`** — Enable or disable the smart disk preflight at the CLI. `DISK_CHECK=0` in `.muxmrc` has the same effect. Registered in `--print-effective-config`, `--create-config` template, tab completions, and man page.
+- **`DISK_CHECK`** config variable (default `1`) — controls the smart disk preflight. Added to `--print-effective-config` output under `[Pipeline Control]` and to the `--create-config` generated template.
 - **External subtitle discovery** (`EXT_SUB_ENABLED`) — muxm now automatically discovers sidecar subtitle files (.srt, .ass, .ssa, .vtt, .sup, .idx/.sub) in the same directory as the source file and muxes them as additional subtitle tracks. Filename parsing extracts language codes and type qualifiers (e.g., `movie.en.srt`, `movie.forced.en.srt`, `movie.sdh.srt`). 2-letter ISO 639-1 codes are normalized to 3-letter ISO 639-2/T codes. External subtitles pass through all existing subtitle filters (`SUB_LANG_PREF`, `SUB_INCLUDE_FORCED`/`FULL`/`SDH`, `SUB_MAX_TRACKS`) and work in both single-track and multi-track subtitle modes.
 - **`--ext-subs` / `--no-ext-subs`** — Enable or disable external subtitle discovery at the CLI. `--ext-subs-dir <dir>` overrides the search directory (defaults to the source file's directory).
 - **`EXT_SUB_ENABLED` / `EXT_SUB_DIR`** — New config variables for external subtitle discovery. `--create-config` now includes these variables (commented out) in the generated template for all profiles.
@@ -37,6 +42,8 @@ New profile `atv-directplay-animation`: combines `atv-directplay-hq` ATV Direct 
 
 ### Changed
 
+- **`disk_free_warn` call moved** — The function is now called inside `main()` after `cache_stream_metadata()`, so it uses the already-populated `METADATA_CACHE` (via `_jq_cache`, `_get_source_duration_secs`, and `_audio_stream_info`) without re-probing the source file.
+- **GB display format** — Available and estimated disk space in preflight warnings is now shown with one decimal place (e.g. `3.4GB`) instead of truncated integer GB.
 - **README** — Added `bc` to the Homebrew dependencies list, highlighted the live progress bar, documented disk space preflight, signal handling, and `DEBUG=1`, added a CHANGELOG link, fixed the table of contents, and moved the "Why MuxMaster?" section after the usage section.
 - **Man page** (`docs/muxm.1` and embedded `--install-man` copy) — Updated with external subtitle discovery documentation covering new flags, config variables, filename parsing behavior, and filter interaction. This release additionally adds `--sub-sole-ext-fallback` / `--no-sub-sole-ext-fallback` flag documentation and `SUB_SOLE_EXT_FALLBACK` to the configuration variable reference.
 - **Tab completions** (`completions/muxm-completion.bash`) — `--sub-sole-ext-fallback` and `--no-sub-sole-ext-fallback` added to the subtitle flag group. `archive` and `atv-directplay-animation` added to profile completion lists; `dv-archival` removed (deprecated alias no longer advertised).
@@ -51,6 +58,7 @@ New profile `atv-directplay-animation`: combines `atv-directplay-hq` ATV Direct 
 
 ### Tests
 
+- **3 new assertions in `test_dryrun`**: `--no-disk-check` suppresses the warning, `DISK_CHECK=0` in config suppresses the warning, and `--video-copy-if-compliant` (copy mode) completes the disk preflight without error.
 - **24 new test assertions** across 5 suites: `profiles` (CLI override wins over passthrough), `conflicts` (passthrough doesn't fire MKV warning), `dryrun` (passthrough resolution logs, subtitle adjustment for MKV/MP4, CLI override), `containers` (real-encode passthrough MKV→MKV, MP4→MP4, M4V→M4V, AVI→MKV fallback, CLI override), `ext_subs` (sole-external fallback includes/excludes correctly).
 - **2 updated assertions**: `dv-archival` and `atv-directplay-hq` profile tests updated from hardcoded `OUTPUT_EXT` to empty (passthrough).
 
