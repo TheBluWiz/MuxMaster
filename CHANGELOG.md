@@ -4,7 +4,7 @@ All notable changes to MuxMaster will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com), and this project adheres to [Semantic Versioning](https://semver.org).
 
-## [Unreleased]
+## [1.2.0] - 2026-03-25
 
 External subtitle discovery: muxm now automatically finds and muxes sidecar subtitle files (.srt, .ass, .ssa, .vtt, .sup, .idx/.sub) alongside the source. Language codes in filenames are normalized to ISO 639-2/T and routed through all existing subtitle filters. Internal refactors (no user-facing behavior changes) also included.
 
@@ -219,7 +219,7 @@ Initial public release.
 - Structured exit codes for scripting and automation (10 = missing tool, 11 = bad arguments, 12 = corrupt source, 40–43 = pipeline failures)
 - Comprehensive test harness (`test_muxm.sh`) with 18 test suites and ~165 assertions
 
-[Unreleased]: https://github.com/TheBluWiz/MuxMaster/compare/v1.1.0...HEAD
+[1.2.0]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.2.0
 [1.1.0]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.1.0
 [1.0.2]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.0.2
 [1.0.1]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.0.1
