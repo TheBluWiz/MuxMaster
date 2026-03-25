@@ -43,22 +43,22 @@ Profiles are named presets that configure `muxm` for a specific use case in a si
 muxm --profile <n> input.mkv
 ```
 
-| Profile | Goal | Container | Video | Audio | Subtitles | DV |
-| --- | --- | --- | --- | --- | --- | --- |
-| `dv-archival` | Lossless preservation | MKV | Copy (no re-encode) | All tracks, lossless passthrough | Multi-track stream-copy (all types, up to 99) | Preserve |
-| `hdr10-hq` | Max HDR10 quality | MKV | HEVC CRF 17 | Lossless + stereo fallback | Single-track per type, soft subs | Strip |
-| `atv-directplay-hq` | Apple TV Direct Play | MP4 | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | Burn forced; others as mov_text; PGS→OCR | P8.1 auto |
-| `streaming` | Modern HEVC streaming | MP4 | HEVC CRF 20 | E-AC-3 448k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
-| `animation` | Anime/cartoon optimized | MKV | HEVC CRF 16, 10-bit | Lossless + stereo fallback | Multi-track stream-copy (up to 6); preserve ASS/SSA | Strip |
-| `atv-directplay-animation` | Anime for Apple TV Direct Play | MKV/MP4 passthrough | HEVC CRF 16, slower, animation psy params | E-AC-3 (lossless transcoded for ATV) | Multi-track; native ASS/SSA; soft forced (MKV) | Strip |
-| `universal` | Play anywhere | MP4 | H.264 SDR (tone-map HDR) | AAC stereo | Burn forced; export others as external SRT | Strip |
+| Profile | Goal | Video | Audio | Subtitles | DV |
+| --- | --- | --- | --- | --- | --- |
+| `archive` | Lossless preservation | Copy (no re-encode) | All tracks, lossless passthrough | Multi-track stream-copy (all types, up to 99) | Preserve |
+| `hdr10-hq` | Max HDR10 quality | HEVC CRF 17 | Lossless + stereo fallback | Single-track per type, soft subs | Strip |
+| `atv-directplay-hq` | Apple TV Direct Play | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | Burn forced; others as mov_text; PGS→OCR | P8.1 auto |
+| `streaming` | Modern HEVC streaming | HEVC CRF 20 | E-AC-3 448k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
+| `animation` | Anime/cartoon optimized | HEVC CRF 16, 10-bit | Lossless + stereo fallback | Multi-track stream-copy (up to 6); preserve ASS/SSA | Strip |
+| `atv-directplay-animation` | Anime for Apple TV Direct Play | HEVC CRF 16, slower, animation psy params | E-AC-3 (lossless transcoded for ATV) | Multi-track; native ASS/SSA; soft forced (MKV) | Strip |
+| `universal` | Play anywhere | H.264 SDR (tone-map HDR) | AAC stereo | Burn forced; export others as external SRT | Strip |
 
-### `dv-archival` — Dolby Vision Archival
+### `archive` — Lossless Archival
 
-For collectors who want bit-perfect preservation. Copies video without re-encoding, keeps all matching audio and subtitle tracks via lossless stream-copy, and generates a JSON report with SHA-256 checksum. Commentary and descriptive audio tracks are dropped by default. Language filtering is controlled by `AUDIO_LANG_PREF` and `SUB_LANG_PREF` — when empty (the default), all languages pass. Skips processing entirely if the source already matches.
+For collectors who want bit-perfect preservation. Copies video without re-encoding, keeps all matching audio and subtitle tracks via lossless stream-copy, and generates a JSON report with SHA-256 checksum. Always outputs MKV. Commentary and descriptive audio tracks are dropped by default. Language filtering is controlled by `AUDIO_LANG_PREF` and `SUB_LANG_PREF` — when empty (the default), all languages pass. Skips processing entirely if the source already matches.
 
 ```
-muxm --profile dv-archival movie.mkv
+muxm --profile archive movie.mkv
 ```
 
 ### `hdr10-hq` — High Quality HDR10
@@ -79,7 +79,7 @@ muxm --profile atv-directplay-hq movie.mkv
 
 ### `streaming` — Modern HEVC Streaming
 
-Optimized for Plex, Jellyfin, and Emby on modern clients: Shield, Fire TV, Roku Ultra, smart TVs, and web browsers. HEVC CRF 20 with E-AC-3 surround at streaming-friendly bitrates, AAC stereo fallback, and soft subtitles. Strips DV and keeps HDR10. Balances quality with file size.
+Optimized for Plex, Jellyfin, and Emby on modern clients: Shield, Fire TV, Roku Ultra, smart TVs, and web browsers. HEVC CRF 20 with E-AC-3 surround at streaming-friendly bitrates, AAC stereo fallback, and soft subtitles. Always outputs MP4. Strips DV and keeps HDR10. Balances quality with file size.
 
 ```
 muxm --profile streaming movie.mkv
@@ -103,7 +103,7 @@ muxm --profile atv-directplay-animation show.mkv
 
 ### `universal` — Universal Compatibility
 
-Plays on everything: old Rokus, mobile devices, web browsers, non-HDR TVs. Tone-maps HDR to SDR, encodes to H.264, forces AAC stereo audio, burns forced subtitles, exports others as external SRT, and strips chapters and non-essential metadata.
+Plays on everything: old Rokus, mobile devices, web browsers, non-HDR TVs. Tone-maps HDR to SDR, encodes to H.264, forces AAC stereo audio, burns forced subtitles, exports others as external SRT, and strips chapters and non-essential metadata. Always outputs MP4.
 
 ```
 muxm --profile universal movie.mkv
@@ -114,8 +114,8 @@ muxm --profile universal movie.mkv
 Profiles are starting points — every setting can be overridden with CLI flags:
 
 ```
-# Use dv-archival but keep only English and Japanese audio (drops all other languages)
-muxm --profile dv-archival --audio-lang-pref eng,jpn movie.mkv
+# Use archive but keep only English and Japanese audio (drops all other languages)
+muxm --profile archive --audio-lang-pref eng,jpn movie.mkv
 
 # Use hdr10-hq but with a different CRF and no stereo fallback
 muxm --profile hdr10-hq --crf 20 --no-stereo-fallback movie.mkv
@@ -137,13 +137,13 @@ When you run `muxm`, the script executes a multi-stage pipeline that inspects th
 
 **1. Source Inspection.** `muxm` calls ffprobe once and caches the full JSON metadata for the source file. Every subsequent decision — codec detection, color space identification, audio channel layout, subtitle format — reads from this cache rather than re-probing.
 
-**2. Profile Resolution.** Settings are resolved through a layered precedence chain: hardcoded defaults → system config (`/etc/.muxmrc`) → user config (`~/.muxmrc`) → project config (`./.muxmrc`) → profile → CLI flags. Contradictory combinations (like `--profile dv-archival --no-dv`) trigger warnings but never errors — CLI flags always win.
+**2. Profile Resolution.** Settings are resolved through a layered precedence chain: hardcoded defaults → system config (`/etc/.muxmrc`) → user config (`~/.muxmrc`) → project config (`./.muxmrc`) → profile → CLI flags. Contradictory combinations (like `--profile archive --no-dv`) trigger warnings but never errors — CLI flags always win.
 
-**3. Video Pipeline.** The video stage handles the most complexity. It detects Dolby Vision by probing both stream metadata and frame-level side data, then identifies the DV profile (5, 7, or 8) and compatibility ID. For profiles that preserve DV, it extracts the RPU (Reference Processing Unit) via `dovi_tool`, converts between DV profiles when necessary (e.g., Profile 7 dual-layer → Profile 8.1 single-layer), encodes the base layer with x265, and injects the RPU back into the encoded stream. For non-DV profiles, it detects the source color space (BT.2020 PQ, BT.2020 HLG, or BT.709 SDR), sets the matching x265 color parameters and pixel format, and applies tone-mapping when the profile targets SDR output.
+**3. Video Pipeline.** The video stage handles the most complexity. It detects Dolby Vision by probing both stream metadata and frame-level side data, then identifies the DV profile (5, 7, or 8) and compatibility ID. For profiles that preserve DV, it extracts the RPU (Reference Processing Unit) via `dovi_tool`, converts between DV profiles when necessary (e.g., Profile 7 dual-layer → Profile 8.1 single-layer), encodes the base layer with x265, and injects the RPU back into the encoded stream. For non-DV profiles, it detects the source color space (BT.2020 PQ, BT.2020 HLG, or BT.709 SDR), sets the matching x265 or x264 color parameters and pixel format, and applies tone-mapping when the profile targets SDR output.
 
-**4. Audio Pipeline.** Audio track selection operates in one of two modes. In single-track mode (the default for most profiles), `muxm` scores each track based on language match, channel count, surround layout, codec preference, and bitrate — with configurable weights in `.muxmrc` (see `man muxm` for details). The pipeline picks the best available track (honoring `--audio-lang-pref`), decides whether to copy it through or transcode it based on the profile's codec requirements, and optionally generates a stereo AAC fallback track from the surround source. In multi-track mode (`AUDIO_MULTI_TRACK=1`, enabled by `dv-archival`), all tracks that pass the language and commentary filters are stream-copied directly from the source — no scoring, no transcoding, no intermediate files. Commentary and descriptive audio tracks can be excluded via `AUDIO_KEEP_COMMENTARY`. Lossless codecs (TrueHD, DTS-HD MA, FLAC) are passed through untouched when the profile and container support it.
+**4. Audio Pipeline.** Audio track selection operates in one of two modes. In single-track mode (the default for most profiles), `muxm` scores each track based on language match, channel count, surround layout, codec preference, and bitrate — with configurable weights in `.muxmrc` (see `man muxm` for details). The pipeline picks the best available track (honoring `--audio-lang-pref`), decides whether to copy it through or transcode it based on the profile's codec requirements, and optionally generates a stereo AAC fallback track from the surround source. In multi-track mode (`AUDIO_MULTI_TRACK=1`, enabled by `archive`), all tracks that pass the language and commentary filters are stream-copied directly from the source — no scoring, no transcoding, no intermediate files. Commentary and descriptive audio tracks can be excluded via `AUDIO_KEEP_COMMENTARY`. Lossless codecs (TrueHD, DTS-HD MA, FLAC) are passed through untouched when the profile and container support it.
 
-**5. Subtitle Pipeline.** Subtitles are categorized into forced, full, and SDH tracks. In single-track mode (the default for most profiles), `muxm` selects one track per type based on language preference and can exclude SDH tracks. PGS bitmap subtitles are OCR'd to SRT (via `pgsrip` or `sub2srt`) when the output container can't carry them natively. In multi-track mode (`SUB_MULTI_TRACK=1`, enabled by `dv-archival` and `animation`), all tracks that pass the language and type filters are stream-copied from the source — no OCR, no format conversion. Bitmap subtitles (PGS, VobSub) that cannot be muxed into the target container are silently skipped; MKV handles all formats. `SUB_MAX_TRACKS` caps the total number of subtitle streams kept. Text-based subtitles (ASS/SSA) can be preserved in their native format — retaining positioning, fonts, and typesetting — when the output container is MKV (`--sub-preserve-format`), or converted to plain-text SRT for broader compatibility; this applies in both single-track and multi-track modes. Forced subtitles can be burned into the video stream; other tracks can be embedded or exported as external `.srt` files.
+**5. Subtitle Pipeline.** Subtitles are categorized into forced, full, and SDH tracks. In single-track mode (the default for most profiles), `muxm` selects one track per type based on language preference and can exclude SDH tracks. PGS bitmap subtitles are OCR'd to SRT (via `pgsrip` or `sub2srt`) when the output container can't carry them natively. In multi-track mode (`SUB_MULTI_TRACK=1`, enabled by `archive` and `animation`), all tracks that pass the language and type filters are stream-copied from the source — no OCR, no format conversion. Bitmap subtitles (PGS, VobSub) that cannot be muxed into the target container are silently skipped; MKV handles all formats. `SUB_MAX_TRACKS` caps the total number of subtitle streams kept. Text-based subtitles (ASS/SSA) can be preserved in their native format — retaining positioning, fonts, and typesetting — when the output container is MKV (`--sub-preserve-format`), or converted to plain-text SRT for broader compatibility; this applies in both single-track and multi-track modes. Forced subtitles can be burned into the video stream; other tracks can be embedded or exported as external `.srt` files.
 
 **6. Final Mux.** All processed streams are assembled into the target container (MP4, MKV, M4V, or MOV) with correct codec tagging, chapter markers, subtitle disposition flags, and metadata. For Dolby Vision in MP4, `muxm` verifies that the `dvcC`/`dvvC` container signaling record is present via `MP4Box`.
 
@@ -276,7 +276,7 @@ muxm [options] <source> [target.mp4]
 
 | Flag | Description |
 | --- | --- |
-| `--profile NAME` | Apply a format profile (`dv-archival`, `hdr10-hq`, `atv-directplay-hq`, `streaming`, `animation`, `atv-directplay-animation`, `universal`) |
+| `--profile NAME` | Apply a format profile (`archive`, `hdr10-hq`, `atv-directplay-hq`, `streaming`, `animation`, `atv-directplay-animation`, `universal`) |
 | `--dry-run` | Simulate without writing output |
 | `--crf N` | Set video CRF value |
 | `-p, --preset NAME` | x265 encoder preset (e.g., `slow`, `medium`) |
@@ -297,19 +297,6 @@ muxm [options] <source> [target.mp4]
 | `--replace-source` | Replace the original source file (interactive confirmation) |
 | `--force-replace-source` | Replace the original source file (no prompt; scripting-friendly) |
 | `--print-effective-config` | Show resolved config after config file imports |
-
-### Setup & Management
-
-| Flag | Description |
-| --- | --- |
-| `--setup` | Full first-time setup: dependencies, man page, and tab completion |
-| `--install-dependencies` | Install required and optional tools via Homebrew/pipx |
-| `--install-man` | Install the `muxm(1)` manual page |
-| `--install-completions` | Install bash/zsh tab completion |
-| `--uninstall-man` | Remove the installed manual page |
-| `--uninstall-completions` | Remove installed tab completion |
-| `--create-config SCOPE [PROFILE]` | Generate a `.muxmrc` config file (`system`, `user`, or `project`) |
-| `--force-create-config SCOPE [PROFILE]` | Same as `--create-config` but overwrites an existing file |
 
 Run `muxm --help` for the full flag reference.
 
@@ -402,13 +389,13 @@ Beyond profiles and the core encoding pipeline, `muxm` ships with a set of opera
 
 - **Skip-if-Ideal** – Before encoding, `muxm` inspects the source to determine if it already matches the target profile. If it does, the file is linked or copied without re-encoding, saving time and avoiding generation loss. When multi-track audio or subtitle modes are active, the ideal check verifies that every source track would survive the filter — if any would be dropped, the source is not ideal and remuxing proceeds with explicit per-stream maps. Enabled per-profile or via `--skip-if-ideal`.
 - **Collision Handling** – When the derived output filename matches the source (e.g., encoding `movie.mp4` with the default `.mp4` extension), `muxm` auto-versions the output to `movie(1).mp4`, `movie(2).mp4`, etc. instead of failing. Use `--replace-source` for interactive in-place replacement or `--force-replace-source` for scripted workflows.
-- **Conflict Warnings** – Running `--profile dv-archival --no-dv` doesn't error out — it warns you that the combination is contradictory and proceeds with your explicit flags taking precedence. Flags that are incompatible with multi-track modes (e.g., `--audio-track`, `--audio-force-codec`, `--sub-burn-forced`) trigger a graceful demotion: multi-track mode drops to single-track with an informational note, and the explicit CLI flag wins. The tool trusts you but lets you know when something looks wrong.
+- **Conflict Warnings** – Running `--profile archive --no-dv` doesn't error out — it warns you that the combination is contradictory and proceeds with your explicit flags taking precedence. Flags that are incompatible with multi-track modes (e.g., `--audio-track`, `--audio-force-codec`, `--sub-burn-forced`) trigger a graceful demotion: multi-track mode drops to single-track with an informational note, and the explicit CLI flag wins. The tool trusts you but lets you know when something looks wrong.
 - **Dry-Run Mode** – `--dry-run` executes the entire decision pipeline (profile resolution, codec detection, DV identification, audio selection) and prints what it would do, without writing any output files.
 - **JSON Reporting** – `--report-json` generates a machine-readable JSON report alongside the output file, documenting every decision, warning, codec mapping, and stream disposition from the run.
-- **Checksum Verification** – Writes a SHA-256 checksum file for the output to verify integrity after transfer or archival. Enabled by default for `dv-archival`; available for other profiles via `--checksum`.
+- **Checksum Verification** – Writes a SHA-256 checksum file for the output to verify integrity after transfer or archival. Enabled by default for `archive`; available for other profiles via `--checksum`.
 - **External Subtitle Discovery** – At startup, `muxm` automatically scans for sidecar subtitle files alongside the source: `.srt`, `.ass`, `.ssa`, `.vtt`, `.sup`, and `.idx`. Common filename conventions are recognized — `movie.en.srt`, `movie.forced.en.srt`, and similar patterns — and discovered tracks are fed into the subtitle pipeline alongside embedded streams, subject to the same language and type filters already in effect. Enabled by default; use `--no-ext-subs` to opt out, or `--ext-subs-dir` to point at a different search directory. See `man muxm` for the full filename convention reference.
-- **Man Page** – `muxm --install-man` installs a full `muxm(1)` manual page with complete flag reference, profile documentation, and examples accessible via `man muxm`.
-- **Tab Completion** – `muxm --install-completions` installs bash/zsh tab completion for all flags, profiles, presets, and config scopes. Completes media file extensions when providing input files.
+- **Man Page** – A full `muxm(1)` manual page with complete flag reference, profile documentation, and examples, accessible via `man muxm`. See [Installation → Setup Helpers](#installation) for setup commands.
+- **Tab Completion** – bash/zsh tab completion for all flags, profiles, presets, and config scopes. Completes media file extensions when providing input files. See [Installation → Setup Helpers](#installation) for setup commands.
 - **Live Progress Bar** – During encoding, `muxm` displays a live progress bar showing percentage complete and elapsed time via Unicode block characters (▏▎▍▌▋▊▉█), updated in real-time through a named FIFO. A clean single-line indicator replaces the raw ffmpeg output and clears automatically when the encode finishes.
 - **Disk Space Preflight** – Before starting an encode, `muxm` estimates the required output size and checks that the destination volume has sufficient free space. If the disk is likely to fill during encoding, the run is aborted early with a clear error rather than failing mid-encode and leaving a partial file.
 - **Signal Handling** – `muxm` catches `SIGINT` (Ctrl-C), `SIGTERM`, and `SIGHUP` and performs a clean shutdown: partial output files and temp files are removed, the named FIFO is cleaned up, and a brief summary is printed before exit. No stray temp files left behind.
@@ -430,7 +417,7 @@ DV processing requires `dovi_tool` and, for MP4 container signaling, `MP4Box` (g
 Probably not. If the source already matches the target profile (correct codec, container, color space, and audio layout), `muxm` skips the encode and copies/links the file. This is the Skip-if-Ideal feature — it saves time and avoids generation loss. You'll see a message indicating the skip. To force a re-encode, omit `--skip-if-ideal` or override a setting (e.g., `--crf 18`) so the source no longer matches.
 
 **Which profile should I use?**
-If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you want broad device compatibility across Plex/Jellyfin/Emby clients: `streaming`. If you're archiving a disc rip and want all audio and subtitle tracks preserved losslessly: `dv-archival`. If you need it to play on everything including old hardware and phones: `universal`. For anime or cartoons: `animation`. For anime or cartoons that need to direct-play on an Apple TV: `atv-directplay-animation`. For clean HDR10 without DV complexity: `hdr10-hq`. When in doubt, start with `--dry-run` to preview what a profile will do to your file.
+If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you want broad device compatibility across Plex/Jellyfin/Emby clients: `streaming`. If you're archiving a disc rip and want all audio and subtitle tracks preserved losslessly: `archive`. If you need it to play on everything including old hardware and phones: `universal`. For anime or cartoons: `animation`. For anime or cartoons that need to direct-play on an Apple TV: `atv-directplay-animation`. For clean HDR10 without DV complexity: `hdr10-hq`. When in doubt, start with `--dry-run` to preview what a profile will do to your file.
 
 **Can I process a batch of files?**
 `muxm` is a per-file tool by design. For a batch, a simple shell loop works:
