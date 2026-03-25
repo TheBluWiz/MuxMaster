@@ -313,6 +313,23 @@ Search
 .I DIR
 for subtitle sidecar files instead of the source file's own directory.
 The directory must exist; muxm exits with status\~11 if it does not.
+.TP
+.BR \-\-sub\-sole\-ext\-fallback " , " \-\-no\-sub\-sole\-ext\-fallback
+Enable or disable the sole\-sidecar language\-filter bypass (default: enabled).
+When enabled, if the language filter would drop all subtitles but there is
+exactly one external sidecar and zero embedded subtitle streams, that
+sidecar is included regardless of its language tag.
+This handles the common case of a sidecar with no language qualifier
+(tagged
+.B und
+by default) that would otherwise be silently excluded by
+.BR SUB_LANG_PREF .
+Disable with
+.B \-\-no\-sub\-sole\-ext\-fallback
+or by setting
+.B SUB_SOLE_EXT_FALLBACK=0
+in
+.IR .muxmrc .
 .SS External Subtitle Discovery
 muxm automatically scans the source file's directory (or the directory
 given by
@@ -660,7 +677,8 @@ Major variable groups:
 .TP
 .B External subtitle discovery
 .BR EXT_SUB_ENABLED " (default\ 1; set to 0 to disable sidecar discovery),"
-.BR EXT_SUB_DIR " (directory to scan; defaults to source file's directory)."
+.BR EXT_SUB_DIR " (directory to scan; defaults to source file's directory),"
+.BR SUB_SOLE_EXT_FALLBACK " (default\ 1; set to 0 to disable the sole\-sidecar language\-filter bypass)."
 .TP
 .B Output / operational
 .BR OUTPUT_EXT ", " KEEP_CHAPTERS ", " STRIP_METADATA ", "

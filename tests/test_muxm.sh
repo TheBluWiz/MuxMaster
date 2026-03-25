@@ -1228,7 +1228,7 @@ test_profiles() {
   assert_contains "SKIP_IF_IDEAL             = 1" "dv-archival: skip-if-ideal on" "$out"
   assert_contains "REPORT_JSON               = 1" "dv-archival: JSON report on" "$out"
   assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 1" "dv-archival: lossless audio on" "$out"
-  assert_contains "OUTPUT_EXT                = mkv" "dv-archival: MKV container" "$out"
+  assert_contains "OUTPUT_EXT                = " "dv-archival: passthrough container (empty = resolve from source)" "$out"
   assert_contains "truehd,dts,flac" "dv-archival: lossless-first codec preference" "$out"
   assert_contains "AUDIO_MULTI_TRACK         = 1" "dv-archival: multi-track audio enabled" "$out"
   assert_contains "AUDIO_KEEP_COMMENTARY     = 0" "dv-archival: commentary excluded by default" "$out"
@@ -1249,7 +1249,7 @@ test_profiles() {
 
   # atv-directplay-hq specifics
   out="$(run_muxm --profile atv-directplay-hq --print-effective-config)"
-  assert_contains "OUTPUT_EXT                = mp4" "atv-directplay: MP4 container" "$out"
+  assert_contains "OUTPUT_EXT                = " "atv-directplay: passthrough container (empty = resolve from source)" "$out"
   assert_contains "SUB_BURN_FORCED           = 1" "atv-directplay: burn forced subs" "$out"
   assert_contains "SKIP_IF_IDEAL             = 1" "atv-directplay: skip-if-ideal on" "$out"
   assert_contains "MAX_COPY_BITRATE          = 50000k" "atv-directplay: bitrate ceiling" "$out"
@@ -1278,6 +1278,16 @@ test_profiles() {
   assert_contains "KEEP_CHAPTERS             = 0" "universal: chapters stripped" "$out"
   assert_contains "STRIP_METADATA            = 1" "universal: metadata stripped" "$out"
   assert_contains "OUTPUT_EXT                = mp4" "universal: MP4 container" "$out"
+
+  # --- Container passthrough: CLI --output-ext overrides passthrough ---
+  # Passthrough profiles (dv-archival, atv-directplay-hq) set OUTPUT_EXT="" by default.
+  # Passing --output-ext on the CLI sets _OUTPUT_EXT_EXPLICIT=1, skipping passthrough
+  # resolution and leaving OUTPUT_EXT at the CLI-supplied value.
+  out="$(run_muxm --profile dv-archival --output-ext mp4 --print-effective-config)"
+  assert_contains "OUTPUT_EXT                = mp4" "dv-archival + --output-ext mp4: CLI wins over passthrough" "$out"
+
+  out="$(run_muxm --profile atv-directplay-hq --output-ext mp4 --print-effective-config)"
+  assert_contains "OUTPUT_EXT                = mp4" "atv-directplay-hq + --output-ext mp4: CLI wins over passthrough" "$out"
 }
 
 # === Suite: Conflict Warnings ===
@@ -1405,6 +1415,24 @@ test_conflicts() {
   out="$(run_muxm --profile dv-archival --crf 22 --print-effective-config 2>&1)"
   assert_contains "⚠" "dv-archival + --crf 22 emits conflict warning" "$out"
   assert_contains "copy-only" "dv-archival + --crf 22 warning mentions copy-only" "$out"
+
+  # --- Container passthrough: atv passthrough mode does NOT warn about MKV container ---
+  # atv-directplay-hq sets OUTPUT_EXT="" (passthrough); without explicit --output-ext,
+  # _OUTPUT_EXT_EXPLICIT=0 and OUTPUT_EXT is still "" at conflict-check time.
+  # The conflict guard is: [[ "$OUTPUT_EXT" == "mkv" ]] && (( _OUTPUT_EXT_EXPLICIT ))
+  # Both conditions must be true to warn. Passthrough mode fails both → no ⚠.
+  out="$(run_muxm --profile atv-directplay-hq --print-effective-config)"
+  if ! echo "$out" | grep -qiF "⚠"; then
+    pass "atv passthrough mode: no conflict warning (OUTPUT_EXT is empty, not explicitly forced)"
+  else
+    # A warning is acceptable if it's for a different conflict (e.g., unrelated flag).
+    # Only fail if the warning specifically mentions the MKV container.
+    if echo "$out" | grep -qiE "⚠.*mkv|mkv.*⚠|output.ext.*mkv|mkv.*output.ext"; then
+      fail "atv passthrough mode: unexpected MKV container warning fired"
+    else
+      pass "atv passthrough mode: no MKV container warning (other warnings unrelated)"
+    fi
+  fi
 }
 
 # === Suite: Dry-Run Mode ===
@@ -1460,6 +1488,44 @@ test_dryrun() {
   assert_contains "DRY-RUN" "Dry-run dv-archival + multi-subs completes" "$out"
   assert_contains "multi-track" "Dry-run dv-archival multi-subs: announces multi-track mode" "$out"
   assert_contains "keeping" "Dry-run dv-archival multi-subs: subtitle filter summary logged" "$out"
+
+  # ---- Container passthrough resolution (dry-run log messages) ----
+
+  # dv-archival + mkv source: passthrough resolves OUTPUT_EXT=mkv, logs the resolution.
+  out="$(run_muxm --dry-run --profile dv-archival "$TESTDIR/basic_sdr_subs.mkv")"
+  assert_contains "[container-passthrough] Source .mkv" \
+    "dry-run dv-archival + mkv source: passthrough logs mkv resolution" "$out"
+
+  # atv-directplay-hq + mkv source: passthrough → OUTPUT_EXT=mkv → MKV subtitle adjustment fires.
+  # Expect both the passthrough log and the subtitle-adjustment log messages.
+  out="$(run_muxm --dry-run --profile atv-directplay-hq "$TESTDIR/basic_sdr_subs.mkv")"
+  assert_contains "[container-passthrough] Source .mkv" \
+    "dry-run atv + mkv source: passthrough logs mkv resolution" "$out"
+  assert_contains "[atv-directplay-hq] MKV output: disabling forced-sub burning" \
+    "dry-run atv + mkv source: MKV subtitle adjustment fires (SUB_BURN_FORCED→0)" "$out"
+  assert_contains "[atv-directplay-hq] MKV output: enabling native ASS/SSA" \
+    "dry-run atv + mkv source: ASS/SSA preservation enabled" "$out"
+
+  # atv-directplay-hq + mp4 source: passthrough → OUTPUT_EXT=mp4 → NO MKV subtitle adjustment.
+  out="$(run_muxm --dry-run --profile atv-directplay-hq "$TESTDIR/compliant.mp4")"
+  assert_contains "[container-passthrough] Source .mp4" \
+    "dry-run atv + mp4 source: passthrough logs mp4 resolution" "$out"
+  if ! echo "$out" | grep -qF "[atv-directplay-hq] MKV output: disabling forced-sub burning"; then
+    pass "dry-run atv + mp4 source: MKV subtitle adjustment does NOT fire (mp4 passthrough)"
+  else
+    fail "dry-run atv + mp4 source: MKV subtitle adjustment fired unexpectedly for mp4 output"
+  fi
+
+  # atv-directplay-hq + mkv source + --sub-burn-forced: _CLI_SUB_BURN_FORCED=1 →
+  # the "disabling forced-sub burning" branch is skipped, but ASS preservation still fires.
+  out="$(run_muxm --dry-run --profile atv-directplay-hq --sub-burn-forced "$TESTDIR/basic_sdr_subs.mkv")"
+  if ! echo "$out" | grep -qF "[atv-directplay-hq] MKV output: disabling forced-sub burning"; then
+    pass "dry-run atv + mkv + --sub-burn-forced: CLI override respected (no disabling msg)"
+  else
+    fail "dry-run atv + mkv + --sub-burn-forced: disabling msg appeared despite _CLI_SUB_BURN_FORCED=1"
+  fi
+  assert_contains "[atv-directplay-hq] MKV output: enabling native ASS/SSA" \
+    "dry-run atv + mkv + --sub-burn-forced: ASS preservation still enabled regardless" "$out"
 }
 
 # === Suite: Video Pipeline (real encodes) ===
@@ -2465,6 +2531,99 @@ test_containers() {
       pass "--output-ext m4v: container is MP4 family"
     else
       fail "--output-ext m4v: unexpected format=$fmt"
+    fi
+  fi
+
+  # ---- Container passthrough: mkv source → mkv output ----
+  # dv-archival sets OUTPUT_EXT="" (passthrough). Source is .mkv → passthrough resolves
+  # OUTPUT_EXT to "mkv" → MUX_FORMAT=matroska. Output path explicitly named .mkv to
+  # avoid source/output collision on auto-derived names.
+  outfile="$TESTDIR/container_passthrough_mkv.mkv"
+  log "Testing container passthrough: mkv source → mkv output..."
+  if assert_encode "passthrough mkv→mkv: output produced" "$outfile" \
+       --profile dv-archival --preset ultrafast "$TESTDIR/hevc_sdr_51.mkv"; then
+    fmt="$(probe_format "$outfile" format_name)"
+    assert_contains "matroska" "passthrough mkv→mkv: output is Matroska container" "$fmt"
+  fi
+
+  # ---- Container passthrough: mp4 source → mp4 output ----
+  # No profile (default OUTPUT_EXT="mkv")... actually default is mkv, not passthrough.
+  # Use --output-ext "" to trigger passthrough, OR rely on default being mkv.
+  # Better: use default profile + compliant.mp4 with explicit .mp4 output to verify
+  # that a passthrough profile correctly produces an mp4 container from an mp4 source.
+  # We use dv-archival (passthrough profile) + compliant.mp4 source + explicit .mp4 output.
+  outfile="$TESTDIR/container_passthrough_mp4.mp4"
+  log "Testing container passthrough: mp4 source → mp4 output (dv-archival profile)..."
+  if assert_encode "passthrough mp4→mp4: output produced" "$outfile" \
+       --profile dv-archival --preset ultrafast "$TESTDIR/compliant.mp4"; then
+    fmt="$(probe_format "$outfile" format_name)"
+    if echo "$fmt" | grep -qiE "mp4|mov"; then
+      pass "passthrough mp4→mp4: output is MP4/MOV-family container"
+    else
+      fail "passthrough mp4→mp4: unexpected container format='$fmt'"
+    fi
+  fi
+
+  # ---- Container passthrough: m4v source → m4v output ----
+  # Create a minimal .m4v fixture inline; source is mp4-family so passthrough → m4v.
+  local m4v_src="$TESTDIR/passthrough_test.m4v"
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=green:s=160x120:r=24:d=1" \
+    -f lavfi -i "sine=frequency=440:duration=1" \
+    -c:v libx264 -preset ultrafast -crf 28 \
+    -c:a aac -b:a 64k -ac 2 \
+    "$m4v_src" 2>/dev/null
+  if [[ -f "$m4v_src" ]]; then
+    outfile="$TESTDIR/container_passthrough_m4v.m4v"
+    log "Testing container passthrough: m4v source → m4v output..."
+    if assert_encode "passthrough m4v→m4v: output produced" "$outfile" \
+         --profile dv-archival --preset ultrafast "$m4v_src"; then
+      fmt="$(probe_format "$outfile" format_name)"
+      if echo "$fmt" | grep -qiE "mp4|mov|m4v"; then
+        pass "passthrough m4v→m4v: output is MP4/M4V-family container"
+      else
+        fail "passthrough m4v→m4v: unexpected container format='$fmt'"
+      fi
+    fi
+  else
+    skip "passthrough m4v→m4v: could not create m4v fixture"
+  fi
+
+  # ---- Container passthrough: unsupported source extension → mkv fallback ----
+  # Sources with containers that can't be written as output (avi, ts, etc.) fall back
+  # to mkv. Verified via the dry-run log message from the passthrough resolution block.
+  local avi_src="$TESTDIR/passthrough_fallback_test.avi"
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=blue:s=160x120:r=24:d=1" \
+    -f lavfi -i "sine=frequency=440:duration=1" \
+    -c:v libx264 -preset ultrafast -crf 28 \
+    -c:a aac -b:a 64k -ac 2 \
+    "$avi_src" 2>/dev/null
+  if [[ -f "$avi_src" ]]; then
+    local avi_out
+    avi_out="$(run_muxm --dry-run --profile dv-archival "$avi_src")"
+    if echo "$avi_out" | grep -qiE "not supported for output|defaulting to .mkv"; then
+      pass "passthrough fallback: .avi source triggers mkv fallback notice"
+    else
+      assert_contains "container-passthrough" \
+        "passthrough fallback: .avi logs passthrough resolution block" "$avi_out"
+    fi
+  else
+    skip "passthrough fallback .avi test: could not create avi fixture"
+  fi
+
+  # ---- CLI --output-ext overrides container passthrough ----
+  # dv-archival (passthrough profile) + --output-ext mp4 + mkv source → mp4 output.
+  # _OUTPUT_EXT_EXPLICIT=1 skips passthrough resolution, keeping OUTPUT_EXT=mp4.
+  outfile="$TESTDIR/container_cli_override.mp4"
+  log "Testing --output-ext CLI override of passthrough profile..."
+  if assert_encode "passthrough CLI override: --output-ext mp4 wins" "$outfile" \
+       --profile dv-archival --output-ext mp4 --preset ultrafast "$TESTDIR/hevc_sdr_51.mkv"; then
+    fmt="$(probe_format "$outfile" format_name)"
+    if echo "$fmt" | grep -qiE "mp4|mov"; then
+      pass "passthrough CLI override: output is MP4 container (not matroska)"
+    else
+      fail "passthrough CLI override: expected MP4 container, got format='$fmt'"
     fi
   fi
 }
@@ -4092,6 +4251,45 @@ EOF
   else
     # Discovery might output via note() which may not appear in dry-run quiet mode
     skip "dry-run: no ext sub announcement found (may be log-level gated)"
+  fi
+
+  # ---- SUB_SOLE_EXT_FALLBACK: sole sidecar bypasses language filter ----
+  # ext_only_source.mkv has 0 embedded subs and exactly 1 sidecar (ext_only_source.en.srt).
+  # With --sub-lang-pref jpn the sidecar (parsed as eng from ".en.srt") fails the
+  # language filter. SUB_SOLE_EXT_FALLBACK=1 (default) bypasses the filter when there
+  # is exactly 1 external sidecar and 0 embedded streams → subtitle is included.
+  local fallback_out="$TESTDIR/ext_sole_fallback_out.mkv"
+  log "Testing SUB_SOLE_EXT_FALLBACK: sole sidecar bypasses language filter..."
+  if assert_encode "sole-ext-fallback: encode produced" "$fallback_out" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       --sub-lang-pref jpn \
+       "$TESTDIR/ext_only_source.mkv"; then
+    local fallback_scount
+    fallback_scount="$(count_streams "$fallback_out" s)"
+    if (( fallback_scount == 1 )); then
+      pass "sole-ext-fallback: sole sidecar included despite jpn language filter (1 track)"
+    else
+      fail "sole-ext-fallback: expected 1 subtitle track via fallback, got $fallback_scount"
+    fi
+  fi
+
+  # ---- --no-sub-sole-ext-fallback: sole-sidecar bypass disabled ----
+  # Same setup as above but with --no-sub-sole-ext-fallback. The language filter drops
+  # the sidecar (jpn pref, eng sidecar) and the fallback is disabled → 0 subtitle tracks.
+  local no_fallback_out="$TESTDIR/ext_sole_no_fallback_out.mkv"
+  log "Testing --no-sub-sole-ext-fallback: fallback disabled, sidecar excluded..."
+  if assert_encode "no-sole-ext-fallback: encode produced" "$no_fallback_out" \
+       --output-ext mkv --crf 28 --preset ultrafast \
+       --sub-lang-pref jpn \
+       --no-sub-sole-ext-fallback \
+       "$TESTDIR/ext_only_source.mkv"; then
+    local no_fallback_scount
+    no_fallback_scount="$(count_streams "$no_fallback_out" s)"
+    if (( no_fallback_scount == 0 )); then
+      pass "--no-sub-sole-ext-fallback: fallback disabled, sidecar excluded (0 tracks)"
+    else
+      fail "--no-sub-sole-ext-fallback: expected 0 subtitle tracks, got $no_fallback_scount"
+    fi
   fi
 }
 

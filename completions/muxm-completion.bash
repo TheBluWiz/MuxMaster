@@ -79,6 +79,7 @@ _muxm_completions() {
             --sub-lang-pref --no-sub-sdh --no-subtitles
             --ocr-lang --no-ocr --ocr-tool
             --ext-subs --no-ext-subs --ext-subs-dir
+            --sub-sole-ext-fallback --no-sub-sole-ext-fallback
 
             --skip-video --skip-audio --skip-subs
 

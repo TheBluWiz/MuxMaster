@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com), and this 
 
 External subtitle discovery: muxm now automatically finds and muxes sidecar subtitle files (.srt, .ass, .ssa, .vtt, .sup, .idx/.sub) alongside the source. Language codes in filenames are normalized to ISO 639-2/T and routed through all existing subtitle filters. Internal refactors (no user-facing behavior changes) also included.
 
+Container passthrough: `dv-archival` and `atv-directplay-hq` now derive the output container from the source file extension (`mkv→mkv`, `mp4→mp4`) instead of hardcoding it, with a fallback to `.mkv` for unsupported source containers. When `atv-directplay-hq` produces MKV output, it automatically enables native ASS/SSA subtitle preservation and disables forced-subtitle burn-in (both overrideable via CLI flags).
+
 ### Added
 
 - **External subtitle discovery** (`EXT_SUB_ENABLED`) — muxm now automatically discovers sidecar subtitle files (.srt, .ass, .ssa, .vtt, .sup, .idx/.sub) in the same directory as the source file and muxes them as additional subtitle tracks. Filename parsing extracts language codes and type qualifiers (e.g., `movie.en.srt`, `movie.forced.en.srt`, `movie.sdh.srt`). 2-letter ISO 639-1 codes are normalized to 3-letter ISO 639-2/T codes. External subtitles pass through all existing subtitle filters (`SUB_LANG_PREF`, `SUB_INCLUDE_FORCED`/`FULL`/`SDH`, `SUB_MAX_TRACKS`) and work in both single-track and multi-track subtitle modes.
@@ -15,11 +17,23 @@ External subtitle discovery: muxm now automatically finds and muxes sidecar subt
 - **`EXT_SUB_ENABLED` / `EXT_SUB_DIR`** — New config variables for external subtitle discovery. `--create-config` now includes these variables (commented out) in the generated template for all profiles.
 - **58 new external subtitle discovery tests** in a new `ext_subs` test suite.
 - **~430 additional tests** covering previously untested features (total test count now 702).
+- **Container passthrough for `dv-archival` and `atv-directplay-hq`** — Both profiles now set `OUTPUT_EXT=""`, signalling container passthrough. After source validation, the passthrough resolution block (Section 15) derives `OUTPUT_EXT` from the source file extension: `mkv→mkv`, `mp4→mp4`, `m4v→m4v`, `mov→mov`. Sources with unsupported output containers (`.avi`, `.ts`, etc.) fall back to `.mkv` with an informational note. `--output-ext` on the CLI always wins (`_OUTPUT_EXT_EXPLICIT=1` skips the resolution block). `USAGE_SHORT` shows `[target.{src-ext}]` when `OUTPUT_EXT` is empty at parse time.
+- **`atv-directplay-hq` MKV-output subtitle adjustment** — When `atv-directplay-hq` resolves to MKV output, `SUB_BURN_FORCED` is set to `0` (soft subtitles preferred over burn-in) and `SUB_PRESERVE_TEXT_FORMAT` is set to `1` (native ASS/SSA preservation). `--sub-burn-forced` on the CLI prevents the burn-in override; ASS preservation is always enabled for MKV output.
+- **`_OUTPUT_EXT_EXPLICIT` tracking variable** — Set to `1` when `--output-ext` is passed on the CLI, distinguishing "user forced a container" from "container is being resolved from source."
+- **`_CLI_SUB_BURN_FORCED` tracking variable** — Set to `1` when `--sub-burn-forced` is passed on the CLI, preventing the `atv-directplay-hq` MKV subtitle adjustment from overriding an explicit user request.
+- **`SUB_SOLE_EXT_FALLBACK`** — When the language filter drops all subtitle candidates but there is exactly one external sidecar and zero embedded streams, that sidecar is included regardless of its language tag. Enabled by default; disable with `--no-sub-sole-ext-fallback` or `SUB_SOLE_EXT_FALLBACK=0`.
+- **`--sub-sole-ext-fallback` / `--no-sub-sole-ext-fallback`** — CLI flag pair registered in `--print-effective-config`, tab completions, and man page.
+
+### Fixed
+
+- **`(( counter++ ))` from zero exits under bash error handling** — The `SUB_SOLE_EXT_FALLBACK` loop used post-increment from `0`, which evaluates to `0` (false) and triggers `set -e` / ERR trap. Replaced with `counter=$(( counter + 1 ))`.
+- **`atv-directplay-hq` conflict warning false positive for passthrough-to-MKV** — Warning now requires `(( _OUTPUT_EXT_EXPLICIT ))` so it only fires for explicit `--output-ext mkv`. Updated message acknowledges Plex/Infuse MKV Direct Play support.
 
 ### Changed
 
 - **README** — Added `bc` to the Homebrew dependencies list, highlighted the live progress bar, documented disk space preflight, signal handling, and `DEBUG=1`, added a CHANGELOG link, fixed the table of contents, and moved the "Why MuxMaster?" section after the usage section.
-- **Man page** (`docs/muxm.1` and embedded `--install-man` copy) — Updated with external subtitle discovery documentation covering new flags, config variables, filename parsing behavior, and filter interaction.
+- **Man page** (`docs/muxm.1` and embedded `--install-man` copy) — Updated with external subtitle discovery documentation covering new flags, config variables, filename parsing behavior, and filter interaction. This release additionally adds `--sub-sole-ext-fallback` / `--no-sub-sole-ext-fallback` flag documentation and `SUB_SOLE_EXT_FALLBACK` to the configuration variable reference.
+- **Tab completions** (`completions/muxm-completion.bash`) — `--sub-sole-ext-fallback` and `--no-sub-sole-ext-fallback` added to the subtitle flag group.
 - **Extract `_create_config_prescan()`** — The `--create-config` pre-scan block was extracted into its own function. Its 6 temporary variables are now local to the function, eliminating the corresponding `unset` calls in the main flow.
 - **Extract `_cleanup_workdir()` from `on_exit`** — Deduplicated the WORKDIR removal safety guard into a single helper. `exec 3>&-` is now unconditionally issued before the success/failure branch so FD 3 is always closed in the same place regardless of exit path.
 - **Add `# SYNC:` cross-reference comments to duplicated audio stream display loops** — The parallel loops in `run_audio_pipeline` and `run_audio_pipeline_multi` now carry `# SYNC:` annotations pointing at each other, making the duplication intentional and visible to future editors.
@@ -27,6 +41,11 @@ External subtitle discovery: muxm now automatically finds and muxes sidecar subt
 - **Consolidate `printf | sed` calls in `build_x265_params`** — Six separate `printf | sed` subprocess invocations have been merged into a single `sed` call with multiple `-e` expressions, reducing subprocess overhead and centralizing the parameter-sanitization logic.
 - **Eliminate double-scan in `select_best_audio`** — The previous two-pass implementation (one pass to build the score summary, a second to find the best stream) has been merged into a single loop that tracks the running best while accumulating the summary, halving the number of iterations over the stream list.
 - **Replace `wc -w` word counting with pure Bash array expansion** — Three-subprocess chains (`echo | wc | tr`) used to count whitespace-delimited tokens have been replaced with `read -r -a arr` followed by `${#arr[@]}`, eliminating subshells and external process forks for this operation.
+
+### Tests
+
+- **24 new test assertions** across 5 suites: `profiles` (CLI override wins over passthrough), `conflicts` (passthrough doesn't fire MKV warning), `dryrun` (passthrough resolution logs, subtitle adjustment for MKV/MP4, CLI override), `containers` (real-encode passthrough MKV→MKV, MP4→MP4, M4V→M4V, AVI→MKV fallback, CLI override), `ext_subs` (sole-external fallback includes/excludes correctly).
+- **2 updated assertions**: `dv-archival` and `atv-directplay-hq` profile tests updated from hardcoded `OUTPUT_EXT` to empty (passthrough).
 
 ## [1.1.0] - 2026-03-22
 

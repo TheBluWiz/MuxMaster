@@ -93,6 +93,9 @@ MP4BOX_CMD=""            # Path to mp4box/MP4Box binary (detected at runtime)
 # configured, checked in main() after source HDR status is known.
 declare -i _H264_HDR_WARN_PENDING=0
 
+declare -i _OUTPUT_EXT_EXPLICIT=0   # 1 when --output-ext was explicitly passed on the CLI
+declare -i _CLI_SUB_BURN_FORCED=0   # 1 when --sub-burn-forced was explicitly passed on CLI
+
 # Grep pattern for detecting DOVI container-level metadata (dvcC/dvvC box) in
 # ffprobe output. Used by verify_dv_container_record and pre-wrap checks.
 readonly DV_CONTAINER_PATTERN='DOVI configuration record|dv_profile|dv_version'
@@ -173,6 +176,10 @@ declare -i SUB_MULTI_TRACK=0
 # EXT_SUB_DIR:     override search directory (--ext-subs-dir); default: same dir as source
 declare -i EXT_SUB_ENABLED=1
 EXT_SUB_DIR=""
+# When there is exactly one external sidecar subtitle and no embedded subtitle streams,
+# include it regardless of SUB_LANG_PREF. Covers sidecar files with no language qualifier
+# in the filename (tagged 'und'). Disable with --no-sub-sole-ext-fallback.
+declare -i SUB_SOLE_EXT_FALLBACK=1
 
 # ---- Muxing / output
 OUTPUT_EXT="mp4"               # supports mp4|m4v|mov
@@ -1340,6 +1347,27 @@ Search
 .I DIR
 for subtitle sidecar files instead of the source file's own directory.
 The directory must exist; muxm exits with status\~11 if it does not.
+.TP
+.BR \-\-sub\-sole\-ext\-fallback " , " \-\-no\-sub\-sole\-ext\-fallback
+When there is exactly one external sidecar subtitle file and zero embedded
+subtitle streams, include that subtitle regardless of its language tag.
+This handles the common case of a sidecar file with no language qualifier
+in its filename, which is tagged
+.B und
+by default and would otherwise be silently dropped by
+.BR SUB_LANG_PREF .
+Enabled by default.
+Use
+.B \-\-no\-sub\-sole\-ext\-fallback
+(or
+.BR SUB_SOLE_EXT_FALLBACK=0
+in a config file) to disable.
+The
+.BR SUB_INCLUDE_FORCED ,
+.BR SUB_INCLUDE_FULL ,
+and
+.B SUB_INCLUDE_SDH
+type\-exclusion flags are still respected by this fallback.
 .SS External Subtitle Discovery
 muxm automatically scans the source file's directory (or the directory
 given by
@@ -1687,7 +1715,8 @@ Major variable groups:
 .TP
 .B External subtitle discovery
 .BR EXT_SUB_ENABLED " (default\ 1; set to 0 to disable sidecar discovery),"
-.BR EXT_SUB_DIR " (directory to scan; defaults to source file's directory)."
+.BR EXT_SUB_DIR " (directory to scan; defaults to source file's directory),"
+.BR SUB_SOLE_EXT_FALLBACK " (default\ 1; set to 0 to disable the sole\-sidecar language\-filter bypass)."
 .TP
 .B Output / operational
 .BR OUTPUT_EXT ", " KEEP_CHAPTERS ", " STRIP_METADATA ", "
@@ -1962,6 +1991,7 @@ _muxm_completions() {
             --sub-lang-pref --no-sub-sdh --no-subtitles
             --ocr-lang --no-ocr --ocr-tool
             --ext-subs --no-ext-subs --ext-subs-dir
+            --sub-sole-ext-fallback --no-sub-sole-ext-fallback
 
             --skip-video --skip-audio --skip-subs
 
@@ -2809,8 +2839,10 @@ apply_profile_dv_archival() {
   DISABLE_DV=0
   ALLOW_DV_FALLBACK=1
   DV_CONVERT_TO_P81_IF_FAIL=1
-  # Container: auto (keep source extension; default to mkv for broad codec support)
-  OUTPUT_EXT="mkv"
+  # Container: passthrough — keep source container.
+  # Sources with unsupported output containers (avi, ts, etc.) fall back to mkv
+  # via the passthrough resolution block in Section 15.
+  OUTPUT_EXT=""
   # Video: copy, don't re-encode
   VIDEO_COPY_IF_COMPLIANT=1
   VIDEO_CODEC="libx265"
@@ -2877,8 +2909,12 @@ apply_profile_atv_directplay_hq() {
   DISABLE_DV=0
   ALLOW_DV_FALLBACK=1
   DV_CONVERT_TO_P81_IF_FAIL=1
-  # Container: mp4 for ATV Direct Play
-  OUTPUT_EXT="mp4"
+  # Container: passthrough — preserve source container.
+  # mkv sources produce mkv output; mp4 sources produce mp4 output.
+  # Apple TV Direct Play supports both containers for HEVC Main10 + DV P8.1.
+  # When output is mkv, the post-resolution block (Section 15) enables native
+  # ASS subtitle preservation and disables forced-sub burning. See Step 8.
+  OUTPUT_EXT=""
   # Video: prefer copy if compliant; else HEVC Main10
   VIDEO_CODEC="libx265"
   VIDEO_COPY_IF_COMPLIANT=1
@@ -3084,7 +3120,11 @@ _create_config_prescan "$@"
 apply_profile
 
 # ===== Section 12: CLI parsing =================================================================
-USAGE_SHORT="Usage: ${CLI_NAME} [options] <source> [target.${OUTPUT_EXT}]"
+if [[ -n "$OUTPUT_EXT" ]]; then
+  USAGE_SHORT="Usage: ${CLI_NAME} [options] <source> [target.${OUTPUT_EXT}]"
+else
+  USAGE_SHORT="Usage: ${CLI_NAME} [options] <source> [target.{src-ext}]"
+fi
 print_usage(){
   cat <<EOF
 ${APP_NAME} v${VERSION} — ${CLI_NAME}
@@ -3204,7 +3244,7 @@ while [[ $# -gt 0 ]]; do
     --ocr-lang) SUB_OCR_LANG="${2:-}"; shift 2 ;;
     --no-ocr) SUB_ENABLE_OCR=0; shift ;;
     --ocr-tool) SUB_OCR_TOOL="${2:-}"; shift 2 ;;
-    --sub-burn-forced) SUB_BURN_FORCED=1; shift ;;
+    --sub-burn-forced) SUB_BURN_FORCED=1; _CLI_SUB_BURN_FORCED=1; shift ;;
     --no-sub-burn-forced) SUB_BURN_FORCED=0; shift ;;
     --sub-export-external) SUB_EXPORT_EXTERNAL=1; shift ;;
     --no-sub-export-external) SUB_EXPORT_EXTERNAL=0; shift ;;
@@ -3213,6 +3253,8 @@ while [[ $# -gt 0 ]]; do
 
     --no-ext-subs)  EXT_SUB_ENABLED=0; shift ;;
     --ext-subs)     EXT_SUB_ENABLED=1; shift ;;
+    --sub-sole-ext-fallback)    SUB_SOLE_EXT_FALLBACK=1; shift ;;
+    --no-sub-sole-ext-fallback) SUB_SOLE_EXT_FALLBACK=0; shift ;;
     --ext-subs-dir)
       EXT_SUB_DIR="${2:-}"
       [[ -n "$EXT_SUB_DIR" && ! -d "$EXT_SUB_DIR" ]] && die 11 "--ext-subs-dir: directory not found: $EXT_SUB_DIR"
@@ -3222,7 +3264,7 @@ while [[ $# -gt 0 ]]; do
     --skip-audio) SKIP_AUDIO=1; shift ;;
     --skip-subs)  SKIP_SUBS=1;  shift ;;
 
-    --output-ext) OUTPUT_EXT="${2:-}"; shift 2 ;;
+    --output-ext) OUTPUT_EXT="${2:-}"; _OUTPUT_EXT_EXPLICIT=1; shift 2 ;;
     --keep-chapters) KEEP_CHAPTERS=1; shift ;;
     --no-keep-chapters) KEEP_CHAPTERS=0; shift ;;
     --strip-metadata) STRIP_METADATA=1; shift ;;
@@ -3334,10 +3376,13 @@ if [[ -n "${PROFILE_NAME:-}" ]]; then
       ;;
 
     atv-directplay-hq)
+      # Note: SUB_PRESERVE_TEXT_FORMAT for MKV output is set post-resolution (Section 15).
+      # There is no conflict check here for it because OUTPUT_EXT is not yet resolved at this point.
+
       # MKV won’t Direct Play on Apple TV
-      [[ "$OUTPUT_EXT" == "mkv" ]] && \
+      [[ "$OUTPUT_EXT" == "mkv" ]] && (( _OUTPUT_EXT_EXPLICIT )) && \
         _warn_conflict "$PROFILE_NAME" "--output-ext mkv" \
-          "MKV does not Direct Play on Apple TV. Use mp4 for ATV compatibility."
+          "Forcing MKV output. MKV Direct Plays on ATV via Plex/Infuse but not the native TV app."
 
       # MOV is unusual but works
       [[ "$OUTPUT_EXT" == "mov" ]] && \
@@ -3555,6 +3600,7 @@ Effective config (post config-files + profile + CLI):
   SUB_MULTI_TRACK           = $SUB_MULTI_TRACK
   EXT_SUB_ENABLED           = $EXT_SUB_ENABLED
   EXT_SUB_DIR               = ${EXT_SUB_DIR:-<source dir>}
+  SUB_SOLE_EXT_FALLBACK     = $SUB_SOLE_EXT_FALLBACK
 
   [Output / Muxing]
   OUTPUT_EXT                = $OUTPUT_EXT
@@ -3629,7 +3675,7 @@ OUT="${POSITIONALS[1]:-}"
 
 # Validate output extension (security: prevent command injection)
 case "$OUTPUT_EXT" in
-  mp4|m4v|mov|mkv) ;;
+  mp4|m4v|mov|mkv|"") ;;  # "" = container passthrough, resolved below once source is known
   *) die 11 "Invalid OUTPUT_EXT: must be mp4, m4v, mov, or mkv (got: $OUTPUT_EXT)" ;;
 esac
 
@@ -3645,6 +3691,40 @@ SRC_ABS="$(realpath_fallback "$SRC")"
 if [[ "$SRC_ABS" =~ [[:cntrl:]] ]]; then
   die 11 "Source filename contains control characters - potential security risk"
 fi
+
+# ---- Container passthrough resolution -------------------------------------------------------
+# If OUTPUT_EXT is empty (set by a profile or left at default), derive the container from the
+# source file extension. This implements "passthrough" mode: mkv→mkv, mp4→mp4, etc.
+# --output-ext on the CLI always wins (_OUTPUT_EXT_EXPLICIT=1 skips this block).
+if [[ -z "$OUTPUT_EXT" ]] && (( ! _OUTPUT_EXT_EXPLICIT )); then
+  _src_passthrough_ext="$(_lower "${SRC_ABS##*.}")"
+  case "$_src_passthrough_ext" in
+    mp4|m4v|mov|mkv)
+      OUTPUT_EXT="$_src_passthrough_ext"
+      log "[container-passthrough] Source .$_src_passthrough_ext → output .$OUTPUT_EXT"
+      ;;
+    *)
+      OUTPUT_EXT="mkv"
+      note "[container-passthrough] Source container .$_src_passthrough_ext is not supported for output — defaulting to .mkv"
+      ;;
+  esac
+  unset _src_passthrough_ext
+fi
+# ---- End container passthrough resolution ---------------------------------------------------
+
+# ---- atv-directplay-hq: MKV-output subtitle adjustment ------------------------------------
+# When atv-directplay-hq produces MKV output (via passthrough or explicit --output-ext mkv),
+# switch from burned forced subs (MP4-required) to soft subtitles with native ASS preservation.
+# MP4 output path is unchanged: SUB_BURN_FORCED=1, SUB_PRESERVE_TEXT_FORMAT=0.
+if [[ "${PROFILE_NAME:-}" == "atv-directplay-hq" ]] && [[ "$OUTPUT_EXT" == "mkv" ]]; then
+  if (( ! _CLI_SUB_BURN_FORCED )); then
+    SUB_BURN_FORCED=0
+    log "[atv-directplay-hq] MKV output: disabling forced-sub burning (soft subs preferred)."
+  fi
+  SUB_PRESERVE_TEXT_FORMAT=1
+  log "[atv-directplay-hq] MKV output: enabling native ASS/SSA format preservation."
+fi
+# ---- End atv-directplay-hq MKV subtitle adjustment ----------------------------------------
 
 # Determine output path
 if [[ -z "${OUT:-}" ]]; then
@@ -7059,6 +7139,37 @@ build_subtitle_plan(){
         ;;
     esac
   done
+
+  # Sole-external-sub fallback: if the language filter produced no candidates but there is
+  # exactly one external sidecar subtitle and zero embedded subtitle streams, include that
+  # subtitle regardless of its language tag. This handles the common case of a sidecar file
+  # with no language qualifier in its filename (tagged 'und' by default) that would otherwise
+  # be silently dropped by SUB_LANG_PREF. Disable with --no-sub-sole-ext-fallback.
+  if [[ -z "$forced_uidx" && -z "$full_uidx" && -z "$sdh_uidx" ]] \
+     && (( SUB_SOLE_EXT_FALLBACK )) \
+     && (( SUB_INCLUDE_FORCED || SUB_INCLUDE_FULL || SUB_INCLUDE_SDH )); then
+    local _emb_count=0 _ext_count=0 _sole_ext_uidx=""
+    local _j
+    for (( _j=0; _j<${#ALL_SUB_SOURCES[@]}; _j++ )); do
+      if [[ "${ALL_SUB_SOURCES[$_j]}" == embedded:* ]]; then
+        _emb_count=$(( _emb_count + 1 ))
+      else
+        _ext_count=$(( _ext_count + 1 ))
+        _sole_ext_uidx="$_j"
+      fi
+    done
+    if (( _emb_count == 0 && _ext_count == 1 )); then
+      local _sole_stype="${ALL_SUB_TYPES[$_sole_ext_uidx]}"
+      local _sole_lang="${ALL_SUB_LANGS[$_sole_ext_uidx]}"
+      local _sole_name; _sole_name="$(basename -- "${ALL_SUB_SOURCES[$_sole_ext_uidx]#ext:}")"
+      note "[Subs] Sole-external fallback: 1 sidecar, 0 embedded — including $_sole_name [$_sole_lang] (language filter bypassed)."
+      case "$_sole_stype" in
+        forced) (( SUB_INCLUDE_FORCED )) && forced_uidx="$_sole_ext_uidx" ;;
+        sdh)    (( SUB_INCLUDE_SDH    )) && sdh_uidx="$_sole_ext_uidx"    ;;
+        full)   (( SUB_INCLUDE_FULL   )) && full_uidx="$_sole_ext_uidx"   ;;
+      esac
+    fi
+  fi
 
   # Prepare selected subtitles (up to SUB_MAX_TRACKS)
   local p pick_count=0
