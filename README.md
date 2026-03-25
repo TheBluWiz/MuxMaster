@@ -50,6 +50,7 @@ muxm --profile <n> input.mkv
 | `atv-directplay-hq` | Apple TV Direct Play | MP4 | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | Burn forced; others as mov_text; PGS→OCR | P8.1 auto |
 | `streaming` | Modern HEVC streaming | MP4 | HEVC CRF 20 | E-AC-3 448k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
 | `animation` | Anime/cartoon optimized | MKV | HEVC CRF 16, 10-bit | Lossless + stereo fallback | Multi-track stream-copy (up to 6); preserve ASS/SSA | Strip |
+| `atv-directplay-animation` | Anime for Apple TV Direct Play | MKV/MP4 passthrough | HEVC CRF 16, slower, animation psy params | E-AC-3 (lossless transcoded for ATV) | Multi-track; native ASS/SSA; soft forced (MKV) | Strip |
 | `universal` | Play anywhere | MP4 | H.264 SDR (tone-map HDR) | AAC stereo | Burn forced; export others as external SRT | Strip |
 
 ### `dv-archival` — Dolby Vision Archival
@@ -90,6 +91,14 @@ Tuned for animation content: lower psy-rd/psy-rdoq to avoid ringing on hard cel 
 
 ```
 muxm --profile animation movie.mkv
+```
+
+### `atv-directplay-animation` — Anime for Apple TV Direct Play
+
+Combines the animation-tuned encoder settings of the `animation` profile with the Apple TV Direct Play constraints of `atv-directplay-hq`. Encodes at CRF 16 with the `slower` preset and animation-optimized psychovisual parameters (`psy-rd=1.0`, `psy-rdoq=0.5`, `aq-mode=3`) to suppress ringing on hard cel edges and eliminate banding in gradients. Audio is transcoded to E-AC-3 surround for ATV compatibility — lossless codecs (TrueHD, DTS-HD MA, FLAC) that cannot direct-play on Apple TV are re-encoded rather than passed through. All matching subtitle tracks are stream-copied in multi-track mode, with native ASS/SSA preserved when the output is MKV. Forced subtitles are embedded as soft subs in MKV output — no burn-in. Container follows the source: MKV in, MKV out; MP4 in, MP4 out.
+
+```
+muxm --profile atv-directplay-animation show.mkv
 ```
 
 ### `universal` — Universal Compatibility
@@ -267,7 +276,7 @@ muxm [options] <source> [target.mp4]
 
 | Flag | Description |
 | --- | --- |
-| `--profile NAME` | Apply a format profile (`dv-archival`, `hdr10-hq`, `atv-directplay-hq`, `streaming`, `animation`, `universal`) |
+| `--profile NAME` | Apply a format profile (`dv-archival`, `hdr10-hq`, `atv-directplay-hq`, `streaming`, `animation`, `atv-directplay-animation`, `universal`) |
 | `--dry-run` | Simulate without writing output |
 | `--crf N` | Set video CRF value |
 | `-p, --preset NAME` | x265 encoder preset (e.g., `slow`, `medium`) |
@@ -421,7 +430,7 @@ DV processing requires `dovi_tool` and, for MP4 container signaling, `MP4Box` (g
 Probably not. If the source already matches the target profile (correct codec, container, color space, and audio layout), `muxm` skips the encode and copies/links the file. This is the Skip-if-Ideal feature — it saves time and avoids generation loss. You'll see a message indicating the skip. To force a re-encode, omit `--skip-if-ideal` or override a setting (e.g., `--crf 18`) so the source no longer matches.
 
 **Which profile should I use?**
-If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you want broad device compatibility across Plex/Jellyfin/Emby clients: `streaming`. If you're archiving a disc rip and want all audio and subtitle tracks preserved losslessly: `dv-archival`. If you need it to play on everything including old hardware and phones: `universal`. For anime or cartoons: `animation`. For clean HDR10 without DV complexity: `hdr10-hq`. When in doubt, start with `--dry-run` to preview what a profile will do to your file.
+If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you want broad device compatibility across Plex/Jellyfin/Emby clients: `streaming`. If you're archiving a disc rip and want all audio and subtitle tracks preserved losslessly: `dv-archival`. If you need it to play on everything including old hardware and phones: `universal`. For anime or cartoons: `animation`. For anime or cartoons that need to direct-play on an Apple TV: `atv-directplay-animation`. For clean HDR10 without DV complexity: `hdr10-hq`. When in doubt, start with `--dry-run` to preview what a profile will do to your file.
 
 **Can I process a batch of files?**
 `muxm` is a per-file tool by design. For a batch, a simple shell loop works:
