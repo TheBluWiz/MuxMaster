@@ -56,13 +56,14 @@ readonly VERSION="1.1.0"
 # Canonical list of valid profile names (space-separated for compgen/iteration).
 # All profile validation, error messages, completions, and config generators
 # should reference this constant — never hardcode the list elsewhere.
-readonly VALID_PROFILES="dv-archival hdr10-hq atv-directplay-hq streaming animation universal"
+readonly VALID_PROFILES="archive hdr10-hq atv-directplay-hq atv-directplay-animation streaming animation universal"
 
 # _valid_profiles_display — return the profile list comma-separated for user-facing messages.
 _valid_profiles_display(){ echo "${VALID_PROFILES// /, }"; }
 
 # _is_valid_profile — return 0 if $1 is a recognised profile name, 1 otherwise.
-_is_valid_profile(){ [[ " $VALID_PROFILES " == *" $1 "* ]]; }
+# Also accepts the deprecated alias 'dv-archival' (maps to 'archive').
+_is_valid_profile(){ [[ " $VALID_PROFILES " == *" $1 "* ]] || [[ "$1" == "dv-archival" ]]; }
 
 # ===== Section 3: Globals =====================================================================
 declare -a COMPLETED_STEPS=()
@@ -100,7 +101,7 @@ declare -i _CLI_SUB_BURN_FORCED=0   # 1 when --sub-burn-forced was explicitly pa
 # ffprobe output. Used by verify_dv_container_record and pre-wrap checks.
 readonly DV_CONTAINER_PATTERN='DOVI configuration record|dv_profile|dv_version'
 
-# JSON report accumulator (for dv-archival reporting)
+# JSON report accumulator (for archive profile reporting)
 declare -a REPORT_ENTRIES=()
 
 # Skip-if-ideal stream keep-lists (populated by check_skip_if_ideal).
@@ -164,7 +165,7 @@ SUB_OCR_LANG="eng"
 # Only effective when the output container supports it (MKV). Ignored for MP4/MOV.
 declare -i SUB_PRESERVE_TEXT_FORMAT=0
 
-# ---- Multi-track subtitles (dv-archival)
+# ---- Multi-track subtitles (archive profile)
 # Keep all matching subtitle tracks instead of selecting one per type.
 # When enabled, build_subtitle_plan skips single-track selection; subtitle streams
 # are filtered and mapped directly from source in mux_final with -c:s copy.
@@ -211,7 +212,7 @@ declare -i SKIP_SUBS=0
 # ---- Overrides
 AUDIO_TRACK_OVERRIDE=""
 
-# ---- Multi-track audio (dv-archival)
+# ---- Multi-track audio (archive profile)
 # Keep all matching audio tracks instead of selecting one.
 # When enabled, run_audio_pipeline skips single-track scoring; audio streams
 # are filtered and mapped directly from source in mux_final with -c:a copy.
@@ -243,9 +244,9 @@ declare -i KEEP_CHAPTERS=1
 declare -i STRIP_METADATA=0
 # Embed profile tagline in container comment metadata (when a profile is active)
 declare -i PROFILE_COMMENT=1
-# Skip processing entirely if source already matches profile (dv-archival, atv-directplay-hq)
+# Skip processing entirely if source already matches profile (archive, atv-directplay-hq, atv-directplay-animation)
 declare -i SKIP_IF_IDEAL=0
-# Generate JSON report alongside output (dv-archival)
+# Generate JSON report alongside output (archive profile)
 declare -i REPORT_JSON=0
 
 # ===== Section 5: Basic helpers ===============================================================
@@ -1032,7 +1033,7 @@ _man_target_dir(){
 # <<< embedded man page >>>
 _man_emit(){
   cat <<'MANPAGE_EOF'
-.TH MUXM 1 "2026-03-22" "MuxMaster v1.1.0" "User Commands"
+.TH MUXM 1 "2026-03-24" "MuxMaster v1.2.0" "User Commands"
 .SH NAME
 muxm \- Universal DV/HLG/HDR10/SDR video encoder/muxer with format profiles
 .SH SYNOPSIS
@@ -1069,8 +1070,10 @@ Apply a named format profile.
 .\" NOTE: Profile names below must match VALID_PROFILES in muxm (Section 2).
 Available profiles:
 .TP
-.B dv\-archival
-Remux\-first archival. DV + HDR10, multi\-track, copy only. MKV. Commentary/descriptive audio tracks dropped by default.
+.B archive
+Remux\-first archival. DV + HDR10, multi\-track, copy only. Passthrough container
+(MKV sources stay MKV, MP4 sources stay MP4). Commentary/descriptive audio tracks
+dropped by default.
 Audio filterable via
 .BR AUDIO_LANG_PREF " and " AUDIO_KEEP_COMMENTARY ;
 subtitles filterable via
@@ -1081,8 +1084,15 @@ Skip if already ideal. JSON report.
 Strip DV, keep HDR10. CRF 17, lossless audio + stereo fallback. MKV.
 .TP
 .B atv\-directplay\-hq
-Apple TV Direct Play. DV\-aware, E\-AC\-3. MP4. HEVC Main10, DV P8.1,
-AAC stereo fallback, burn forced subs.
+Apple TV Direct Play. DV\-aware, E\-AC\-3. Passthrough container
+(MKV sources stay MKV, MP4 sources stay MP4). HEVC Main10, DV P8.1,
+AAC stereo fallback. Forced subs burned for MP4; soft with native ASS preservation for MKV.
+.TP
+.B atv\-directplay\-animation
+Apple TV Direct Play, animation quality. CRF 16, E\-AC\-3, ASS/SSA + PGS bitmap subs.
+Passthrough container. HEVC 10\-bit (even SDR), animation\-tuned x265,
+multi\-track subs. Lossless audio transcoded to E\-AC\-3 (ATV cannot Direct Play TrueHD/DTS\-HD MA).
+Forced subs burned for MP4; soft with native ASS preservation for MKV.
 .TP
 .B streaming
 HEVC CRF 20 for Plex/Jellyfin. HDR10, E\-AC\-3. MP4. Preset medium,
@@ -1257,7 +1267,7 @@ preferred\-language stereo track beats a foreign surround track. Reduce
 to ~25 to prefer higher channel counts regardless of language.
 .SS Multi\-Track Audio (Archival)
 The
-.B dv\-archival
+.B archive
 profile uses multi\-track mode
 .RB ( AUDIO_MULTI_TRACK=1 ),
 which keeps all audio tracks that pass a subtractive filter instead of
@@ -1270,12 +1280,12 @@ Filters (configured via
 .B AUDIO_LANG_PREF
 When non\-empty, only tracks whose language matches the comma\-separated
 list are kept. When empty (the default for
-.BR dv\-archival ),
+.BR archive ),
 all languages pass.
 .TP
 .B AUDIO_KEEP_COMMENTARY
 When 0 (the
-.B dv\-archival
+.B archive
 default), tracks whose title matches commentary or audio\-description
 keywords are dropped. Set to 1 to keep them.
 .PP
@@ -1349,25 +1359,21 @@ for subtitle sidecar files instead of the source file's own directory.
 The directory must exist; muxm exits with status\~11 if it does not.
 .TP
 .BR \-\-sub\-sole\-ext\-fallback " , " \-\-no\-sub\-sole\-ext\-fallback
-When there is exactly one external sidecar subtitle file and zero embedded
-subtitle streams, include that subtitle regardless of its language tag.
-This handles the common case of a sidecar file with no language qualifier
-in its filename, which is tagged
+Enable or disable the sole\-sidecar language\-filter bypass (default: enabled).
+When enabled, if the language filter would drop all subtitles but there is
+exactly one external sidecar and zero embedded subtitle streams, that
+sidecar is included regardless of its language tag.
+This handles the common case of a sidecar with no language qualifier
+(tagged
 .B und
-by default and would otherwise be silently dropped by
+by default) that would otherwise be silently excluded by
 .BR SUB_LANG_PREF .
-Enabled by default.
-Use
+Disable with
 .B \-\-no\-sub\-sole\-ext\-fallback
-(or
-.BR SUB_SOLE_EXT_FALLBACK=0
-in a config file) to disable.
-The
-.BR SUB_INCLUDE_FORCED ,
-.BR SUB_INCLUDE_FULL ,
-and
-.B SUB_INCLUDE_SDH
-type\-exclusion flags are still respected by this fallback.
+or by setting
+.B SUB_SOLE_EXT_FALLBACK=0
+in
+.IR .muxmrc .
 .SS External Subtitle Discovery
 muxm automatically scans the source file's directory (or the directory
 given by
@@ -1430,9 +1436,7 @@ Using
 suppresses all subtitle processing including external sidecar discovery.
 .SS Multi\-Track Subtitles
 The
-.B dv\-archival
-and
-.B animation
+.BR archive ", " animation ", and " atv\-directplay\-animation
 profiles use multi\-track subtitle mode
 .RB ( SUB_MULTI_TRACK=1 ),
 which keeps all subtitle tracks that pass a subtractive filter instead of
@@ -1450,29 +1454,25 @@ Filters (configured via
 .B SUB_LANG_PREF
 When non\-empty, only tracks whose language matches the comma\-separated
 list are kept. When empty (the default for
-.BR dv\-archival ),
+.BR archive ),
 all languages pass.
 .TP
 .B SUB_INCLUDE_FORCED / SUB_INCLUDE_FULL / SUB_INCLUDE_SDH
 Type filters. When 0, tracks of that type are excluded. All three
-default to 1 in both
-.B dv\-archival
-and
-.BR animation .
+default to 1 in
+.BR archive ", " animation ", and " atv\-directplay\-animation .
 .TP
 .B SUB_MAX_TRACKS
 Maximum number of subtitle tracks to keep (applied after all other
 filters as a cap). Defaults to 99 for
-.BR dv\-archival ,
+.BR archive ,
 6 for
-.BR animation .
+.BR animation " and " atv\-directplay\-animation .
 .PP
 Bitmap subtitles (PGS, VobSub) that cannot be muxed into the target
-container (e.g., PGS into MP4) are silently skipped. Both
-.B dv\-archival
-and
-.B animation
-use MKV, which handles all subtitle formats.
+container (e.g., PGS into MP4) are silently skipped.
+.BR archive ", " animation ", and " atv\-directplay\-animation
+use MKV (or passthrough MKV), which handles all subtitle formats.
 .PP
 Multi\-track subtitle mode is automatically demoted to single\-track if
 .B \-\-sub\-burn\-forced
@@ -1482,6 +1482,13 @@ forced track).
 .TP
 .BR \-\-output\-ext " " \fIEXT\fR
 Output container: mp4|m4v|mov|mkv. Default: mp4.
+Profiles with container passthrough
+.RB ( archive ", " atv\-directplay\-hq ", " atv\-directplay\-animation )
+set this to empty, deriving the output container from the source file extension
+(mkv\(->mkv, mp4\(->mp4, etc.).
+Sources with unsupported containers fall back to mkv.
+.B \-\-output\-ext
+on the CLI always overrides passthrough resolution.
 .TP
 .BR \-\-keep\-chapters " , " \-\-no\-keep\-chapters
 Keep/strip chapter markers.
@@ -1559,7 +1566,7 @@ AAC stereo fallback, and burned forced subtitles.
 .B muxm \-\-profile streaming \-\-audio\-lang\-pref spa,eng Movie.mkv
 Encode for Plex/Jellyfin streaming, preferring Spanish audio over English.
 .TP
-.B muxm \-\-profile dv\-archival Movie.mkv
+.B muxm \-\-profile archive Movie.mkv
 Archival remux: copy video/audio without re\-encoding, preserve Dolby Vision
 and lossless audio. Skips the file if it already matches.
 .TP
@@ -2268,7 +2275,7 @@ _create_config_emit() {
   _active+="$_base"
 
   case "$profile" in
-    dv-archival)
+    archive)
       _active+="SKIP_IF_IDEAL REPORT_JSON CHECKSUM "
       _active+="AUDIO_LANG_PREF AUDIO_CODEC_PREFERENCE "
       _active+="AUDIO_MULTI_TRACK AUDIO_KEEP_COMMENTARY "
@@ -2284,6 +2291,14 @@ _create_config_emit() {
       _active+="EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 "
       _active+="MAX_COPY_BITRATE LEVEL_VALUE CONSERVATIVE_VBV "
       _active+="SUB_EXPORT_EXTERNAL SKIP_IF_IDEAL "
+      ;;
+    atv-directplay-animation)
+      _active+="CRF_VALUE PRESET_VALUE "
+      _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 SDR_USE_10BIT_IF_SRC_10BIT SDR_FORCE_10BIT "
+      _active+="EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 "
+      _active+="MAX_COPY_BITRATE LEVEL_VALUE CONSERVATIVE_VBV "
+      _active+="SUB_MULTI_TRACK SUB_MAX_TRACKS SUB_EXPORT_EXTERNAL SUB_PRESERVE_TEXT_FORMAT "
+      _active+="SKIP_IF_IDEAL "
       ;;
     streaming)
       _active+="CRF_VALUE PRESET_VALUE "
@@ -2720,6 +2735,12 @@ _create_config() {
   local profile="${2:-atv-directplay-hq}"
   local force="${3:-0}"
 
+  # Normalize deprecated alias
+  if [[ "$profile" == "dv-archival" ]]; then
+    warn "Profile 'dv-archival' is deprecated. Using 'archive' instead."
+    profile="archive"
+  fi
+
   # Validate scope → target path
   local target_path
   case "$scope" in
@@ -2834,7 +2855,7 @@ unset _prescan_args _filtered_args _i
 
 # ---- Profile application functions (pure assignment, no side effects) ----
 
-apply_profile_dv_archival() {
+apply_profile_archive() {
   # Goal: Preserve DV + HDR10 metadata, lossless audio, lossless remux only.
   DISABLE_DV=0
   ALLOW_DV_FALLBACK=1
@@ -2873,6 +2894,13 @@ apply_profile_dv_archival() {
   # Reporting: JSON + SHA-256 checksum (archival integrity)
   REPORT_JSON=1
   CHECKSUM=1
+}
+
+# DEPRECATED: 'dv-archival' is a backwards-compatibility alias for 'archive'.
+# Emits a deprecation notice and delegates to apply_profile_archive.
+apply_profile_dv_archival() {
+  warn "Profile 'dv-archival' is deprecated. Use '--profile archive' instead."
+  apply_profile_archive
 }
 
 apply_profile_hdr10_hq() {
@@ -2938,6 +2966,55 @@ apply_profile_atv_directplay_hq() {
   SUB_INCLUDE_SDH=1
   SUB_BURN_FORCED=1
   SUB_EXPORT_EXTERNAL=0
+  # Chapters/metadata: keep
+  KEEP_CHAPTERS=1
+  STRIP_METADATA=0
+  # Skip-if-ideal: on
+  SKIP_IF_IDEAL=1
+}
+
+apply_profile_atv_directplay_animation() {
+  # Goal: Animation-quality encode shaped for Apple TV / Plex Direct Play.
+  # Combines atv-directplay-hq ATV constraints with animation's quality-first settings.
+  DISABLE_DV=0
+  ALLOW_DV_FALLBACK=1
+  DV_CONVERT_TO_P81_IF_FAIL=1
+  # Container: passthrough — preserve source container (same as atv-directplay-hq).
+  # When output is MKV the post-resolution block (Section 15) disables forced-sub
+  # burning and confirms ASS preservation. See Section 15.
+  OUTPUT_EXT=""
+  # Video: prefer copy if compliant; else HEVC Main10 with animation-tuned params
+  VIDEO_CODEC="libx265"
+  VIDEO_COPY_IF_COMPLIANT=1
+  MAX_COPY_BITRATE="50000k"
+  CRF_VALUE=16
+  PRESET_VALUE="slower"
+  LEVEL_VALUE="5.1"
+  CONSERVATIVE_VBV=1
+  # Animation-tuned params + HDR10 signalling required by ATV. Lower psy-rd/psy-rdoq,
+  # adjusted deblock, and extra b-frames for banding-free flat-gradient animation.
+  X265_PARAMS_BASE='profile=main10:repeat-headers=1:hdr-opt=1:hdr10=1:hdr10-opt=1:aq-mode=3:aq-strength=0.8:psy-rd=1.0:psy-rdoq=0.5:rc-lookahead=60:deblock=-1,-1:bframes=8'
+  HDR_TARGET_PIXFMT="yuv420p10le"
+  FORCE_CHROMA_420=1
+  SDR_USE_10BIT_IF_SRC_10BIT=1
+  SDR_FORCE_10BIT=1
+  # Audio: E-AC-3 for surround (ATV cannot Direct Play TrueHD/DTS-HD MA), AAC stereo fallback.
+  # Lossless tracks are transcoded rather than passed through.
+  AUDIO_LOSSLESS_PASSTHROUGH=0
+  ADD_STEREO_IF_MULTICH=1
+  STEREO_BITRATE="256k"
+  EAC3_BITRATE_5_1="640k"
+  EAC3_BITRATE_7_1="768k"
+  # Subs: multi-track; burn forced subs for MP4 Direct Play (overridden to soft for MKV
+  # by the post-resolution block in Section 15). Preserve ASS/SSA natively.
+  SUB_MULTI_TRACK=1
+  SUB_INCLUDE_FORCED=1
+  SUB_INCLUDE_FULL=1
+  SUB_INCLUDE_SDH=1
+  SUB_MAX_TRACKS=6
+  SUB_BURN_FORCED=1
+  SUB_EXPORT_EXTERNAL=0
+  SUB_PRESERVE_TEXT_FORMAT=1
   # Chapters/metadata: keep
   KEEP_CHAPTERS=1
   STRIP_METADATA=0
@@ -3048,13 +3125,14 @@ apply_profile_animation() {
 # Returns empty string for unrecognised/absent profiles (no comment written).
 _profile_comment() {
   case "${PROFILE_NAME:-}" in
-    dv-archival)       echo "Preserved in digital amber." ;;
-    hdr10-hq)          echo "All the nits, none of the drama." ;;
-    atv-directplay-hq) echo "Shaped to please the most demanding rectangle in your living room." ;;
-    streaming)         echo "Lean, mean, streaming machine." ;;
-    animation)         echo "psy-rd turned down, sakuga turned up." ;;
-    universal)         echo "Lowest common denominator, highest common decency." ;;
-    *)                 echo "" ;;
+    archive)                    echo "Preserved in digital amber." ;;
+    hdr10-hq)                   echo "All the nits, none of the drama." ;;
+    atv-directplay-hq)          echo "Shaped to please the most demanding rectangle in your living room." ;;
+    atv-directplay-animation)   echo "Studio Ghibli didn't suffer for mov_text." ;;
+    streaming)                  echo "Lean, mean, streaming machine." ;;
+    animation)                  echo "psy-rd turned down, sakuga turned up." ;;
+    universal)                  echo "Lowest common denominator, highest common decency." ;;
+    *)                          echo "" ;;
   esac
 }
 
@@ -3062,12 +3140,18 @@ _profile_comment() {
 apply_profile() {
   [[ -z "${PROFILE_NAME:-}" ]] && return 0
   case "$PROFILE_NAME" in
-    dv-archival)         apply_profile_dv_archival ;;
-    hdr10-hq)            apply_profile_hdr10_hq ;;
-    atv-directplay-hq)   apply_profile_atv_directplay_hq ;;
-    streaming)           apply_profile_streaming ;;
-    animation)           apply_profile_animation ;;
-    universal)           apply_profile_universal ;;
+    archive)                     apply_profile_archive ;;
+    dv-archival)
+      # Deprecated alias: normalise PROFILE_NAME so all downstream code sees 'archive'.
+      warn "Profile 'dv-archival' is deprecated. Use '--profile archive' instead."
+      PROFILE_NAME="archive"
+      apply_profile_archive ;;
+    hdr10-hq)                    apply_profile_hdr10_hq ;;
+    atv-directplay-hq)           apply_profile_atv_directplay_hq ;;
+    atv-directplay-animation)    apply_profile_atv_directplay_animation ;;
+    streaming)                   apply_profile_streaming ;;
+    animation)                   apply_profile_animation ;;
+    universal)                   apply_profile_universal ;;
     *)
       printf "❌ ERROR: Unknown profile: %s\n" "$PROFILE_NAME" >&2
       printf "   Valid profiles: %s\n" "$(_valid_profiles_display)" >&2
@@ -3132,12 +3216,13 @@ ${APP_NAME} v${VERSION} — ${CLI_NAME}
 $USAGE_SHORT
 
 Profiles (--profile NAME):
-  dv-archival          Remux-first archival. DV + HDR10, multi-track. MKV.
-  hdr10-hq             Strip DV, keep HDR10. CRF 17, lossless audio. MKV.
-  atv-directplay-hq    Apple TV Direct Play. DV-aware, E-AC-3. MP4.
-  streaming            HEVC CRF 20 for Plex/Jellyfin. HDR10, E-AC-3. MP4.
-  animation            Anime/cartoon. CRF 16, lossless audio, ASS subs. MKV.
-  universal            H.264 SDR, AAC stereo. Lean, play anywhere. MP4.
+  archive                    Remux-first archival. DV + HDR10, multi-track. Passthrough container.
+  hdr10-hq                   Strip DV, keep HDR10. CRF 17, lossless audio. MKV.
+  atv-directplay-hq          Apple TV Direct Play. DV-aware, E-AC-3. Passthrough container.
+  atv-directplay-animation   ATV Direct Play, animation quality. CRF 16, E-AC-3, ASS subs. Passthrough container.
+  streaming                  HEVC CRF 20 for Plex/Jellyfin. HDR10, E-AC-3. MP4.
+  animation                  Anime/cartoon. CRF 16, lossless audio, ASS subs. MKV.
+  universal                  H.264 SDR, AAC stereo. Lean, play anywhere. MP4.
 
 Common options:
   -h, --help                  Show this help
@@ -3304,16 +3389,16 @@ _warn_conflict() {
 if [[ -n "${PROFILE_NAME:-}" ]]; then
   case "$PROFILE_NAME" in
 
-    dv-archival)
+    archive)
       # DV archival without DV is pointless
       (( DISABLE_DV )) && \
         _warn_conflict "$PROFILE_NAME" "--no-dv" \
           "DV archival without Dolby Vision is pointless. Output will be a plain remux."
 
-      # dv-archival is copy-only; setting CRF implies the user wants to re-encode
+      # archive is copy-only; setting CRF implies the user wants to re-encode
       if [[ "$_PROFILE_SOURCE" == "cli" ]] && [[ "$CRF_VALUE" -ne 18 ]]; then
         _warn_conflict "$PROFILE_NAME" "--crf $CRF_VALUE" \
-          "dv-archival is designed for copy-only (no re-encode). CRF is ignored when VIDEO_COPY_IF_COMPLIANT succeeds."
+          "archive is designed for copy-only (no re-encode). CRF is ignored when VIDEO_COPY_IF_COMPLIANT succeeds."
       fi
 
       # Stripping metadata defeats archival purpose
@@ -3403,6 +3488,51 @@ if [[ -n "${PROFILE_NAME:-}" ]]; then
       (( AUDIO_LOSSLESS_PASSTHROUGH )) && \
         _warn_conflict "$PROFILE_NAME" "--audio-lossless-passthrough" \
           "TrueHD/DTS-HD MA won’t Direct Play on Apple TV. E-AC-3 is recommended."
+      ;;
+
+    atv-directplay-animation)
+      # Note: SUB_BURN_FORCED is overridden for MKV output post-resolution (Section 15).
+
+      # MKV explicit override (passthrough may also produce MKV — that is intentional)
+      [[ "$OUTPUT_EXT" == "mkv" ]] && (( _OUTPUT_EXT_EXPLICIT )) && \
+        _warn_conflict "$PROFILE_NAME" "--output-ext mkv" \
+          "Forcing MKV output. MKV Direct Plays on ATV via Plex/Infuse but not the native TV app."
+
+      # MOV is unusual
+      [[ "$OUTPUT_EXT" == "mov" ]] && \
+        _warn_conflict "$PROFILE_NAME" "--output-ext mov" \
+          "MOV may work on Apple TV but mp4 is recommended for broadest Direct Play."
+
+      # Tone-mapping defeats HDR purpose
+      (( TONEMAP_HDR_TO_SDR )) && \
+        _warn_conflict "$PROFILE_NAME" "--tonemap" \
+          "Tone-mapping to SDR removes HDR. Apple TV supports HDR natively."
+
+      # H.264 loses HDR + DV
+      [[ "$VIDEO_CODEC" == "libx264" ]] && \
+        _warn_conflict "$PROFILE_NAME" "--video-codec libx264" \
+          "H.264 cannot carry HDR10/DV. Apple TV supports HEVC; use libx265."
+
+      # Lossless audio won’t Direct Play on ATV
+      (( AUDIO_LOSSLESS_PASSTHROUGH )) && \
+        _warn_conflict "$PROFILE_NAME" "--audio-lossless-passthrough" \
+          "TrueHD/DTS-HD MA won’t Direct Play on Apple TV. E-AC-3 is recommended."
+
+      # Disabling format preservation converts ASS to plain-text SRT
+      (( ! SUB_PRESERVE_TEXT_FORMAT )) && \
+        _warn_conflict "$PROFILE_NAME" "--no-sub-preserve-format" \
+          "ASS/SSA subtitles will be converted to SRT, losing positioning and styling."
+
+      # Multi-track subtitle conflicts
+      if (( SUB_MULTI_TRACK )); then
+        (( SUB_BURN_FORCED )) && \
+          _warn_conflict "$PROFILE_NAME" "--sub-burn-forced" \
+            "Multi-track subtitle mode copies all subs from source. --sub-burn-forced forces single-track."
+
+        (( SUB_EXPORT_EXTERNAL )) && \
+          _warn_conflict "$PROFILE_NAME" "--sub-export-external" \
+            "Multi-track subtitle mode embeds all subs via stream-copy. External export is ignored."
+      fi
       ;;
 
     streaming)
@@ -3712,19 +3842,20 @@ if [[ -z "$OUTPUT_EXT" ]] && (( ! _OUTPUT_EXT_EXPLICIT )); then
 fi
 # ---- End container passthrough resolution ---------------------------------------------------
 
-# ---- atv-directplay-hq: MKV-output subtitle adjustment ------------------------------------
-# When atv-directplay-hq produces MKV output (via passthrough or explicit --output-ext mkv),
+# ---- atv-directplay-hq / atv-directplay-animation: MKV-output subtitle adjustment ----------
+# When either ATV profile produces MKV output (via passthrough or explicit --output-ext mkv),
 # switch from burned forced subs (MP4-required) to soft subtitles with native ASS preservation.
-# MP4 output path is unchanged: SUB_BURN_FORCED=1, SUB_PRESERVE_TEXT_FORMAT=0.
-if [[ "${PROFILE_NAME:-}" == "atv-directplay-hq" ]] && [[ "$OUTPUT_EXT" == "mkv" ]]; then
+# MP4 output path is unchanged: SUB_BURN_FORCED=1, SUB_PRESERVE_TEXT_FORMAT=0 (hq) or =1 (animation).
+if [[ "${PROFILE_NAME:-}" == "atv-directplay-hq" || "${PROFILE_NAME:-}" == "atv-directplay-animation" ]] \
+    && [[ "$OUTPUT_EXT" == "mkv" ]]; then
   if (( ! _CLI_SUB_BURN_FORCED )); then
     SUB_BURN_FORCED=0
-    log "[atv-directplay-hq] MKV output: disabling forced-sub burning (soft subs preferred)."
+    log "[${PROFILE_NAME}] MKV output: disabling forced-sub burning (soft subs preferred)."
   fi
   SUB_PRESERVE_TEXT_FORMAT=1
-  log "[atv-directplay-hq] MKV output: enabling native ASS/SSA format preservation."
+  log "[${PROFILE_NAME}] MKV output: enabling native ASS/SSA format preservation."
 fi
-# ---- End atv-directplay-hq MKV subtitle adjustment ----------------------------------------
+# ---- End ATV MKV subtitle adjustment -------------------------------------------------------
 
 # Determine output path
 if [[ -z "${OUT:-}" ]]; then
@@ -4563,7 +4694,7 @@ _check_hdr10_static_metadata() {
     warn "Source has DV but NO HDR10 static metadata (mastering display, MaxCLL/MaxFALL)."
     warn "  Stripping DV will produce an HDR10 stream with missing brightness metadata."
     warn "  Impact: Playback may appear dim or washed-out on HDR10-only displays."
-    warn "  Consider using dv-archival profile to preserve DV, or adding HDR10 metadata manually."
+    warn "  Consider using archive profile to preserve DV, or adding HDR10 metadata manually."
     report_add "hdr10_static_metadata" "missing (mastering=$has_mastering, cll=$has_cll)"
   elif (( ! has_mastering )); then
     warn "Source has MaxCLL/MaxFALL but no mastering display metadata. HDR10 output may have suboptimal tone-mapping on some displays."

@@ -1,4 +1,4 @@
-.TH MUXM 1 "2026-03-22" "MuxMaster v1.1.0" "User Commands"
+.TH MUXM 1 "2026-03-24" "MuxMaster v1.2.0" "User Commands"
 .SH NAME
 muxm \- Universal DV/HLG/HDR10/SDR video encoder/muxer with format profiles
 .SH SYNOPSIS
@@ -35,8 +35,10 @@ Apply a named format profile.
 .\" NOTE: Profile names below must match VALID_PROFILES in muxm (Section 2).
 Available profiles:
 .TP
-.B dv\-archival
-Remux\-first archival. DV + HDR10, multi\-track, copy only. MKV. Commentary/descriptive audio tracks dropped by default.
+.B archive
+Remux\-first archival. DV + HDR10, multi\-track, copy only. Passthrough container
+(MKV sources stay MKV, MP4 sources stay MP4). Commentary/descriptive audio tracks
+dropped by default.
 Audio filterable via
 .BR AUDIO_LANG_PREF " and " AUDIO_KEEP_COMMENTARY ;
 subtitles filterable via
@@ -47,8 +49,15 @@ Skip if already ideal. JSON report.
 Strip DV, keep HDR10. CRF 17, lossless audio + stereo fallback. MKV.
 .TP
 .B atv\-directplay\-hq
-Apple TV Direct Play. DV\-aware, E\-AC\-3. MP4. HEVC Main10, DV P8.1,
-AAC stereo fallback, burn forced subs.
+Apple TV Direct Play. DV\-aware, E\-AC\-3. Passthrough container
+(MKV sources stay MKV, MP4 sources stay MP4). HEVC Main10, DV P8.1,
+AAC stereo fallback. Forced subs burned for MP4; soft with native ASS preservation for MKV.
+.TP
+.B atv\-directplay\-animation
+Apple TV Direct Play, animation quality. CRF 16, E\-AC\-3, ASS/SSA + PGS bitmap subs.
+Passthrough container. HEVC 10\-bit (even SDR), animation\-tuned x265,
+multi\-track subs. Lossless audio transcoded to E\-AC\-3 (ATV cannot Direct Play TrueHD/DTS\-HD MA).
+Forced subs burned for MP4; soft with native ASS preservation for MKV.
 .TP
 .B streaming
 HEVC CRF 20 for Plex/Jellyfin. HDR10, E\-AC\-3. MP4. Preset medium,
@@ -223,7 +232,7 @@ preferred\-language stereo track beats a foreign surround track. Reduce
 to ~25 to prefer higher channel counts regardless of language.
 .SS Multi\-Track Audio (Archival)
 The
-.B dv\-archival
+.B archive
 profile uses multi\-track mode
 .RB ( AUDIO_MULTI_TRACK=1 ),
 which keeps all audio tracks that pass a subtractive filter instead of
@@ -236,12 +245,12 @@ Filters (configured via
 .B AUDIO_LANG_PREF
 When non\-empty, only tracks whose language matches the comma\-separated
 list are kept. When empty (the default for
-.BR dv\-archival ),
+.BR archive ),
 all languages pass.
 .TP
 .B AUDIO_KEEP_COMMENTARY
 When 0 (the
-.B dv\-archival
+.B archive
 default), tracks whose title matches commentary or audio\-description
 keywords are dropped. Set to 1 to keep them.
 .PP
@@ -392,9 +401,7 @@ Using
 suppresses all subtitle processing including external sidecar discovery.
 .SS Multi\-Track Subtitles
 The
-.B dv\-archival
-and
-.B animation
+.BR archive ", " animation ", and " atv\-directplay\-animation
 profiles use multi\-track subtitle mode
 .RB ( SUB_MULTI_TRACK=1 ),
 which keeps all subtitle tracks that pass a subtractive filter instead of
@@ -412,29 +419,25 @@ Filters (configured via
 .B SUB_LANG_PREF
 When non\-empty, only tracks whose language matches the comma\-separated
 list are kept. When empty (the default for
-.BR dv\-archival ),
+.BR archive ),
 all languages pass.
 .TP
 .B SUB_INCLUDE_FORCED / SUB_INCLUDE_FULL / SUB_INCLUDE_SDH
 Type filters. When 0, tracks of that type are excluded. All three
-default to 1 in both
-.B dv\-archival
-and
-.BR animation .
+default to 1 in
+.BR archive ", " animation ", and " atv\-directplay\-animation .
 .TP
 .B SUB_MAX_TRACKS
 Maximum number of subtitle tracks to keep (applied after all other
 filters as a cap). Defaults to 99 for
-.BR dv\-archival ,
+.BR archive ,
 6 for
-.BR animation .
+.BR animation " and " atv\-directplay\-animation .
 .PP
 Bitmap subtitles (PGS, VobSub) that cannot be muxed into the target
-container (e.g., PGS into MP4) are silently skipped. Both
-.B dv\-archival
-and
-.B animation
-use MKV, which handles all subtitle formats.
+container (e.g., PGS into MP4) are silently skipped.
+.BR archive ", " animation ", and " atv\-directplay\-animation
+use MKV (or passthrough MKV), which handles all subtitle formats.
 .PP
 Multi\-track subtitle mode is automatically demoted to single\-track if
 .B \-\-sub\-burn\-forced
@@ -444,6 +447,13 @@ forced track).
 .TP
 .BR \-\-output\-ext " " \fIEXT\fR
 Output container: mp4|m4v|mov|mkv. Default: mp4.
+Profiles with container passthrough
+.RB ( archive ", " atv\-directplay\-hq ", " atv\-directplay\-animation )
+set this to empty, deriving the output container from the source file extension
+(mkv\(->mkv, mp4\(->mp4, etc.).
+Sources with unsupported containers fall back to mkv.
+.B \-\-output\-ext
+on the CLI always overrides passthrough resolution.
 .TP
 .BR \-\-keep\-chapters " , " \-\-no\-keep\-chapters
 Keep/strip chapter markers.
@@ -521,7 +531,7 @@ AAC stereo fallback, and burned forced subtitles.
 .B muxm \-\-profile streaming \-\-audio\-lang\-pref spa,eng Movie.mkv
 Encode for Plex/Jellyfin streaming, preferring Spanish audio over English.
 .TP
-.B muxm \-\-profile dv\-archival Movie.mkv
+.B muxm \-\-profile archive Movie.mkv
 Archival remux: copy video/audio without re\-encoding, preserve Dolby Vision
 and lossless audio. Skips the file if it already matches.
 .TP

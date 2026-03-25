@@ -600,7 +600,7 @@ CHAP
     "$TESTDIR/multi_audio_commentary.mkv"
   pass "multi_audio_commentary.mkv created"
 
-  # 8c) HEVC multi-audio fixture for dv-archival multi-track testing.
+  # 8c) HEVC multi-audio fixture for archive multi-track testing.
   #     HEVC video (copy-if-compliant) + 3 audio: eng main, eng commentary, spa.
   #     3 audio inputs require explicit maps — raw ffmpeg.
   log "Creating hevc_multi_audio.mkv (HEVC + 3 audio: eng main, eng commentary, spa)"
@@ -640,7 +640,7 @@ CHAP
     "$TESTDIR/lossless_vs_lossy.mkv"
   pass "lossless_vs_lossy.mkv created"
 
-  # 8d) HEVC multi-subtitle fixture for dv-archival multi-track subtitle testing.
+  # 8d) HEVC multi-subtitle fixture for archive multi-track subtitle testing.
   #     HEVC video (copy-if-compliant) + 1 audio + 5 subs: eng forced, eng full, eng SDH, spa full, fra full.
   #     5 SRT inputs require explicit maps — raw ffmpeg.
   log "Creating hevc_multi_subs.mkv (HEVC + 1 audio + 5 subs: eng forced, eng full, eng SDH, spa full, fra full)"
@@ -764,7 +764,7 @@ _test_cli_help_version() {
   out="$(run_muxm --help)"
   assert_contains "Usage:" "--help shows usage" "$out"
   assert_contains "--profile" "--help mentions --profile" "$out"
-  assert_contains "dv-archival" "--help lists dv-archival" "$out"
+  assert_contains "archive" "--help lists archive profile" "$out"
   assert_contains "universal" "--help lists universal" "$out"
   assert_contains "--setup" "--help mentions --setup" "$out"
   assert_contains "Quick start:" "--help shows quick-start example" "$out"
@@ -1047,7 +1047,7 @@ _test_config_create() {
   assert_contains "Invalid scope" "--create-config rejects invalid scope" "$out"
 
   # --create-config with all remaining profiles (#50)
-  local profiles_to_test=("dv-archival" "hdr10-hq" "atv-directplay-hq" "universal")
+  local profiles_to_test=("archive" "hdr10-hq" "atv-directplay-hq" "universal")
   for p in "${profiles_to_test[@]}"; do
     local cfg_p_dir="$TESTDIR/config_create_$p"
     mkdir -p "$cfg_p_dir"
@@ -1067,18 +1067,18 @@ _test_config_create() {
   # users cannot discover or override these settings via --create-config.
   local cfg_mt_dir="$TESTDIR/config_create_mt_vars"
   mkdir -p "$cfg_mt_dir"
-  run_muxm_in "$cfg_mt_dir" --create-config project dv-archival >/dev/null 2>&1
+  run_muxm_in "$cfg_mt_dir" --create-config project archive >/dev/null 2>&1
   if [[ -f "$cfg_mt_dir/.muxmrc" ]]; then
     local mt_cfg_content
     mt_cfg_content="$(cat "$cfg_mt_dir/.muxmrc")"
     assert_contains "AUDIO_MULTI_TRACK" \
-      "--create-config dv-archival: template contains AUDIO_MULTI_TRACK" "$mt_cfg_content"
+      "--create-config archive: template contains AUDIO_MULTI_TRACK" "$mt_cfg_content"
     assert_contains "AUDIO_KEEP_COMMENTARY" \
-      "--create-config dv-archival: template contains AUDIO_KEEP_COMMENTARY" "$mt_cfg_content"
+      "--create-config archive: template contains AUDIO_KEEP_COMMENTARY" "$mt_cfg_content"
     assert_contains "SUB_MULTI_TRACK" \
-      "--create-config dv-archival: template contains SUB_MULTI_TRACK" "$mt_cfg_content"
+      "--create-config archive: template contains SUB_MULTI_TRACK" "$mt_cfg_content"
   else
-    fail "--create-config dv-archival: did not create .muxmrc (multi-track variable check)"
+    fail "--create-config archive: did not create .muxmrc (multi-track variable check)"
   fi
 
   # --create-config with no profile arg → defaults to atv-directplay-hq
@@ -1214,7 +1214,7 @@ test_config() {
 test_profiles() {
   section "Profile Variable Assignment"
 
-  local profiles=("dv-archival" "hdr10-hq" "atv-directplay-hq" "streaming" "animation" "universal")
+  local profiles=("archive" "hdr10-hq" "atv-directplay-hq" "atv-directplay-animation" "streaming" "animation" "universal")
   local out
 
   for p in "${profiles[@]}"; do
@@ -1222,22 +1222,22 @@ test_profiles() {
     assert_contains "$p" "Profile $p shows in effective config" "$out"
   done
 
-  # dv-archival specifics
-  out="$(run_muxm --profile dv-archival --print-effective-config)"
-  assert_contains "VIDEO_COPY_IF_COMPLIANT   = 1" "dv-archival: video copy enabled" "$out"
-  assert_contains "SKIP_IF_IDEAL             = 1" "dv-archival: skip-if-ideal on" "$out"
-  assert_contains "REPORT_JSON               = 1" "dv-archival: JSON report on" "$out"
-  assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 1" "dv-archival: lossless audio on" "$out"
-  assert_contains "OUTPUT_EXT                = " "dv-archival: passthrough container (empty = resolve from source)" "$out"
-  assert_contains "truehd,dts,flac" "dv-archival: lossless-first codec preference" "$out"
-  assert_contains "AUDIO_MULTI_TRACK         = 1" "dv-archival: multi-track audio enabled" "$out"
-  assert_contains "AUDIO_KEEP_COMMENTARY     = 0" "dv-archival: commentary excluded by default" "$out"
-  assert_contains "SUB_MULTI_TRACK           = 1" "dv-archival: multi-track subtitles enabled" "$out"
-  assert_contains "CHECKSUM                  = 1" "dv-archival: checksum on by default" "$out"
+  # archive specifics
+  out="$(run_muxm --profile archive --print-effective-config)"
+  assert_contains "VIDEO_COPY_IF_COMPLIANT   = 1" "archive: video copy enabled" "$out"
+  assert_contains "SKIP_IF_IDEAL             = 1" "archive: skip-if-ideal on" "$out"
+  assert_contains "REPORT_JSON               = 1" "archive: JSON report on" "$out"
+  assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 1" "archive: lossless audio on" "$out"
+  assert_contains "OUTPUT_EXT                = " "archive: passthrough container (empty = resolve from source)" "$out"
+  assert_contains "truehd,dts,flac" "archive: lossless-first codec preference" "$out"
+  assert_contains "AUDIO_MULTI_TRACK         = 1" "archive: multi-track audio enabled" "$out"
+  assert_contains "AUDIO_KEEP_COMMENTARY     = 0" "archive: commentary excluded by default" "$out"
+  assert_contains "SUB_MULTI_TRACK           = 1" "archive: multi-track subtitles enabled" "$out"
+  assert_contains "CHECKSUM                  = 1" "archive: checksum on by default" "$out"
 
-  # --no-checksum overrides dv-archival default
-  out="$(run_muxm --profile dv-archival --no-checksum --print-effective-config)"
-  assert_contains "CHECKSUM                  = 0" "dv-archival + --no-checksum: CLI overrides profile default" "$out"
+  # --no-checksum overrides archive default
+  out="$(run_muxm --profile archive --no-checksum --print-effective-config)"
+  assert_contains "CHECKSUM                  = 0" "archive + --no-checksum: CLI overrides profile default" "$out"
 
   # hdr10-hq specifics
   out="$(run_muxm --profile hdr10-hq --print-effective-config)"
@@ -1255,6 +1255,28 @@ test_profiles() {
   assert_contains "MAX_COPY_BITRATE          = 50000k" "atv-directplay: bitrate ceiling" "$out"
   assert_contains "LEVEL_VALUE               = 5.1" "atv-directplay: Level 5.1 VBV cap" "$out"
   assert_contains "CONSERVATIVE_VBV          = 1" "atv-directplay: conservative VBV active" "$out"
+
+  # atv-directplay-animation specifics
+  out="$(run_muxm --profile atv-directplay-animation --print-effective-config)"
+  assert_contains "OUTPUT_EXT                = "    "atv-directplay-animation: passthrough container (empty = resolve from source)" "$out"
+  assert_contains "CRF_VALUE                 = 16"  "atv-directplay-animation: CRF 16 (animation quality)" "$out"
+  assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 0"  "atv-directplay-animation: lossless passthrough disabled (EAC3 for ATV)" "$out"
+  assert_contains "EAC3_BITRATE_5_1          = 640k" "atv-directplay-animation: EAC3 5.1 bitrate" "$out"
+  assert_contains "EAC3_BITRATE_7_1          = 768k" "atv-directplay-animation: EAC3 7.1 bitrate" "$out"
+  assert_contains "SUB_MULTI_TRACK           = 1"   "atv-directplay-animation: multi-track subtitles enabled" "$out"
+  assert_contains "SUB_PRESERVE_TEXT_FORMAT  = 1"   "atv-directplay-animation: ASS/SSA preservation enabled" "$out"
+  assert_contains "SUB_BURN_FORCED           = 1"   "atv-directplay-animation: forced sub burning on (for MP4 Direct Play)" "$out"
+  assert_contains "SDR_FORCE_10BIT           = 1"   "atv-directplay-animation: 10-bit SDR for anti-banding" "$out"
+  assert_contains "LEVEL_VALUE               = 5.1" "atv-directplay-animation: Level 5.1 VBV cap" "$out"
+  assert_contains "CONSERVATIVE_VBV          = 1"   "atv-directplay-animation: conservative VBV active" "$out"
+  assert_contains "SKIP_IF_IDEAL             = 1"   "atv-directplay-animation: skip-if-ideal on" "$out"
+
+  # dv-archival alias: deprecated, maps to archive profile + emits deprecation warning
+  out="$(run_muxm --profile dv-archival --print-effective-config 2>&1)"
+  assert_contains "deprecated" "dv-archival alias: emits deprecation warning" "$out"
+  assert_contains "archive"    "dv-archival alias: output mentions archive as the canonical name" "$out"
+  assert_contains "VIDEO_COPY_IF_COMPLIANT   = 1" "dv-archival alias: behaves identically to archive (copy enabled)" "$out"
+  assert_contains "SUB_MULTI_TRACK           = 1" "dv-archival alias: behaves identically to archive (multi-track subs)" "$out"
 
   # streaming specifics
   out="$(run_muxm --profile streaming --print-effective-config)"
@@ -1280,11 +1302,11 @@ test_profiles() {
   assert_contains "OUTPUT_EXT                = mp4" "universal: MP4 container" "$out"
 
   # --- Container passthrough: CLI --output-ext overrides passthrough ---
-  # Passthrough profiles (dv-archival, atv-directplay-hq) set OUTPUT_EXT="" by default.
+  # Passthrough profiles (archive, atv-directplay-hq, atv-directplay-animation) set OUTPUT_EXT="" by default.
   # Passing --output-ext on the CLI sets _OUTPUT_EXT_EXPLICIT=1, skipping passthrough
   # resolution and leaving OUTPUT_EXT at the CLI-supplied value.
-  out="$(run_muxm --profile dv-archival --output-ext mp4 --print-effective-config)"
-  assert_contains "OUTPUT_EXT                = mp4" "dv-archival + --output-ext mp4: CLI wins over passthrough" "$out"
+  out="$(run_muxm --profile archive --output-ext mp4 --print-effective-config)"
+  assert_contains "OUTPUT_EXT                = mp4" "archive + --output-ext mp4: CLI wins over passthrough" "$out"
 
   out="$(run_muxm --profile atv-directplay-hq --output-ext mp4 --print-effective-config)"
   assert_contains "OUTPUT_EXT                = mp4" "atv-directplay-hq + --output-ext mp4: CLI wins over passthrough" "$out"
@@ -1292,9 +1314,9 @@ test_profiles() {
 
 # === Suite: Conflict Warnings ===
 # Validates that muxm emits ⚠ warnings when CLI flags contradict a profile's intent
-# (e.g., --no-dv with dv-archival, --tonemap with hdr10-hq). All checks use
+# (e.g., --no-dv with archive, --tonemap with hdr10-hq). All checks use
 # --print-effective-config and look for the ⚠ character in output.
-# WHY: Profiles encode domain expertise (e.g., dv-archival preserves Dolby Vision).
+# WHY: Profiles encode domain expertise (e.g., archive preserves Dolby Vision).
 # If a user overrides a profile's key flag, the encode may silently produce a file that
 # violates the profile's contract. Warnings catch this at config time, not after a
 # multi-hour encode.
@@ -1303,40 +1325,40 @@ test_conflicts() {
 
   local out
 
-  # --- dv-archival conflicts ---
-  out="$(run_muxm --profile dv-archival --no-dv --print-effective-config)"
-  assert_contains "⚠" "dv-archival + --no-dv warns" "$out"
+  # --- archive conflicts ---
+  out="$(run_muxm --profile archive --no-dv --print-effective-config)"
+  assert_contains "⚠" "archive + --no-dv warns" "$out"
 
-  out="$(run_muxm --profile dv-archival --strip-metadata --print-effective-config)"
-  assert_contains "⚠" "dv-archival + --strip-metadata warns (#38)" "$out"
+  out="$(run_muxm --profile archive --strip-metadata --print-effective-config)"
+  assert_contains "⚠" "archive + --strip-metadata warns (#38)" "$out"
 
-  out="$(run_muxm --profile dv-archival --no-keep-chapters --print-effective-config)"
-  assert_contains "⚠" "dv-archival + --no-keep-chapters warns (#39)" "$out"
+  out="$(run_muxm --profile archive --no-keep-chapters --print-effective-config)"
+  assert_contains "⚠" "archive + --no-keep-chapters warns (#39)" "$out"
 
-  out="$(run_muxm --profile dv-archival --sub-burn-forced --print-effective-config)"
-  assert_contains "⚠" "dv-archival + --sub-burn-forced warns (#40)" "$out"
+  out="$(run_muxm --profile archive --sub-burn-forced --print-effective-config)"
+  assert_contains "⚠" "archive + --sub-burn-forced warns (#40)" "$out"
 
-  # dv-archival multi-track audio conflicts
-  out="$(run_muxm --profile dv-archival --audio-track 0 --print-effective-config)"
-  assert_contains "⚠" "dv-archival + --audio-track warns (multi-track conflict)" "$out"
-  assert_contains "Multi-track" "dv-archival + --audio-track: warning mentions multi-track" "$out"
+  # archive multi-track audio conflicts
+  out="$(run_muxm --profile archive --audio-track 0 --print-effective-config)"
+  assert_contains "⚠" "archive + --audio-track warns (multi-track conflict)" "$out"
+  assert_contains "Multi-track" "archive + --audio-track: warning mentions multi-track" "$out"
 
-  out="$(run_muxm --profile dv-archival --audio-force-codec aac --print-effective-config)"
-  assert_contains "⚠" "dv-archival + --audio-force-codec warns (multi-track conflict)" "$out"
-  assert_contains "Multi-track" "dv-archival + --audio-force-codec: warning mentions multi-track" "$out"
+  out="$(run_muxm --profile archive --audio-force-codec aac --print-effective-config)"
+  assert_contains "⚠" "archive + --audio-force-codec warns (multi-track conflict)" "$out"
+  assert_contains "Multi-track" "archive + --audio-force-codec: warning mentions multi-track" "$out"
 
-  out="$(run_muxm --profile dv-archival --stereo-fallback --print-effective-config)"
-  assert_contains "⚠" "dv-archival + --stereo-fallback warns (multi-track conflict)" "$out"
-  assert_contains "Multi-track" "dv-archival + --stereo-fallback: warning mentions multi-track" "$out"
+  out="$(run_muxm --profile archive --stereo-fallback --print-effective-config)"
+  assert_contains "⚠" "archive + --stereo-fallback warns (multi-track conflict)" "$out"
+  assert_contains "Multi-track" "archive + --stereo-fallback: warning mentions multi-track" "$out"
 
-  # dv-archival multi-track subtitle conflicts
-  out="$(run_muxm --profile dv-archival --sub-burn-forced --print-effective-config)"
-  assert_contains "⚠" "dv-archival + --sub-burn-forced warns (multi-track sub conflict)" "$out"
-  assert_contains "Multi-track subtitle" "dv-archival + --sub-burn-forced: warning mentions multi-track subtitle" "$out"
+  # archive multi-track subtitle conflicts
+  out="$(run_muxm --profile archive --sub-burn-forced --print-effective-config)"
+  assert_contains "⚠" "archive + --sub-burn-forced warns (multi-track sub conflict)" "$out"
+  assert_contains "Multi-track subtitle" "archive + --sub-burn-forced: warning mentions multi-track subtitle" "$out"
 
-  out="$(run_muxm --profile dv-archival --sub-export-external --print-effective-config)"
-  assert_contains "⚠" "dv-archival + --sub-export-external warns (multi-track sub conflict)" "$out"
-  assert_contains "Multi-track subtitle" "dv-archival + --sub-export-external: warning mentions multi-track subtitle" "$out"
+  out="$(run_muxm --profile archive --sub-export-external --print-effective-config)"
+  assert_contains "⚠" "archive + --sub-export-external warns (multi-track sub conflict)" "$out"
+  assert_contains "Multi-track subtitle" "archive + --sub-export-external: warning mentions multi-track subtitle" "$out"
 
   # --- hdr10-hq conflicts ---
   out="$(run_muxm --profile hdr10-hq --tonemap --print-effective-config)"
@@ -1357,6 +1379,30 @@ test_conflicts() {
 
   out="$(run_muxm --profile atv-directplay-hq --audio-lossless-passthrough --print-effective-config)"
   assert_contains "⚠" "atv-directplay + --audio-lossless-passthrough warns (#35)" "$out"
+
+  # --- atv-directplay-animation conflicts ---
+  out="$(run_muxm --profile atv-directplay-animation --output-ext mkv --print-effective-config)"
+  assert_contains "⚠" "atv-directplay-animation + mkv warns" "$out"
+
+  out="$(run_muxm --profile atv-directplay-animation --tonemap --print-effective-config)"
+  assert_contains "⚠" "atv-directplay-animation + --tonemap warns" "$out"
+
+  out="$(run_muxm --profile atv-directplay-animation --video-codec libx264 --print-effective-config)"
+  assert_contains "⚠" "atv-directplay-animation + --video-codec libx264 warns" "$out"
+
+  out="$(run_muxm --profile atv-directplay-animation --audio-lossless-passthrough --print-effective-config)"
+  assert_contains "⚠" "atv-directplay-animation + --audio-lossless-passthrough warns" "$out"
+
+  out="$(run_muxm --profile atv-directplay-animation --no-sub-preserve-format --print-effective-config)"
+  assert_contains "⚠" "atv-directplay-animation + --no-sub-preserve-format warns" "$out"
+
+  out="$(run_muxm --profile atv-directplay-animation --sub-burn-forced --print-effective-config)"
+  assert_contains "⚠" "atv-directplay-animation + --sub-burn-forced warns (multi-track sub conflict)" "$out"
+  assert_contains "Multi-track subtitle" "atv-directplay-animation + --sub-burn-forced: warning mentions multi-track subtitle" "$out"
+
+  out="$(run_muxm --profile atv-directplay-animation --sub-export-external --print-effective-config)"
+  assert_contains "⚠" "atv-directplay-animation + --sub-export-external warns (multi-track sub conflict)" "$out"
+  assert_contains "Multi-track subtitle" "atv-directplay-animation + --sub-export-external: warning mentions multi-track subtitle" "$out"
 
   # --- streaming conflicts ---
   out="$(run_muxm --profile streaming --output-ext mkv --print-effective-config)"
@@ -1401,7 +1447,7 @@ test_conflicts() {
   assert_contains "⚠" "universal + --video-codec libx265 warns (#45)" "$out"
 
   # --- Cross-profile flag combinations ---
-  out="$(run_muxm --profile dv-archival --video-copy-if-compliant --tonemap --print-effective-config)"
+  out="$(run_muxm --profile archive --video-copy-if-compliant --tonemap --print-effective-config)"
   assert_contains "VIDEO_COPY_IF_COMPLIANT + TONEMAP" "Cross: copy + tonemap warns (#41)" "$out"
 
   out="$(run_muxm --profile animation --sub-export-external --output-ext mkv --print-effective-config)"
@@ -1410,11 +1456,11 @@ test_conflicts() {
   out="$(run_muxm --profile streaming --sub-burn-forced --no-subtitles --print-effective-config 2>&1)" || true
   assert_contains "SUB_BURN_FORCED" "Cross: burn-forced + no-forced warns (#43)" "$out"
 
-  # --- dv-archival + --crf conflict ---
-  # dv-archival is copy-only; specifying --crf from CLI with a value ≠18 triggers a warning
-  out="$(run_muxm --profile dv-archival --crf 22 --print-effective-config 2>&1)"
-  assert_contains "⚠" "dv-archival + --crf 22 emits conflict warning" "$out"
-  assert_contains "copy-only" "dv-archival + --crf 22 warning mentions copy-only" "$out"
+  # --- archive + --crf conflict ---
+  # archive is copy-only; specifying --crf from CLI with a value ≠18 triggers a warning
+  out="$(run_muxm --profile archive --crf 22 --print-effective-config 2>&1)"
+  assert_contains "⚠" "archive + --crf 22 emits conflict warning" "$out"
+  assert_contains "copy-only" "archive + --crf 22 warning mentions copy-only" "$out"
 
   # --- Container passthrough: atv passthrough mode does NOT warn about MKV container ---
   # atv-directplay-hq sets OUTPUT_EXT="" (passthrough); without explicit --output-ext,
@@ -1477,24 +1523,24 @@ test_dryrun() {
   out="$(run_muxm --dry-run --profile animation --sub-burn-forced "$TESTDIR/hevc_multi_subs.mkv")"
   assert_contains "demoted" "Dry-run animation + --sub-burn-forced: multi-track demoted to single-track" "$out"
 
-  # Dry-run with dv-archival multi-track audio
-  out="$(run_muxm --dry-run --profile dv-archival "$TESTDIR/hevc_multi_audio.mkv")"
-  assert_contains "DRY-RUN" "Dry-run dv-archival + multi-audio completes" "$out"
-  assert_contains "multi-track" "Dry-run dv-archival: announces multi-track mode" "$out"
+  # Dry-run with archive multi-track audio
+  out="$(run_muxm --dry-run --profile archive "$TESTDIR/hevc_multi_audio.mkv")"
+  assert_contains "DRY-RUN" "Dry-run archive + multi-audio completes" "$out"
+  assert_contains "multi-track" "Dry-run archive: announces multi-track mode" "$out"
 
-  # Dry-run with dv-archival multi-track subtitles
+  # Dry-run with archive multi-track subtitles
   # --no-skip-if-ideal: fixture is fully compliant, would skip before pipelines run.
-  out="$(run_muxm --dry-run --no-skip-if-ideal --profile dv-archival "$TESTDIR/hevc_multi_subs.mkv")"
-  assert_contains "DRY-RUN" "Dry-run dv-archival + multi-subs completes" "$out"
-  assert_contains "multi-track" "Dry-run dv-archival multi-subs: announces multi-track mode" "$out"
-  assert_contains "keeping" "Dry-run dv-archival multi-subs: subtitle filter summary logged" "$out"
+  out="$(run_muxm --dry-run --no-skip-if-ideal --profile archive "$TESTDIR/hevc_multi_subs.mkv")"
+  assert_contains "DRY-RUN" "Dry-run archive + multi-subs completes" "$out"
+  assert_contains "multi-track" "Dry-run archive multi-subs: announces multi-track mode" "$out"
+  assert_contains "keeping" "Dry-run archive multi-subs: subtitle filter summary logged" "$out"
 
   # ---- Container passthrough resolution (dry-run log messages) ----
 
-  # dv-archival + mkv source: passthrough resolves OUTPUT_EXT=mkv, logs the resolution.
-  out="$(run_muxm --dry-run --profile dv-archival "$TESTDIR/basic_sdr_subs.mkv")"
+  # archive + mkv source: passthrough resolves OUTPUT_EXT=mkv, logs the resolution.
+  out="$(run_muxm --dry-run --profile archive "$TESTDIR/basic_sdr_subs.mkv")"
   assert_contains "[container-passthrough] Source .mkv" \
-    "dry-run dv-archival + mkv source: passthrough logs mkv resolution" "$out"
+    "dry-run archive + mkv source: passthrough logs mkv resolution" "$out"
 
   # atv-directplay-hq + mkv source: passthrough → OUTPUT_EXT=mkv → MKV subtitle adjustment fires.
   # Expect both the passthrough log and the subtitle-adjustment log messages.
@@ -1526,6 +1572,39 @@ test_dryrun() {
   fi
   assert_contains "[atv-directplay-hq] MKV output: enabling native ASS/SSA" \
     "dry-run atv + mkv + --sub-burn-forced: ASS preservation still enabled regardless" "$out"
+
+  # ---- atv-directplay-animation passthrough + MKV subtitle adjustment ----
+
+  # atv-directplay-animation + mkv source: passthrough → OUTPUT_EXT=mkv → MKV subtitle adjustment fires.
+  # Section 15 should disable SUB_BURN_FORCED and enable ASS/SSA preservation.
+  out="$(run_muxm --dry-run --profile atv-directplay-animation "$TESTDIR/basic_sdr_subs.mkv")"
+  assert_contains "[container-passthrough] Source .mkv" \
+    "dry-run atv-directplay-animation + mkv source: passthrough logs mkv resolution" "$out"
+  assert_contains "[atv-directplay-animation] MKV output: disabling forced-sub burning" \
+    "dry-run atv-directplay-animation + mkv source: MKV subtitle adjustment fires (SUB_BURN_FORCED→0)" "$out"
+  assert_contains "[atv-directplay-animation] MKV output: enabling native ASS/SSA" \
+    "dry-run atv-directplay-animation + mkv source: ASS/SSA preservation enabled" "$out"
+
+  # atv-directplay-animation + mp4 source: passthrough → OUTPUT_EXT=mp4 → NO MKV subtitle adjustment.
+  out="$(run_muxm --dry-run --profile atv-directplay-animation "$TESTDIR/compliant.mp4")"
+  assert_contains "[container-passthrough] Source .mp4" \
+    "dry-run atv-directplay-animation + mp4 source: passthrough logs mp4 resolution" "$out"
+  if ! echo "$out" | grep -qF "[atv-directplay-animation] MKV output: disabling forced-sub burning"; then
+    pass "dry-run atv-directplay-animation + mp4 source: MKV subtitle adjustment does NOT fire"
+  else
+    fail "dry-run atv-directplay-animation + mp4 source: MKV subtitle adjustment fired unexpectedly"
+  fi
+
+  # atv-directplay-animation + mkv source + --sub-burn-forced: _CLI_SUB_BURN_FORCED=1 →
+  # the "disabling forced-sub burning" branch is skipped, but ASS preservation still fires.
+  out="$(run_muxm --dry-run --profile atv-directplay-animation --sub-burn-forced "$TESTDIR/basic_sdr_subs.mkv")"
+  if ! echo "$out" | grep -qF "[atv-directplay-animation] MKV output: disabling forced-sub burning"; then
+    pass "dry-run atv-directplay-animation + mkv + --sub-burn-forced: CLI override respected"
+  else
+    fail "dry-run atv-directplay-animation + mkv + --sub-burn-forced: disabling msg appeared despite _CLI_SUB_BURN_FORCED=1"
+  fi
+  assert_contains "[atv-directplay-animation] MKV output: enabling native ASS/SSA" \
+    "dry-run atv-directplay-animation + mkv + --sub-burn-forced: ASS preservation still enabled" "$out"
 }
 
 # === Suite: Video Pipeline (real encodes) ===
@@ -1915,13 +1994,13 @@ test_audio() {
     assert_stream_count "Pipe in audio title: audio stream present" "$pipe_audio_out" a 1
   fi
 
-  # ---- Multi-track audio (dv-archival) ----
+  # ---- Multi-track audio (archive) ----
   # Uses hevc_multi_audio.mkv: 3 tracks — eng "Main Feature", eng "Director's Commentary", spa "Spanish"
 
   # Multi-track dry-run: shows ✓/✗ markers and announces multi-track mode
   log "Testing multi-track audio dry-run..."
   local mt_dry
-  mt_dry="$(run_muxm --dry-run --profile dv-archival "$TESTDIR/hevc_multi_audio.mkv")"
+  mt_dry="$(run_muxm --dry-run --profile archive "$TESTDIR/hevc_multi_audio.mkv")"
   assert_contains "multi-track" "Multi-track dry-run: announces multi-track mode" "$mt_dry"
   assert_contains "✓" "Multi-track dry-run: shows ✓ keep marker" "$mt_dry"
   assert_contains "✗" "Multi-track dry-run: shows ✗ drop marker (commentary filtered)" "$mt_dry"
@@ -1929,19 +2008,19 @@ test_audio() {
   # Multi-track commentary filtering: commentary track dropped, 2 survive
   log "Testing multi-track commentary filtering..."
   assert_contains "commentary" "Multi-track: commentary track detected" "$mt_dry"
-  # Default dv-archival: AUDIO_KEEP_COMMENTARY=0 drops the commentary track
+  # Default archive: AUDIO_KEEP_COMMENTARY=0 drops the commentary track
   assert_contains "keeping 2 of 3" "Multi-track: 2 of 3 tracks kept (commentary dropped)" "$mt_dry"
 
   # Multi-track demotion: --audio-track forces single-track
   log "Testing multi-track demotion on --audio-track..."
   local mt_demote_at
-  mt_demote_at="$(run_muxm --dry-run --profile dv-archival --audio-track 0 "$TESTDIR/hevc_multi_audio.mkv")"
+  mt_demote_at="$(run_muxm --dry-run --profile archive --audio-track 0 "$TESTDIR/hevc_multi_audio.mkv")"
   assert_contains "demoted" "Multi-track + --audio-track: demoted to single-track" "$mt_demote_at"
 
   # Multi-track demotion: --audio-force-codec forces single-track
   log "Testing multi-track demotion on --audio-force-codec..."
   local mt_demote_fc
-  mt_demote_fc="$(run_muxm --dry-run --profile dv-archival --audio-force-codec aac "$TESTDIR/hevc_multi_audio.mkv")"
+  mt_demote_fc="$(run_muxm --dry-run --profile archive --audio-force-codec aac "$TESTDIR/hevc_multi_audio.mkv")"
   assert_contains "demoted" "Multi-track + --audio-force-codec: demoted to single-track" "$mt_demote_fc"
 
   # Multi-track + --stereo-fallback: warns but does NOT demote.
@@ -1950,7 +2029,7 @@ test_audio() {
   # the stereo generation path.  Verify multi-track mode is preserved.
   log "Testing multi-track + --stereo-fallback stays in multi-track mode..."
   local mt_sf_out
-  mt_sf_out="$(run_muxm --dry-run --profile dv-archival --stereo-fallback "$TESTDIR/hevc_multi_audio.mkv")"
+  mt_sf_out="$(run_muxm --dry-run --profile archive --stereo-fallback "$TESTDIR/hevc_multi_audio.mkv")"
   assert_contains "multi-track" "Multi-track + --stereo-fallback: multi-track mode preserved" "$mt_sf_out"
   assert_contains "keeping" "Multi-track + --stereo-fallback: filter summary logged" "$mt_sf_out"
 
@@ -1959,7 +2038,7 @@ test_audio() {
   # profiles run after config files but before CLI).
   log "Testing multi-track language filter..."
   local mt_lang_out
-  mt_lang_out="$(run_muxm --dry-run --profile dv-archival \
+  mt_lang_out="$(run_muxm --dry-run --profile archive \
     --audio-lang-pref eng "$TESTDIR/hevc_multi_audio.mkv")"
   # eng main kept, eng commentary dropped (commentary), spa dropped (language) = keeping 1 of 3
   assert_contains "keeping 1 of 3" "Multi-track + --audio-lang-pref eng: 1 of 3 kept (spa + commentary dropped)" "$mt_lang_out"
@@ -2208,7 +2287,7 @@ EOF
     fi
   fi
 
-  # ---- Multi-track subtitle tests (dv-archival SUB_MULTI_TRACK=1) ----
+  # ---- Multi-track subtitle tests (archive SUB_MULTI_TRACK=1) ----
   # hevc_multi_subs.mkv: 5 subs — eng forced, eng full, eng SDH, spa full, fra full
 
   # Multi-track dry-run: shows ✓/✗ markers and announces multi-track mode
@@ -2216,7 +2295,7 @@ EOF
   # so skip-if-ideal would short-circuit before the subtitle pipeline runs.
   log "Testing multi-track subtitle dry-run..."
   local mt_sub_dry
-  mt_sub_dry="$(run_muxm --dry-run --no-skip-if-ideal --profile dv-archival "$TESTDIR/hevc_multi_subs.mkv")"
+  mt_sub_dry="$(run_muxm --dry-run --no-skip-if-ideal --profile archive "$TESTDIR/hevc_multi_subs.mkv")"
   assert_contains "multi-track" "Multi-track sub dry-run: announces multi-track mode" "$mt_sub_dry"
   assert_contains "✓" "Multi-track sub dry-run: shows ✓ keep marker" "$mt_sub_dry"
   assert_contains "keeping 5 of 5" "Multi-track sub dry-run: all 5 tracks kept (no filters)" "$mt_sub_dry"
@@ -2224,7 +2303,7 @@ EOF
   # Multi-track language filter: --sub-lang-pref eng keeps only English tracks
   log "Testing multi-track subtitle language filter..."
   local mt_sub_lang
-  mt_sub_lang="$(run_muxm --dry-run --profile dv-archival \
+  mt_sub_lang="$(run_muxm --dry-run --profile archive \
     --sub-lang-pref eng "$TESTDIR/hevc_multi_subs.mkv")"
   # eng forced + eng full + eng SDH kept, spa + fra dropped = keeping 3 of 5
   assert_contains "keeping 3 of 5" "Multi-track sub + --sub-lang-pref eng: 3 of 5 kept" "$mt_sub_lang"
@@ -2233,13 +2312,13 @@ EOF
   # Multi-track type filter: SUB_INCLUDE_SDH=0 drops SDH tracks
   log "Testing multi-track subtitle type filter (no SDH)..."
   local mt_sub_nosdh
-  mt_sub_nosdh="$(run_muxm --dry-run --profile dv-archival \
+  mt_sub_nosdh="$(run_muxm --dry-run --profile archive \
     --no-sub-sdh "$TESTDIR/hevc_multi_subs.mkv")"
   # eng forced + eng full + spa full + fra full kept, eng SDH dropped = keeping 4 of 5
   assert_contains "keeping 4 of 5" "Multi-track sub + --no-sub-sdh: 4 of 5 kept (SDH dropped)" "$mt_sub_nosdh"
 
   # Multi-track + SUB_MAX_TRACKS cap
-  # Uses .muxmrc instead of --profile dv-archival because profiles override config values.
+  # Uses .muxmrc instead of --profile archive because profiles override config values.
   log "Testing multi-track subtitle SUB_MAX_TRACKS cap..."
   local mt_sub_cap_home="$TESTDIR/sub_mt_cap_home"
   mkdir -p "$mt_sub_cap_home"
@@ -2257,20 +2336,20 @@ EOF
   # --no-skip-if-ideal: source is ideal, would skip before demotion message is printed.
   log "Testing multi-track subtitle demotion on --sub-burn-forced..."
   local mt_sub_demote
-  mt_sub_demote="$(run_muxm --dry-run --no-skip-if-ideal --profile dv-archival --sub-burn-forced "$TESTDIR/hevc_multi_subs.mkv")"
+  mt_sub_demote="$(run_muxm --dry-run --no-skip-if-ideal --profile archive --sub-burn-forced "$TESTDIR/hevc_multi_subs.mkv")"
   assert_contains "demoted" "Multi-track sub + --sub-burn-forced: demoted to single-track" "$mt_sub_demote"
 
   # Multi-track + --sub-export-external: stays in multi-track, logs note
   # --no-skip-if-ideal: source is ideal, would skip before export note is printed.
   log "Testing multi-track subtitle with --sub-export-external..."
   local mt_sub_export
-  mt_sub_export="$(run_muxm --dry-run --no-skip-if-ideal --profile dv-archival --sub-export-external "$TESTDIR/hevc_multi_subs.mkv")"
+  mt_sub_export="$(run_muxm --dry-run --no-skip-if-ideal --profile archive --sub-export-external "$TESTDIR/hevc_multi_subs.mkv")"
   assert_contains "multi-track" "Multi-track sub + --sub-export-external: stays in multi-track" "$mt_sub_export"
   assert_contains "export-external ignored" "Multi-track sub + --sub-export-external: notes export ignored" "$mt_sub_export"
 
   # ---- Multi-track subtitle tests (animation SUB_MULTI_TRACK=1) ----
   # animation profile: same multi-track pipeline, different defaults (SUB_MAX_TRACKS=6).
-  # NOTE: animation inherits the default SUB_LANG_PREF=eng (unlike dv-archival which
+  # NOTE: animation inherits the default SUB_LANG_PREF=eng (unlike archive which
   # clears it to ""). The hevc_multi_subs fixture has 3 eng + 1 spa + 1 fra = 5 tracks,
   # so only 3 English tracks survive the language filter by default.
 
@@ -2413,7 +2492,7 @@ test_output() {
   fi
 
   # ---- skip-if-ideal + multi-track: commentary triggers remux (not ideal) ----
-  # When AUDIO_MULTI_TRACK=1 and AUDIO_KEEP_COMMENTARY=0 (dv-archival default),
+  # When AUDIO_MULTI_TRACK=1 and AUDIO_KEEP_COMMENTARY=0 (archive default),
   # a source with a commentary track should NOT be considered ideal — the filter
   # would drop it, so remuxing must proceed.
   # Fixture: hevc_multi_audio.mkv — eng main + eng commentary + spa (3 audio tracks).
@@ -2422,7 +2501,7 @@ test_output() {
   local sii_mt_out="$TESTDIR/out_sii_mt_audio.mkv"
   log "Testing skip-if-ideal + multi-track audio (commentary forces remux)..."
   local sii_mt_log
-  sii_mt_log="$(MUXM_HOME="$sii_mt_home" run_muxm --profile dv-archival \
+  sii_mt_log="$(MUXM_HOME="$sii_mt_home" run_muxm --profile archive \
     "$TESTDIR/hevc_multi_audio.mkv" "$sii_mt_out")"
   # Should NOT skip — commentary track triggers audio filter, source is not ideal
   if echo "$sii_mt_log" | grep -qiE "already matches.*skip|source already.*ideal"; then
@@ -2443,13 +2522,13 @@ test_output() {
   # The old code used -map 0 (ffmpeg default = one stream per type), silently
   # dropping all but the first subtitle.  This test catches that regression.
   # Fixture: hevc_multi_subs.mkv — 5 subs (eng forced, eng full, eng SDH, spa, fra).
-  # dv-archival defaults: SUB_MULTI_TRACK=1, SUB_LANG_PREF="" → all 5 pass.
+  # archive defaults: SUB_MULTI_TRACK=1, SUB_LANG_PREF="" → all 5 pass.
   local sii_subs_home="$TESTDIR/sii_subs_home"
   mkdir -p "$sii_subs_home"
   local sii_subs_out="$TESTDIR/out_sii_subs.mkv"
   log "Testing skip-if-ideal per-stream gating (multi-sub, all pass)..."
   local sii_subs_log
-  sii_subs_log="$(MUXM_HOME="$sii_subs_home" run_muxm --profile dv-archival \
+  sii_subs_log="$(MUXM_HOME="$sii_subs_home" run_muxm --profile archive \
     "$TESTDIR/hevc_multi_subs.mkv" "$sii_subs_out")"
   if echo "$sii_subs_log" | grep -qiE "ideal|skip|already|compliant"; then
     pass "skip-if-ideal per-stream: source recognized as ideal"
@@ -2535,13 +2614,13 @@ test_containers() {
   fi
 
   # ---- Container passthrough: mkv source → mkv output ----
-  # dv-archival sets OUTPUT_EXT="" (passthrough). Source is .mkv → passthrough resolves
+  # archive sets OUTPUT_EXT="" (passthrough). Source is .mkv → passthrough resolves
   # OUTPUT_EXT to "mkv" → MUX_FORMAT=matroska. Output path explicitly named .mkv to
   # avoid source/output collision on auto-derived names.
   outfile="$TESTDIR/container_passthrough_mkv.mkv"
   log "Testing container passthrough: mkv source → mkv output..."
   if assert_encode "passthrough mkv→mkv: output produced" "$outfile" \
-       --profile dv-archival --preset ultrafast "$TESTDIR/hevc_sdr_51.mkv"; then
+       --profile archive --preset ultrafast "$TESTDIR/hevc_sdr_51.mkv"; then
     fmt="$(probe_format "$outfile" format_name)"
     assert_contains "matroska" "passthrough mkv→mkv: output is Matroska container" "$fmt"
   fi
@@ -2551,11 +2630,11 @@ test_containers() {
   # Use --output-ext "" to trigger passthrough, OR rely on default being mkv.
   # Better: use default profile + compliant.mp4 with explicit .mp4 output to verify
   # that a passthrough profile correctly produces an mp4 container from an mp4 source.
-  # We use dv-archival (passthrough profile) + compliant.mp4 source + explicit .mp4 output.
+  # We use archive (passthrough profile) + compliant.mp4 source + explicit .mp4 output.
   outfile="$TESTDIR/container_passthrough_mp4.mp4"
-  log "Testing container passthrough: mp4 source → mp4 output (dv-archival profile)..."
+  log "Testing container passthrough: mp4 source → mp4 output (archive profile)..."
   if assert_encode "passthrough mp4→mp4: output produced" "$outfile" \
-       --profile dv-archival --preset ultrafast "$TESTDIR/compliant.mp4"; then
+       --profile archive --preset ultrafast "$TESTDIR/compliant.mp4"; then
     fmt="$(probe_format "$outfile" format_name)"
     if echo "$fmt" | grep -qiE "mp4|mov"; then
       pass "passthrough mp4→mp4: output is MP4/MOV-family container"
@@ -2577,7 +2656,7 @@ test_containers() {
     outfile="$TESTDIR/container_passthrough_m4v.m4v"
     log "Testing container passthrough: m4v source → m4v output..."
     if assert_encode "passthrough m4v→m4v: output produced" "$outfile" \
-         --profile dv-archival --preset ultrafast "$m4v_src"; then
+         --profile archive --preset ultrafast "$m4v_src"; then
       fmt="$(probe_format "$outfile" format_name)"
       if echo "$fmt" | grep -qiE "mp4|mov|m4v"; then
         pass "passthrough m4v→m4v: output is MP4/M4V-family container"
@@ -2601,7 +2680,7 @@ test_containers() {
     "$avi_src" 2>/dev/null
   if [[ -f "$avi_src" ]]; then
     local avi_out
-    avi_out="$(run_muxm --dry-run --profile dv-archival "$avi_src")"
+    avi_out="$(run_muxm --dry-run --profile archive "$avi_src")"
     if echo "$avi_out" | grep -qiE "not supported for output|defaulting to .mkv"; then
       pass "passthrough fallback: .avi source triggers mkv fallback notice"
     else
@@ -2613,12 +2692,12 @@ test_containers() {
   fi
 
   # ---- CLI --output-ext overrides container passthrough ----
-  # dv-archival (passthrough profile) + --output-ext mp4 + mkv source → mp4 output.
+  # archive (passthrough profile) + --output-ext mp4 + mkv source → mp4 output.
   # _OUTPUT_EXT_EXPLICIT=1 skips passthrough resolution, keeping OUTPUT_EXT=mp4.
   outfile="$TESTDIR/container_cli_override.mp4"
   log "Testing --output-ext CLI override of passthrough profile..."
   if assert_encode "passthrough CLI override: --output-ext mp4 wins" "$outfile" \
-       --profile dv-archival --output-ext mp4 --preset ultrafast "$TESTDIR/hevc_sdr_51.mkv"; then
+       --profile archive --output-ext mp4 --preset ultrafast "$TESTDIR/hevc_sdr_51.mkv"; then
     fmt="$(probe_format "$outfile" format_name)"
     if echo "$fmt" | grep -qiE "mp4|mov"; then
       pass "passthrough CLI override: output is MP4 container (not matroska)"
@@ -3161,7 +3240,7 @@ _test_unit_audio_helpers() {
   assert_muxm_fn_stdout "_audio_codec_rank(aac)=4"            "4"  _audio_codec_rank "$rank_env" "aac"
   assert_muxm_fn_stdout "_audio_codec_rank(unknown_codec)=10" "10" _audio_codec_rank "$rank_env" "unknown_codec"
 
-  # ---- _audio_codec_rank with dv-archival preference ----
+  # ---- _audio_codec_rank with archive preference ----
   local archival_rank_env='AUDIO_CODEC_PREFERENCE="truehd,dts,flac,eac3,ac3,aac,alac,other"'
   assert_muxm_fn_stdout "_audio_codec_rank(truehd, archival)=0"  "0"  _audio_codec_rank "$archival_rank_env" "truehd"
   assert_muxm_fn_stdout "_audio_codec_rank(dts, archival)=1"     "1"  _audio_codec_rank "$archival_rank_env" "dts"
@@ -3416,14 +3495,16 @@ _test_unit_validation_helpers() {
   # Validates profile names against VALID_PROFILES constant.
   local profile_env
   profile_env="$(grep '^readonly VALID_PROFILES=' "$MUXM")"
-  assert_muxm_fn_exit "_is_valid_profile('streaming')=valid"         0 _is_valid_profile "$profile_env" "streaming"
-  assert_muxm_fn_exit "_is_valid_profile('dv-archival')=valid"       0 _is_valid_profile "$profile_env" "dv-archival"
-  assert_muxm_fn_exit "_is_valid_profile('universal')=valid"         0 _is_valid_profile "$profile_env" "universal"
-  assert_muxm_fn_exit "_is_valid_profile('animation')=valid"         0 _is_valid_profile "$profile_env" "animation"
-  assert_muxm_fn_exit "_is_valid_profile('hdr10-hq')=valid"          0 _is_valid_profile "$profile_env" "hdr10-hq"
-  assert_muxm_fn_exit "_is_valid_profile('atv-directplay-hq')=valid" 0 _is_valid_profile "$profile_env" "atv-directplay-hq"
-  assert_muxm_fn_exit "_is_valid_profile('nonexistent')=invalid"     1 _is_valid_profile "$profile_env" "nonexistent"
-  assert_muxm_fn_exit "_is_valid_profile('')=invalid (empty)"        1 _is_valid_profile "$profile_env" ""
+  assert_muxm_fn_exit "_is_valid_profile('streaming')=valid"                 0 _is_valid_profile "$profile_env" "streaming"
+  assert_muxm_fn_exit "_is_valid_profile('archive')=valid"                   0 _is_valid_profile "$profile_env" "archive"
+  assert_muxm_fn_exit "_is_valid_profile('dv-archival')=valid (deprecated)"  0 _is_valid_profile "$profile_env" "dv-archival"
+  assert_muxm_fn_exit "_is_valid_profile('universal')=valid"                 0 _is_valid_profile "$profile_env" "universal"
+  assert_muxm_fn_exit "_is_valid_profile('animation')=valid"                 0 _is_valid_profile "$profile_env" "animation"
+  assert_muxm_fn_exit "_is_valid_profile('hdr10-hq')=valid"                  0 _is_valid_profile "$profile_env" "hdr10-hq"
+  assert_muxm_fn_exit "_is_valid_profile('atv-directplay-hq')=valid"         0 _is_valid_profile "$profile_env" "atv-directplay-hq"
+  assert_muxm_fn_exit "_is_valid_profile('atv-directplay-animation')=valid"  0 _is_valid_profile "$profile_env" "atv-directplay-animation"
+  assert_muxm_fn_exit "_is_valid_profile('nonexistent')=invalid"             1 _is_valid_profile "$profile_env" "nonexistent"
+  assert_muxm_fn_exit "_is_valid_profile('')=invalid (empty)"                1 _is_valid_profile "$profile_env" ""
 
   # ---- _valid_profiles_display ----
   # Verify the comma-separated format output for user-facing messages.
@@ -3536,13 +3617,14 @@ _test_unit_misc_helpers() {
     got="$(PROFILE_NAME="$profile" bash -c "$pc_body"$'\n'"_profile_comment")"
     if [[ "$got" == "$expect" ]]; then pass "_profile_comment($profile)"; else fail "_profile_comment($profile) expected '$expect', got '$got'"; fi
   }
-  _test_pc "dv-archival"       "Preserved in digital amber."
-  _test_pc "hdr10-hq"          "All the nits, none of the drama."
-  _test_pc "atv-directplay-hq" "Shaped to please the most demanding rectangle in your living room."
-  _test_pc "streaming"         "Lean, mean, streaming machine."
-  _test_pc "animation"         "psy-rd turned down, sakuga turned up."
-  _test_pc "universal"         "Lowest common denominator, highest common decency."
-  _test_pc "unknown"           ""
+  _test_pc "archive"             "Preserved in digital amber."
+  _test_pc "hdr10-hq"            "All the nits, none of the drama."
+  _test_pc "atv-directplay-hq"   "Shaped to please the most demanding rectangle in your living room."
+  _test_pc "atv-directplay-animation" "Studio Ghibli didn't suffer for mov_text."
+  _test_pc "streaming"           "Lean, mean, streaming machine."
+  _test_pc "animation"           "psy-rd turned down, sakuga turned up."
+  _test_pc "universal"           "Lowest common denominator, highest common decency."
+  _test_pc "unknown"             ""
 
   # ---- _audio_lang_matches ----
   # Returns 0 if lang is in AUDIO_LANG_PREF (comma-separated), 1 otherwise.
@@ -3599,7 +3681,7 @@ test_profile_e2e() {
     "streaming|basic_sdr_subs.mkv|e2e_streaming.mp4|mp4|-|--crf 28"
     "animation|multi_subs.mkv|e2e_animation.mkv|mkv|-|--crf 28"
     "universal|basic_sdr_subs.mkv|e2e_universal.mp4|mp4|h264|--crf 28"
-    "dv-archival|hevc_sdr_51.mkv|e2e_dv_archival.mkv|mkv|hevc|"
+    "archive|hevc_sdr_51.mkv|e2e_archive.mkv|mkv|hevc|"
     "hdr10-hq|hevc_hdr10_tagged.mkv|e2e_hdr10_hq.mkv|mkv|hevc|--crf 28"
     "atv-directplay-hq|basic_sdr_subs.mkv|e2e_atv_directplay.mp4|mp4|hevc|--crf 28"
   )
@@ -3634,7 +3716,7 @@ test_profile_e2e() {
 
       # Profile-specific extra checks
       case "$profile" in
-        dv-archival|atv-directplay-hq)
+        archive|atv-directplay-hq)
           assert_stream_count "$profile: audio present" "$outfile" a 1
           ;;
         hdr10-hq|animation)
@@ -3675,42 +3757,42 @@ test_profile_e2e() {
 
   export HOME="$_saved_home"
 
-  # ---- dv-archival multi-track audio: verify commentary filtered, rest preserved ----
+  # ---- archive multi-track audio: verify commentary filtered, rest preserved ----
   # hevc_multi_audio.mkv: 3 audio tracks — eng "Main Feature", eng "Director's Commentary", spa "Spanish"
-  # dv-archival defaults: AUDIO_MULTI_TRACK=1, AUDIO_KEEP_COMMENTARY=0, AUDIO_LANG_PREF="" (keep all langs)
+  # archive defaults: AUDIO_MULTI_TRACK=1, AUDIO_KEEP_COMMENTARY=0, AUDIO_LANG_PREF="" (keep all langs)
   # Expected: commentary dropped → 2 audio tracks in output (eng main + spa)
   local mt_e2e_home="$TESTDIR/e2e_mt_home"
   mkdir -p "$mt_e2e_home"
 
-  local mt_e2e_out="$TESTDIR/e2e_dv_archival_multi.mkv"
-  log "Full encode: dv-archival profile multi-track audio..."
-  if MUXM_HOME="$mt_e2e_home" assert_encode "dv-archival multi-track: e2e output produced" "$mt_e2e_out" \
-       --profile dv-archival "$TESTDIR/hevc_multi_audio.mkv"; then
+  local mt_e2e_out="$TESTDIR/e2e_archive_multi.mkv"
+  log "Full encode: archive profile multi-track audio..."
+  if MUXM_HOME="$mt_e2e_home" assert_encode "archive multi-track: e2e output produced" "$mt_e2e_out" \
+       --profile archive "$TESTDIR/hevc_multi_audio.mkv"; then
     # Should have 2 audio tracks (commentary dropped)
     local mt_e2e_acount
     mt_e2e_acount="$(count_streams "$mt_e2e_out" a)"
     if [[ "$mt_e2e_acount" -eq 2 ]]; then
-      pass "dv-archival multi-track e2e: 2 audio tracks (commentary filtered)"
+      pass "archive multi-track e2e: 2 audio tracks (commentary filtered)"
     else
-      fail "dv-archival multi-track e2e: expected 2 audio tracks, got $mt_e2e_acount"
+      fail "archive multi-track e2e: expected 2 audio tracks, got $mt_e2e_acount"
     fi
     # Video should be copy (HEVC, not re-encoded)
-    assert_probe "dv-archival multi-track e2e: video is HEVC (copy)" "$mt_e2e_out" codec_name hevc
+    assert_probe "archive multi-track e2e: video is HEVC (copy)" "$mt_e2e_out" codec_name hevc
     # First audio track should have eng language
     local mt_e2e_lang0
     mt_e2e_lang0="$(probe_stream_tag "$mt_e2e_out" a:0 language)"
     if [[ "$mt_e2e_lang0" == "eng" ]]; then
-      pass "dv-archival multi-track e2e: first audio track is English"
+      pass "archive multi-track e2e: first audio track is English"
     else
-      fail "dv-archival multi-track e2e: expected eng, got lang='$mt_e2e_lang0'"
+      fail "archive multi-track e2e: expected eng, got lang='$mt_e2e_lang0'"
     fi
     # Second audio track should have spa language
     local mt_e2e_lang1
     mt_e2e_lang1="$(probe_stream_tag "$mt_e2e_out" a:1 language)"
     if [[ "$mt_e2e_lang1" == "spa" ]]; then
-      pass "dv-archival multi-track e2e: second audio track is Spanish"
+      pass "archive multi-track e2e: second audio track is Spanish"
     else
-      fail "dv-archival multi-track e2e: expected spa, got lang='$mt_e2e_lang1'"
+      fail "archive multi-track e2e: expected spa, got lang='$mt_e2e_lang1'"
     fi
     # Audio title metadata alignment: after commentary filtering, output indices
     # shift (source #0→out #0, source #2→out #1). The fix uses a sequential
@@ -3719,87 +3801,87 @@ test_profile_e2e() {
     local mt_e2e_title0
     mt_e2e_title0="$(probe_stream_tag "$mt_e2e_out" a:0 title)"
     if [[ -n "$mt_e2e_title0" ]]; then
-      pass "dv-archival multi-track e2e: first audio track has title ('$mt_e2e_title0')"
+      pass "archive multi-track e2e: first audio track has title ('$mt_e2e_title0')"
     else
-      fail "dv-archival multi-track e2e: first audio track has no title (metadata alignment bug)"
+      fail "archive multi-track e2e: first audio track has no title (metadata alignment bug)"
     fi
     local mt_e2e_title1
     mt_e2e_title1="$(probe_stream_tag "$mt_e2e_out" a:1 title)"
     if [[ -n "$mt_e2e_title1" ]]; then
-      pass "dv-archival multi-track e2e: second audio track has title ('$mt_e2e_title1')"
+      pass "archive multi-track e2e: second audio track has title ('$mt_e2e_title1')"
     else
-      fail "dv-archival multi-track e2e: second audio track has no title (metadata alignment bug)"
+      fail "archive multi-track e2e: second audio track has no title (metadata alignment bug)"
     fi
   fi
 
-  # ---- dv-archival multi-track subtitles: verify all subs kept, dispositions correct ----
+  # ---- archive multi-track subtitles: verify all subs kept, dispositions correct ----
   # hevc_multi_subs.mkv: 5 subs — eng forced, eng full, eng SDH, spa full, fra full
-  # dv-archival defaults: SUB_MULTI_TRACK=1, all SUB_INCLUDE_*=1, SUB_LANG_PREF="" (keep all)
+  # archive defaults: SUB_MULTI_TRACK=1, all SUB_INCLUDE_*=1, SUB_LANG_PREF="" (keep all)
   # Expected: all 5 subtitle tracks preserved in output
   local mt_sub_e2e_home="$TESTDIR/e2e_mt_sub_home"
   mkdir -p "$mt_sub_e2e_home"
 
-  local mt_sub_e2e_out="$TESTDIR/e2e_dv_archival_multi_subs.mkv"
-  log "Full encode: dv-archival profile multi-track subtitles..."
+  local mt_sub_e2e_out="$TESTDIR/e2e_archive_multi_subs.mkv"
+  log "Full encode: archive profile multi-track subtitles..."
   # --no-skip-if-ideal: fixture is fully compliant; without this, muxm skips processing.
-  if MUXM_HOME="$mt_sub_e2e_home" assert_encode "dv-archival multi-track subs: e2e output produced" "$mt_sub_e2e_out" \
-       --no-skip-if-ideal --profile dv-archival "$TESTDIR/hevc_multi_subs.mkv"; then
+  if MUXM_HOME="$mt_sub_e2e_home" assert_encode "archive multi-track subs: e2e output produced" "$mt_sub_e2e_out" \
+       --no-skip-if-ideal --profile archive "$TESTDIR/hevc_multi_subs.mkv"; then
     # Should have 5 subtitle tracks (all kept)
     local mt_sub_e2e_scount
     mt_sub_e2e_scount="$(count_streams "$mt_sub_e2e_out" s)"
     if [[ "$mt_sub_e2e_scount" -eq 5 ]]; then
-      pass "dv-archival multi-track sub e2e: 5 subtitle tracks preserved"
+      pass "archive multi-track sub e2e: 5 subtitle tracks preserved"
     else
-      fail "dv-archival multi-track sub e2e: expected 5 subtitle tracks, got $mt_sub_e2e_scount"
+      fail "archive multi-track sub e2e: expected 5 subtitle tracks, got $mt_sub_e2e_scount"
     fi
     # Video should be copy (HEVC)
-    assert_probe "dv-archival multi-track sub e2e: video is HEVC (copy)" "$mt_sub_e2e_out" codec_name hevc
+    assert_probe "archive multi-track sub e2e: video is HEVC (copy)" "$mt_sub_e2e_out" codec_name hevc
     # First sub should have eng language
     local mt_sub_e2e_lang0
     mt_sub_e2e_lang0="$(probe_stream_tag "$mt_sub_e2e_out" s:0 language)"
     if [[ "$mt_sub_e2e_lang0" == "eng" ]]; then
-      pass "dv-archival multi-track sub e2e: first subtitle is English"
+      pass "archive multi-track sub e2e: first subtitle is English"
     else
-      fail "dv-archival multi-track sub e2e: expected eng, got lang='$mt_sub_e2e_lang0'"
+      fail "archive multi-track sub e2e: expected eng, got lang='$mt_sub_e2e_lang0'"
     fi
     # Fourth sub (s:3) should have spa language
     local mt_sub_e2e_lang3
     mt_sub_e2e_lang3="$(probe_stream_tag "$mt_sub_e2e_out" s:3 language)"
     if [[ "$mt_sub_e2e_lang3" == "spa" ]]; then
-      pass "dv-archival multi-track sub e2e: fourth subtitle is Spanish"
+      pass "archive multi-track sub e2e: fourth subtitle is Spanish"
     else
-      fail "dv-archival multi-track sub e2e: expected spa, got lang='$mt_sub_e2e_lang3'"
+      fail "archive multi-track sub e2e: expected spa, got lang='$mt_sub_e2e_lang3'"
     fi
     # Fifth sub (s:4) should have fra language
     local mt_sub_e2e_lang4
     mt_sub_e2e_lang4="$(probe_stream_tag "$mt_sub_e2e_out" s:4 language)"
     if [[ "$mt_sub_e2e_lang4" == "fra" ]]; then
-      pass "dv-archival multi-track sub e2e: fifth subtitle is French"
+      pass "archive multi-track sub e2e: fifth subtitle is French"
     else
-      fail "dv-archival multi-track sub e2e: expected fra, got lang='$mt_sub_e2e_lang4'"
+      fail "archive multi-track sub e2e: expected fra, got lang='$mt_sub_e2e_lang4'"
     fi
     # Verify first sub has forced disposition
     local mt_sub_e2e_dispo0
     mt_sub_e2e_dispo0="$(ffprobe -v error -select_streams s:0 -show_entries stream_disposition=forced -of csv=p=0 "$mt_sub_e2e_out" 2>/dev/null | head -1)"
     if [[ "$mt_sub_e2e_dispo0" == "1" ]]; then
-      pass "dv-archival multi-track sub e2e: first subtitle has forced disposition"
+      pass "archive multi-track sub e2e: first subtitle has forced disposition"
     else
-      fail "dv-archival multi-track sub e2e: first subtitle forced disposition expected 1, got '$mt_sub_e2e_dispo0'"
+      fail "archive multi-track sub e2e: first subtitle forced disposition expected 1, got '$mt_sub_e2e_dispo0'"
     fi
   fi
 
-  # ---- dv-archival multi-track subtitles with language filter ----
+  # ---- archive multi-track subtitles with language filter ----
   # --sub-lang-pref eng should keep only eng tracks (3 of 5)
-  local mt_sub_lang_e2e_out="$TESTDIR/e2e_dv_archival_multi_subs_eng.mkv"
-  log "Full encode: dv-archival multi-track subs with --sub-lang-pref eng..."
-  if MUXM_HOME="$mt_sub_e2e_home" assert_encode "dv-archival multi-track subs eng: e2e output produced" "$mt_sub_lang_e2e_out" \
-       --profile dv-archival --sub-lang-pref eng "$TESTDIR/hevc_multi_subs.mkv"; then
+  local mt_sub_lang_e2e_out="$TESTDIR/e2e_archive_multi_subs_eng.mkv"
+  log "Full encode: archive multi-track subs with --sub-lang-pref eng..."
+  if MUXM_HOME="$mt_sub_e2e_home" assert_encode "archive multi-track subs eng: e2e output produced" "$mt_sub_lang_e2e_out" \
+       --profile archive --sub-lang-pref eng "$TESTDIR/hevc_multi_subs.mkv"; then
     local mt_sub_lang_scount
     mt_sub_lang_scount="$(count_streams "$mt_sub_lang_e2e_out" s)"
     if [[ "$mt_sub_lang_scount" -eq 3 ]]; then
-      pass "dv-archival multi-track sub eng e2e: 3 subtitle tracks (eng only)"
+      pass "archive multi-track sub eng e2e: 3 subtitle tracks (eng only)"
     else
-      fail "dv-archival multi-track sub eng e2e: expected 3 subtitle tracks, got $mt_sub_lang_scount"
+      fail "archive multi-track sub eng e2e: expected 3 subtitle tracks, got $mt_sub_lang_scount"
     fi
   fi
 
@@ -3840,23 +3922,23 @@ test_profile_e2e() {
     fi
   fi
 
-  # ---- dv-archival multi-track audio with language filter ----
+  # ---- archive multi-track audio with language filter ----
   # Dry-run shows "keeping 1 of 3" for --audio-lang-pref eng (commentary dropped
   # by AUDIO_KEEP_COMMENTARY=0, spa dropped by language filter).  This real encode
   # confirms the ffmpeg command is built correctly — output has exactly 1 audio track.
   # Fixture: hevc_multi_audio.mkv — eng main + eng commentary + spa (3 audio tracks).
-  local mt_audio_lang_e2e_out="$TESTDIR/e2e_dv_archival_mt_audio_eng.mkv"
-  log "Full encode: dv-archival multi-track audio with --audio-lang-pref eng..."
-  if MUXM_HOME="$mt_e2e_home" assert_encode "dv-archival multi-track audio eng: e2e output produced" "$mt_audio_lang_e2e_out" \
-       --profile dv-archival --audio-lang-pref eng "$TESTDIR/hevc_multi_audio.mkv"; then
-    assert_stream_count "dv-archival multi-track audio eng e2e: 1 audio track (eng main only)" \
+  local mt_audio_lang_e2e_out="$TESTDIR/e2e_archive_mt_audio_eng.mkv"
+  log "Full encode: archive multi-track audio with --audio-lang-pref eng..."
+  if MUXM_HOME="$mt_e2e_home" assert_encode "archive multi-track audio eng: e2e output produced" "$mt_audio_lang_e2e_out" \
+       --profile archive --audio-lang-pref eng "$TESTDIR/hevc_multi_audio.mkv"; then
+    assert_stream_count "archive multi-track audio eng e2e: 1 audio track (eng main only)" \
       "$mt_audio_lang_e2e_out" a 1 1
     local mt_audio_lang_e2e_lang0
     mt_audio_lang_e2e_lang0="$(probe_stream_tag "$mt_audio_lang_e2e_out" a:0 language)"
     if [[ "$mt_audio_lang_e2e_lang0" == "eng" ]]; then
-      pass "dv-archival multi-track audio eng e2e: surviving track is English"
+      pass "archive multi-track audio eng e2e: surviving track is English"
     else
-      fail "dv-archival multi-track audio eng e2e: expected eng, got '$mt_audio_lang_e2e_lang0'"
+      fail "archive multi-track audio eng e2e: expected eng, got '$mt_audio_lang_e2e_lang0'"
     fi
   fi
 }
