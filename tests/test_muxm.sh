@@ -24,6 +24,14 @@ PASS=0
 FAIL=0
 SKIP=0
 ERRORS=()
+PARALLEL=1          # 1 = parallel multi-suite (default), 0 = sequential (--no-parallel)
+JOBS=""             # concurrency limit; empty = auto (nproc or 4)
+FAILED_SUITES=()    # suite names that had ≥1 failure
+SUITE_STATUS=()     # "suite:PASS" or "suite:FAIL" entries for per-suite summary
+
+# Global state for parallel runner (accessed by SIGINT handler)
+_PAR_TMPDIR=""
+declare -A _PAR_PIDS=()
 
 # muxm exits 11 for validation/usage errors (bad flags, missing files, invalid values, etc.).
 # Exit code 11 is chosen to avoid collision with standard shell/signal codes (1-2, 126-128+N).
@@ -83,10 +91,72 @@ show_help() {
     --muxm PATH    Path to muxm binary (default: ./muxm)
     --suite NAME   Run a specific suite (see above)
     --verbose      Show output snippets on failure
+    --parallel     Run multiple suites in parallel (default)
+    --no-parallel  Force sequential suite execution
+    -j, --jobs N   Max concurrent suites (default: nproc or 4)
     -h, --help     Show this help
+    --cleanup      Remove all muxm test directories and exit
 
 EOF
   exit 0
+}
+
+# ---- Cleanup ----
+_cleanup_format_kb() {
+  local kb=$1
+  if (( kb >= 1048576 )); then
+    printf "%.1fG" "$(echo "scale=1; $kb / 1048576" | bc)"
+  elif (( kb >= 1024 )); then
+    printf "%.1fM" "$(echo "scale=1; $kb / 1024" | bc)"
+  else
+    printf "%dK" "$kb"
+  fi
+}
+
+do_cleanup() {
+  local tmpbase="${TMPDIR:-/tmp}"
+  local dirs=()
+  for d in "$tmpbase"/muxm-test.*; do
+    [[ -d "$d" ]] && dirs+=("$d")
+  done
+  if [[ ${#dirs[@]} -eq 0 ]]; then
+    echo "No muxm test directories found."
+    exit 0
+  fi
+  local total_kb=0
+  for d in "${dirs[@]}"; do
+    local size kb
+    size="$(du -sh "$d" 2>/dev/null | cut -f1)"
+    kb="$(du -sk "$d" 2>/dev/null | awk '{print $1}')"
+    echo "Removing $d (${size})"
+    rm -rf "$d"
+    total_kb=$(( total_kb + ${kb:-0} ))
+  done
+  local n=${#dirs[@]} total_str
+  total_str="$(_cleanup_format_kb "$total_kb")"
+  if [[ $n -eq 1 ]]; then
+    echo "Cleaned $n directory ($total_str freed)"
+  else
+    echo "Cleaned $n directories ($total_str freed)"
+  fi
+  exit 0
+}
+
+auto_cleanup_test_dirs() {
+  local tmpbase="${TMPDIR:-/tmp}"
+  local dirs=()
+  for d in "$tmpbase"/muxm-test.*; do
+    [[ -d "$d" ]] && dirs+=("$d")
+  done
+  if [[ ${#dirs[@]} -gt 0 ]]; then
+    rm -rf "${dirs[@]}"
+    local n=${#dirs[@]}
+    if [[ $n -eq 1 ]]; then
+      echo "Auto-cleaned $n stale test directory."
+    else
+      echo "Auto-cleaned $n stale test directories."
+    fi
+  fi
 }
 
 # ---- Parse args ----
@@ -95,10 +165,14 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --muxm)   MUXM="$2"; shift 2 ;;
-    --suite)  SUITE="$2"; shift 2 ;;
-    --verbose) VERBOSE=1; shift ;;
-    -h|--help) show_help ;;
+    --muxm)        MUXM="$2"; shift 2 ;;
+    --suite)       SUITE="$2"; shift 2 ;;
+    --verbose)     VERBOSE=1; shift ;;
+    --parallel)    PARALLEL=1; shift ;;
+    --no-parallel) PARALLEL=0; shift ;;
+    -j|--jobs)     JOBS="$2"; shift 2 ;;
+    -h|--help)  show_help ;;
+    --cleanup)  do_cleanup ;;
     *) echo "Unknown option: $1 (try --help)"; exit 1 ;;
   esac
 done
@@ -4453,12 +4527,213 @@ EOF
   fi
 }
 
+# ---- Suite mapping and parallel infrastructure ----
+
+# Maps suite name → test function name
+declare -A _SUITE_FN=(
+  [cli]=test_cli             [toggles]=test_toggles       [unit]=test_unit
+  [completions]=test_completions [setup]=test_setup       [config]=test_config
+  [profiles]=test_profiles   [conflicts]=test_conflicts   [collision]=test_collision
+  [dryrun]=test_dryrun       [video]=test_video           [hdr]=test_hdr
+  [audio]=test_audio         [subs]=test_subs             [ext_subs]=test_ext_subs
+  [output]=test_output       [containers]=test_containers [metadata]=test_metadata
+  [edge]=test_edge           [e2e]=test_profile_e2e
+)
+
+# Canonical execution order for "all"
+readonly -a _ALL_SUITE_ORDER=(
+  cli toggles unit completions setup config profiles conflicts collision dryrun
+  video hdr audio subs ext_subs output containers metadata edge e2e
+)
+
+# SIGINT handler: kill child processes, flush captured output, exit 130
+# shellcheck disable=SC2329  # invoked indirectly via trap
+_par_sigint() {
+  printf "\r\033[K\n" >&2
+  printf "%b  Interrupted — killing suite processes...%b\n" "$RED" "$NC" >&2
+  local pid
+  for pid in "${_PAR_PIDS[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+  if [[ -n "$_PAR_TMPDIR" && -d "$_PAR_TMPDIR" ]]; then
+    local s
+    for s in "${_ALL_SUITE_ORDER[@]}"; do
+      [[ -f "$_PAR_TMPDIR/$s.done" && -f "$_PAR_TMPDIR/$s.out" ]] || continue
+      cat "$_PAR_TMPDIR/$s.out"
+    done
+    rm -rf "$_PAR_TMPDIR"
+  fi
+  exit 130
+}
+
+# Launch one suite as a background job, capturing all output to a temp file.
+_par_launch() {
+  local suite="$1"
+  local fn="${_SUITE_FN[$suite]}"
+  # shellcheck disable=SC2030  # intentional subshell isolation; results written to temp files
+  (
+    set +e
+    PASS=0; FAIL=0; SKIP=0
+    ERRORS=()
+    "$fn"
+    {
+      printf "PASS=%d\nFAIL=%d\nSKIP=%d\n" "$PASS" "$FAIL" "$SKIP"
+      local e
+      for e in "${ERRORS[@]}"; do printf "ERR\t%s\n" "$e"; done
+    } > "$_PAR_TMPDIR/$suite.result"
+    touch "$_PAR_TMPDIR/$suite.done"
+  ) > "$_PAR_TMPDIR/$suite.out" 2>&1 &
+  _PAR_PIDS[$suite]=$!
+}
+
+# Run a list of suites in parallel (up to $JOBS concurrent).
+# Aggregates results into global PASS/FAIL/SKIP/ERRORS/SUITE_STATUS/FAILED_SUITES.
+run_parallel_batch() {
+  local -a batch=("$@")
+  local n=${#batch[@]}
+  [[ $n -eq 0 ]] && return 0
+
+  local max_jobs
+  if [[ -n "${JOBS:-}" ]]; then
+    max_jobs=$JOBS
+  elif command -v nproc >/dev/null 2>&1; then
+    max_jobs=$(nproc)
+  else
+    max_jobs=4
+  fi
+
+  _PAR_TMPDIR=$(mktemp -d /tmp/muxm-par.XXXXXXXX)
+  _PAR_PIDS=()
+  trap '_par_sigint' INT
+
+  local running=0 next_idx=0 done_count=0 failed_count=0 print_idx=0
+
+  # Seed initial batch of jobs
+  while (( next_idx < n && running < max_jobs )); do
+    _par_launch "${batch[$next_idx]}"
+    next_idx=$((next_idx + 1))
+    running=$((running + 1))
+  done
+
+  # Poll until all suites complete
+  while (( done_count < n )); do
+    local s
+    for s in "${batch[@]}"; do
+      [[ -f "$_PAR_TMPDIR/$s.ack" ]] && continue    # already reaped
+      [[ ! -f "$_PAR_TMPDIR/$s.done" ]] && continue # still running
+
+      wait "${_PAR_PIDS[$s]}" 2>/dev/null || true
+      touch "$_PAR_TMPDIR/$s.ack"
+      running=$((running - 1))
+      done_count=$((done_count + 1))
+
+      # Check suite pass/fail
+      local sf=0
+      if [[ -f "$_PAR_TMPDIR/$s.result" ]]; then
+        sf=$(grep -m1 "^FAIL=" "$_PAR_TMPDIR/$s.result" | cut -d= -f2 2>/dev/null || echo 0)
+      fi
+      if [[ "${sf:-0}" -gt 0 ]]; then
+        failed_count=$((failed_count + 1))
+        FAILED_SUITES+=("$s")
+        SUITE_STATUS+=("$s:FAIL")
+      else
+        SUITE_STATUS+=("$s:PASS")
+      fi
+
+      # Launch next queued suite
+      if (( next_idx < n )); then
+        _par_launch "${batch[$next_idx]}"
+        next_idx=$((next_idx + 1))
+        running=$((running + 1))
+      fi
+    done
+
+    # Flush completed output in original batch order
+    while (( print_idx < n )); do
+      local ps="${batch[$print_idx]}"
+      [[ -f "$_PAR_TMPDIR/$ps.ack" ]] || break
+      cat "$_PAR_TMPDIR/$ps.out" 2>/dev/null || true
+      print_idx=$((print_idx + 1))
+    done
+
+    # Progress indicator on stderr (doesn't mix with captured test output)
+    if [[ -t 2 ]]; then
+      printf "\r\033[K  [%d/%d suites done, %d running, %d failed]" \
+        "$done_count" "$n" "$running" "$failed_count" >&2
+    fi
+
+    (( done_count < n )) && sleep 0.1 || true
+  done
+
+  # Clear progress line and flush any remaining output
+  [[ -t 2 ]] && printf "\r\033[K" >&2 || true
+  while (( print_idx < n )); do
+    cat "$_PAR_TMPDIR/${batch[$print_idx]}.out" 2>/dev/null || true
+    print_idx=$((print_idx + 1))
+  done
+
+  # Aggregate totals into global counters
+  # shellcheck disable=SC2031  # PASS/FAIL/SKIP/ERRORS read from temp files, not from subshell scope
+  for s in "${batch[@]}"; do
+    local rf="$_PAR_TMPDIR/$s.result"
+    [[ ! -f "$rf" ]] && continue
+    local p f sk
+    p=$(grep  -m1 "^PASS=" "$rf" | cut -d= -f2 2>/dev/null || echo 0)
+    f=$(grep  -m1 "^FAIL=" "$rf" | cut -d= -f2 2>/dev/null || echo 0)
+    sk=$(grep -m1 "^SKIP=" "$rf" | cut -d= -f2 2>/dev/null || echo 0)
+    PASS=$(( PASS + ${p:-0} ))
+    FAIL=$(( FAIL + ${f:-0} ))
+    SKIP=$(( SKIP + ${sk:-0} ))
+    local tag msg
+    while IFS=$'\t' read -r tag msg; do
+      [[ "$tag" == "ERR" ]] && ERRORS+=("[$s] $msg") || true
+    done < <(grep $'^ERR\t' "$rf" 2>/dev/null || true)
+  done
+
+  rm -rf "$_PAR_TMPDIR"
+  _PAR_TMPDIR=""
+  trap - INT
+}
+
 # ---- Run Suites ----
 # NOTE: Suite names are listed in three places that must stay in sync:
 #   1. File header comment (top of file)
 #   2. show_help() function
-#   3. This case statement
+#   3. This function's case statement and _SUITE_FN / _ALL_SUITE_ORDER
 run_suites() {
+  # Parallel multi-suite path: only for "all" with PARALLEL=1
+  if [[ "$SUITE" == "all" ]] && (( PARALLEL )); then
+    local max_disp
+    if [[ -n "${JOBS:-}" ]]; then
+      max_disp="$JOBS"
+    elif command -v nproc >/dev/null 2>&1; then
+      max_disp="$(nproc)"
+    else
+      max_disp=4
+    fi
+    section "Parallel Suite Execution (max ${max_disp} jobs)"
+
+    # 'setup' touches system paths (man page, completions install/uninstall).
+    # It must run serially before the parallel batch.
+    local pre_fail=$FAIL
+    section "Suite: setup (serial)"
+    test_setup
+    if (( FAIL > pre_fail )); then
+      FAILED_SUITES+=("setup")
+      SUITE_STATUS+=("setup:FAIL")
+    else
+      SUITE_STATUS+=("setup:PASS")
+    fi
+
+    # All remaining suites in parallel
+    run_parallel_batch \
+      cli toggles unit completions config profiles conflicts collision dryrun \
+      video hdr audio subs ext_subs output containers metadata edge e2e
+    return
+  fi
+
+  # Sequential path: single --suite X, or --no-parallel with all
   case "$SUITE" in
     all)
       test_cli
@@ -4518,6 +4793,21 @@ summary() {
   printf "  %bSkipped:%b %d\n" "$YELLOW" "$NC" "$SKIP"
   printf "  Total:   %d\n" "$total"
 
+  # Per-suite results (only populated for multi-suite runs)
+  if [[ ${#SUITE_STATUS[@]} -gt 0 ]]; then
+    printf "\n%b%bSuite Results:%b\n" "$BOLD" "$BLUE" "$NC"
+    local entry suite status
+    for entry in "${SUITE_STATUS[@]}"; do
+      suite="${entry%%:*}"
+      status="${entry##*:}"
+      if [[ "$status" == "PASS" ]]; then
+        printf "  %b✅ %-16s PASS%b\n" "$GREEN" "$suite" "$NC"
+      else
+        printf "  %b❌ %-16s FAIL%b\n" "$RED" "$suite" "$NC"
+      fi
+    done
+  fi
+
   if [[ ${#ERRORS[@]} -gt 0 ]]; then
     printf "\n%b%bFailed Tests:%b\n" "$RED" "$BOLD" "$NC"
     for err in "${ERRORS[@]}"; do
@@ -4554,6 +4844,7 @@ summary() {
 readonly MEDIA_FREE_SUITES="^(toggles|completions|setup|config|profiles|conflicts|unit)$"
 readonly EXTENDED_SUITES="^(collision|dryrun|video|hdr|audio|subs|ext_subs|output|containers|metadata|edge|e2e|all)$"
 
+auto_cleanup_test_dirs
 preflight
 if [[ ! "$SUITE" =~ $MEDIA_FREE_SUITES ]]; then
   generate_core_media

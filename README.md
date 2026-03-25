@@ -4,7 +4,7 @@
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#compatibility)
 [![License](https://img.shields.io/badge/license-freeware-green)](#license)
 
-**MuxMaster** (`muxm`) — a single-command video repacking and encoding utility that handles Dolby Vision, HDR10, audio track selection, subtitle processing, and container muxing so you don't have to. Pick a profile, point it at a file, and get a properly encoded output without memorizing ffmpeg flags.
+**MuxMaster** (`muxm`) — a single-command video repacking and encoding utility that handles Dolby Vision, HDR10, audio track selection, subtitle processing, and container muxing so you don't have to. Built for home media enthusiasts managing Plex, Jellyfin, or Emby libraries from disc rips and downloads. Pick a profile, point it at a file, and get a properly encoded output without memorizing ffmpeg flags.
 
 ```bash
 # Install via Homebrew (macOS)
@@ -14,12 +14,30 @@ brew install TheBluWiz/muxm/muxm
 muxm --profile atv-directplay-hq movie.mkv
 ```
 
+<a id="why-muxmaster"></a>
+
+## 💡 Why MuxMaster?
+
+Getting a Blu-ray rip to direct-play correctly on an Apple TV, a Roku, or through Plex — without the server transcoding on the fly — is a surprisingly deep problem. The video might be Dolby Vision Profile 7 that needs conversion to Profile 8.1. The audio might be TrueHD, which your player can't direct-play, so you need E-AC-3 — but you also want a stereo AAC fallback for when you're watching on a phone. The forced subtitles need to be burned in because MP4 containers don't handle PGS bitmaps. And the color space metadata needs to survive the whole process.
+
+You can solve all of this with raw ffmpeg, but the command will be 15+ flags long, different for every source file, and you'll need to inspect the source with ffprobe first to figure out what half those flags should even be. Every new file is a new puzzle.
+
+**HandBrake** is the go-to GUI for video encoding, and it's excellent for what it does. But its preset system doesn't adapt to what's actually in the file. It can't detect that your source is already Apple TV-compliant and skip the encode. It doesn't extract Dolby Vision RPUs, convert between DV profiles, or inject them back into re-encoded video. It won't selectively OCR your PGS subtitles to SRT when the output container can't carry bitmaps. And it won't generate a JSON report of everything it did for your records. HandBrake gives you a good encode; MuxMaster gives you an opinionated pipeline that understands the relationship between your source, your target device, and every stream in the file.
+
+**Tdarr** solves the batch-processing and automation problem well, especially at library scale. But it requires a server, a database, a web UI, and Node.js — it's infrastructure. If you want to process a single file, or a handful of files, with precise control over DV handling, audio track selection, and subtitle policy, Tdarr's plugin system means writing JavaScript to configure what `muxm` handles with a single `--profile` flag. Tdarr is a media library manager; MuxMaster is a per-file encoding tool that aims to make every decision correctly so you don't have to inspect the output.
+
+MuxMaster sits in the gap between "I know ffmpeg well enough to do this manually" and "I need a server-based automation platform." It's a single Bash script with only three required packages (ffmpeg, jq, and bc) and optional tooling for Dolby Vision and subtitle OCR. It understands Dolby Vision at the RPU level, and its profile system encodes the tribal knowledge of what actually works on real hardware into repeatable, overridable presets.
+
+Configuration is where the design philosophy comes together. Most CLI tools expect you to read the source code to learn which variables exist, then hand-build a dotfile from scratch. `muxm --create-config` generates a complete, commented config file pre-seeded with a real profile's values — you start from a working baseline and customize, not from a blank page. Configs cascade through three tiers (system, user, project) so an encoding team can lock organization defaults in `/etc/.muxmrc` while individuals override their preferred CRF or audio settings in `~/.muxmrc` and specific project directories can pin a streaming profile. And `--print-effective-config` shows you the fully resolved result of all those layers *before* you commit to an encode, so you always know exactly what's about to happen.
+
+---
+
 ## Table of Contents
 
 - [Format Profiles](#format-profiles)
 - [How It Works](#how-it-works)
 - [Installation](#installation)
-- [Upgrading](#upgrading)
+  - [Upgrading](#upgrading)
 - [Usage](#usage)
 - [Why MuxMaster?](#why-muxmaster)
 - [Configuration](#configuration)
@@ -39,8 +57,8 @@ muxm --profile atv-directplay-hq movie.mkv
 
 Profiles are named presets that configure `muxm` for a specific use case in a single flag. Every setting a profile changes can be individually overridden with CLI flags.
 
-```
-muxm --profile <n> input.mkv
+```bash
+muxm --profile <name> input.mkv
 ```
 
 | Profile | Goal | Video | Audio | Subtitles | DV |
@@ -57,7 +75,7 @@ muxm --profile <n> input.mkv
 
 For collectors who want bit-perfect preservation. Copies video without re-encoding, keeps all matching audio and subtitle tracks via lossless stream-copy, and generates a JSON report with SHA-256 checksum. Always outputs MKV. Commentary and descriptive audio tracks are dropped by default. Language filtering is controlled by `AUDIO_LANG_PREF` and `SUB_LANG_PREF` — when empty (the default), all languages pass. Skips processing entirely if the source already matches.
 
-```
+```bash
 muxm --profile archive movie.mkv
 ```
 
@@ -65,7 +83,7 @@ muxm --profile archive movie.mkv
 
 Strips Dolby Vision layers and re-encodes to clean HDR10 HEVC at CRF 17. Preserves lossless audio (TrueHD, DTS-HD MA, FLAC) and adds a stereo fallback track. MKV output.
 
-```
+```bash
 muxm --profile hdr10-hq movie.mkv
 ```
 
@@ -73,7 +91,7 @@ muxm --profile hdr10-hq movie.mkv
 
 Targets true Direct Play on Apple TV 4K via Plex: MP4 container, HEVC Main10 with DV Profile 8.1 when possible, E-AC-3 surround (with Atmos JOC when present) with AAC stereo fallback, and forced subtitle burn-in. Copies compliant video without re-encoding. Skips processing if source is already ATV-compliant.
 
-```
+```bash
 muxm --profile atv-directplay-hq movie.mkv
 ```
 
@@ -81,7 +99,7 @@ muxm --profile atv-directplay-hq movie.mkv
 
 Optimized for Plex, Jellyfin, and Emby on modern clients: Shield, Fire TV, Roku Ultra, smart TVs, and web browsers. HEVC CRF 20 with E-AC-3 surround at streaming-friendly bitrates, AAC stereo fallback, and soft subtitles. Always outputs MP4. Strips DV and keeps HDR10. Balances quality with file size.
 
-```
+```bash
 muxm --profile streaming movie.mkv
 ```
 
@@ -89,7 +107,7 @@ muxm --profile streaming movie.mkv
 
 Tuned for animation content: lower psy-rd/psy-rdoq to avoid ringing on hard cel edges, 10-bit even for SDR to eliminate banding in gradients, and lossless audio passthrough. MKV container preserves styled ASS/SSA subtitles. All matching subtitle tracks — including PGS bitmap streams — are stream-copied from source (up to 6). Chapter markers are preserved.
 
-```
+```bash
 muxm --profile animation movie.mkv
 ```
 
@@ -97,23 +115,23 @@ muxm --profile animation movie.mkv
 
 Combines the animation-tuned encoder settings of the `animation` profile with the Apple TV Direct Play constraints of `atv-directplay-hq`. Encodes at CRF 16 with the `slower` preset and animation-optimized psychovisual parameters (`psy-rd=1.0`, `psy-rdoq=0.5`, `aq-mode=3`) to suppress ringing on hard cel edges and eliminate banding in gradients. Audio is transcoded to E-AC-3 surround for ATV compatibility — lossless codecs (TrueHD, DTS-HD MA, FLAC) that cannot direct-play on Apple TV are re-encoded rather than passed through. All matching subtitle tracks are stream-copied in multi-track mode, with native ASS/SSA preserved when the output is MKV. Forced subtitles are embedded as soft subs in MKV output — no burn-in. Container follows the source: MKV in, MKV out; MP4 in, MP4 out.
 
-```
+```bash
 muxm --profile atv-directplay-animation show.mkv
 ```
 
 ### `universal` — Universal Compatibility
 
-Plays on everything: old Rokus, mobile devices, web browsers, non-HDR TVs. Tone-maps HDR to SDR, encodes to H.264, forces AAC stereo audio, burns forced subtitles, exports others as external SRT, and strips chapters and non-essential metadata. Always outputs MP4.
+Plays on everything: old Rokus, mobile devices, web browsers, and non-HDR TVs. Tone-maps HDR to SDR, encodes to H.264, forces AAC stereo audio, burns forced subtitles, exports others as external SRT, and strips chapters and non-essential metadata. Always outputs MP4.
 
-```
+```bash
 muxm --profile universal movie.mkv
 ```
 
 ### Overriding Profile Defaults
 
-Profiles are starting points — every setting can be overridden with CLI flags:
+Use CLI flags to customize any profile on the fly:
 
-```
+```bash
 # Use archive but keep only English and Japanese audio (drops all other languages)
 muxm --profile archive --audio-lang-pref eng,jpn movie.mkv
 
@@ -235,9 +253,9 @@ muxm --uninstall-man
 muxm --uninstall-completions
 ```
 
-### Upgrading
-
 <a id="upgrading"></a>
+
+### Upgrading
 
 **Homebrew:**
 
@@ -263,7 +281,7 @@ muxm --setup
 
 ## 🚀 Usage
 
-```
+```bash
 muxm [options] <source> [target.mp4]
 ```
 
@@ -302,24 +320,6 @@ Run `muxm --help` for the full flag reference.
 
 ---
 
-<a id="why-muxmaster"></a>
-
-## 💡 Why MuxMaster?
-
-Getting a Blu-ray rip to direct-play correctly on an Apple TV, a Roku, or through Plex — without the server transcoding on the fly — is a surprisingly deep problem. The video might be Dolby Vision Profile 7 that needs conversion to Profile 8.1. The audio might be TrueHD, which your player can't direct-play, so you need E-AC-3 — but you also want a stereo AAC fallback for when you're watching on a phone. The forced subtitles need to be burned in because MP4 containers don't handle PGS bitmaps. And the color space metadata needs to survive the whole process.
-
-You can solve all of this with raw ffmpeg, but the command will be 15+ flags long, different for every source file, and you'll need to inspect the source with ffprobe first to decide what half of those flags should be. Every new file is a new puzzle.
-
-**HandBrake** is the go-to GUI for video encoding, and it's excellent for what it does. But its preset system doesn't adapt to what's actually in the file. It can't detect that your source is already Apple TV-compliant and skip the encode. It doesn't extract Dolby Vision RPUs, convert between DV profiles, or inject them back into re-encoded video. It won't selectively OCR your PGS subtitles to SRT when the output container can't carry bitmaps. And it won't generate a JSON report of everything it did for your records. HandBrake gives you a good encode; MuxMaster gives you an opinionated pipeline that understands the relationship between your source, your target device, and every stream in the file.
-
-**Tdarr** solves the batch-processing and automation problem well, especially at library scale. But it requires a server, a database, a web UI, and Node.js — it's infrastructure. If you want to process a single file, or a handful of files, with precise control over DV handling, audio track selection, and subtitle policy, Tdarr's plugin system means writing JavaScript to configure what `muxm` handles with a single `--profile` flag. Tdarr is a media library manager; MuxMaster is a per-file encoding tool that aims to make every decision correctly so you don't have to inspect the output.
-
-MuxMaster sits in the gap between "I know ffmpeg well enough to do this manually" and "I need a server-based automation platform." It's a single Bash script with only three required packages (ffmpeg, jq, and bc) and optional tooling for Dolby Vision and subtitle OCR. It understands Dolby Vision at the RPU level, and its profile system encodes the tribal knowledge of what actually works on real hardware into repeatable, overridable presets.
-
-Configuration is where the design philosophy comes together. Most CLI tools expect you to read the source code to learn which variables exist, then hand-build a dotfile from scratch. `muxm --create-config` generates a complete, commented config file pre-seeded with a real profile's values — you start from a working baseline and customize, not from a blank page. Configs cascade through three tiers (system, user, project) so an encoding team can lock organization defaults in `/etc/.muxmrc` while individuals override their preferred CRF or audio settings in `~/.muxmrc` and specific project directories can pin a streaming profile. And `--print-effective-config` shows you the fully resolved result of all those layers *before* you commit to an encode, so you always know exactly what's about to happen.
-
----
-
 <a id="configuration"></a>
 
 ## ⚙️ Configuration
@@ -352,7 +352,7 @@ CLI `--profile` always overrides a config-file `PROFILE_NAME`.
 
 Use `--create-config` to generate a full `.muxmrc` file pre-configured for a specific profile:
 
-```
+```bash
 muxm --create-config <scope> [profile]
 ```
 
@@ -372,7 +372,7 @@ Profile defaults to `atv-directplay-hq` if omitted. Use `--force-create-config` 
 
 When configs cascade through multiple layers, it's easy to lose track of what's actually active. `--print-effective-config` resolves every layer and shows you the final result before anything is encoded:
 
-```
+```bash
 # See what the resolved config looks like after all sources merge
 muxm --profile hdr10-hq --crf 20 --print-effective-config
 ```
@@ -389,7 +389,7 @@ Beyond profiles and the core encoding pipeline, `muxm` ships with a set of opera
 
 - **Skip-if-Ideal** – Before encoding, `muxm` inspects the source to determine if it already matches the target profile. If it does, the file is linked or copied without re-encoding, saving time and avoiding generation loss. When multi-track audio or subtitle modes are active, the ideal check verifies that every source track would survive the filter — if any would be dropped, the source is not ideal and remuxing proceeds with explicit per-stream maps. Enabled per-profile or via `--skip-if-ideal`.
 - **Collision Handling** – When the derived output filename matches the source (e.g., encoding `movie.mp4` with the default `.mp4` extension), `muxm` auto-versions the output to `movie(1).mp4`, `movie(2).mp4`, etc. instead of failing. Use `--replace-source` for interactive in-place replacement or `--force-replace-source` for scripted workflows.
-- **Conflict Warnings** – Running `--profile archive --no-dv` doesn't error out — it warns you that the combination is contradictory and proceeds with your explicit flags taking precedence. Flags that are incompatible with multi-track modes (e.g., `--audio-track`, `--audio-force-codec`, `--sub-burn-forced`) trigger a graceful demotion: multi-track mode drops to single-track with an informational note, and the explicit CLI flag wins. The tool trusts you but lets you know when something looks wrong.
+- **Conflict Warnings** – Running `--profile archive --no-dv` doesn't error out — it warns you that the combination is contradictory and proceeds with your explicit flags taking precedence. Flags that are incompatible with multi-track modes (e.g., `--audio-track`, `--audio-force-codec`, `--sub-burn-forced`) trigger a graceful demotion: multi-track mode drops to single-track mode with an informational note, and the explicit CLI flag wins. The tool trusts you but lets you know when something looks wrong.
 - **Dry-Run Mode** – `--dry-run` executes the entire decision pipeline (profile resolution, codec detection, DV identification, audio selection) and prints what it would do, without writing any output files.
 - **JSON Reporting** – `--report-json` generates a machine-readable JSON report alongside the output file, documenting every decision, warning, codec mapping, and stream disposition from the run.
 - **Checksum Verification** – Writes a SHA-256 checksum file for the output to verify integrity after transfer or archival. Enabled by default for `archive`; available for other profiles via `--checksum`.
@@ -414,7 +414,7 @@ macOS ships Bash 3.2 (2007) due to licensing. If you installed via Homebrew (`br
 DV processing requires `dovi_tool` and, for MP4 container signaling, `MP4Box` (gpac). If either is missing, `muxm` silently disables DV features rather than failing. Run `muxm --install-dependencies` to install them, or check with `muxm --dry-run` — the output will show whether DV was detected and what the pipeline plans to do with it.
 
 **My file was copied instead of re-encoded. Is that a bug?**
-Probably not. If the source already matches the target profile (correct codec, container, color space, and audio layout), `muxm` skips the encode and copies/links the file. This is the Skip-if-Ideal feature — it saves time and avoids generation loss. You'll see a message indicating the skip. To force a re-encode, omit `--skip-if-ideal` or override a setting (e.g., `--crf 18`) so the source no longer matches.
+Probably not. If the source already matches the target profile (correct codec, container, color space, and audio layout), `muxm` skips the encode and copies/links the file. This is the Skip-if-Ideal feature — it saves time and avoids generation loss. You'll see a message indicating the skip. To force a re-encode, pass `--no-skip-if-ideal` or override a setting (e.g., `--crf 18`) so the source no longer matches.
 
 **Which profile should I use?**
 If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you want broad device compatibility across Plex/Jellyfin/Emby clients: `streaming`. If you're archiving a disc rip and want all audio and subtitle tracks preserved losslessly: `archive`. If you need it to play on everything including old hardware and phones: `universal`. For anime or cartoons: `animation`. For anime or cartoons that need to direct-play on an Apple TV: `atv-directplay-animation`. For clean HDR10 without DV complexity: `hdr10-hq`. When in doubt, start with `--dry-run` to preview what a profile will do to your file.
@@ -422,7 +422,7 @@ If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you wa
 **Can I process a batch of files?**
 `muxm` is a per-file tool by design. For a batch, a simple shell loop works:
 
-```
+```bash
 for f in *.mkv; do muxm --profile streaming "$f"; done
 ```
 
@@ -443,7 +443,7 @@ CRF-based encoding targets quality, not file size. A visually complex source (gr
 MuxMaster is freeware for personal, non-commercial use.
 Any business, government, or organizational use requires a paid license.
 
-Full license text available in [LICENSE.md](LICENSE.md)
+Full license text available in [LICENSE.md](LICENSE.md).
 
 ---
 
@@ -453,7 +453,7 @@ Full license text available in [LICENSE.md](LICENSE.md)
 
 Found a bug? Please [open an issue on GitHub](https://github.com/TheBluWiz/MuxMaster/issues). Include the output of `muxm --version`, the profile and flags you used, and any relevant log output. A `--dry-run` dump or `--report-json` output is especially helpful.
 
-This is a solo-maintained project and I'm not accepting outside code contributions at this time.
+This is a solo project — not taking outside code contributions right now, but bug reports and feedback are always welcome.
 
 ---
 
