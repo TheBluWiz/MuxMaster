@@ -5,7 +5,7 @@
 #  Tip: Uncomment a line to override. Keep values shell-safe.
 # ================================================================
 # Profile: atv-directplay-hq
-# Generated: 2026-03-20 19:47:33
+# Generated: 2026-03-26 06:35:56
 #
 # Variables set by this profile are uncommented below.
 # All other variables are commented with their defaults — uncomment to customize.
@@ -15,7 +15,7 @@
 # =========================
 
 # Default profile to apply. CLI --profile overrides this value.
-# Valid profiles: dv-archival, hdr10-hq, atv-directplay-hq, streaming, animation, universal
+# Valid profiles: archive, hdr10-hq, atv-directplay-hq, atv-directplay-animation, streaming, animation, universal
 # Profiles set many variables at once; CLI flags still override individual values.
 PROFILE_NAME="atv-directplay-hq"
 
@@ -125,11 +125,11 @@ DV_CONVERT_TO_P81_IF_FAIL=1
 # Audio selection strategy
 # =========================
 
-# Language preference list (comma-separated)
-#AUDIO_LANG_PREF=eng
+# Language preference list (comma-separated, empty = keep all languages)
+#AUDIO_LANG_PREF='eng'
 
 # Codec preference order (leftmost best)
-#AUDIO_CODEC_PREFERENCE=eac3,ac3,aac,alac,other
+#AUDIO_CODEC_PREFERENCE='eac3,ac3,aac,alac,other'
 
 # Force a specific audio track by index (0-based). Leave empty for auto.
 #AUDIO_TRACK_OVERRIDE=
@@ -146,6 +146,22 @@ DV_CONVERT_TO_P81_IF_FAIL=1
 # Penalty applied to commentary / audio-description tracks (detected by title tag).
 # Set to 0 to disable commentary detection.
 #AUDIO_SCORE_COMMENTARY_PENALTY=200
+
+
+# =========================
+# Multi-track audio (archival)
+# =========================
+
+# Keep ALL matching audio tracks instead of selecting one.
+# All tracks are stream-copied from source (never transcoded).
+# Filtering is subtractive: everything passes unless excluded by
+# AUDIO_LANG_PREF or AUDIO_KEEP_COMMENTARY.
+#   1 = multi-track (filter + copy all)  |  0 = single-track (score + select one)
+#AUDIO_MULTI_TRACK=0
+
+# Include commentary / audio-description tracks in multi-track mode
+#   1 = keep commentary  |  0 = drop commentary
+#AUDIO_KEEP_COMMENTARY=1
 
 
 # =========================
@@ -177,8 +193,8 @@ AUDIO_LOSSLESS_PASSTHROUGH=0
 # Subtitles
 # =========================
 
-# Language preference for subtitle track selection (comma-separated)
-#SUB_LANG_PREF=eng
+# Language preference for subtitle track selection (comma-separated, empty = keep all)
+#SUB_LANG_PREF='eng'
 
 # Include forced subtitles (foreign dialogue, signs)
 SUB_INCLUDE_FORCED=1
@@ -204,16 +220,49 @@ SUB_EXPORT_EXTERNAL=0
 # Enable OCR for bitmap subtitles (PGS/VobSub → SRT)
 # MP4 cannot carry PGS bitmaps; OCR converts them to text-based SRT.
 #   1 = attempt OCR  |  0 = drop bitmap subtitles that can't be embedded
-#SUB_ENABLE_OCR=1
+SUB_ENABLE_OCR=1
 
 # OCR tool for bitmap → text subtitle conversion
 # Supported: "pgsrip", "sub2srt"
 # pgsrip requires: pgsrip (pipx) + tesseract. Install via --install-dependencies.
-# No OCR tool detected. Install pgsrip or sub2srt and regenerate, or uncomment manually.
-#SUB_OCR_TOOL=sub2srt
+# Auto-detected: pgsrip found on this machine at config-generation time.
+SUB_OCR_TOOL=pgsrip
 
 # OCR language for Tesseract (ISO 639-3, e.g., eng, fra, deu)
 #SUB_OCR_LANG=eng
+
+# Preserve native text subtitle formats (ASS/SSA) instead of converting to SRT
+#   1 = keep ASS/SSA styling (positioning, fonts, typesetting)  |  0 = convert to SRT
+#   Only effective when output container is MKV; ignored for MP4/MOV.
+#   The animation profile enables this by default.
+#SUB_PRESERVE_TEXT_FORMAT=0
+
+
+# =========================
+# Multi-track subtitles (archival)
+# =========================
+
+# Keep ALL matching subtitle tracks instead of selecting one per type.
+# All tracks are stream-copied from source (no OCR, no format conversion).
+# Filtering is subtractive: everything passes unless excluded by
+# SUB_LANG_PREF, SUB_INCLUDE_FORCED/FULL/SDH, or capped by SUB_MAX_TRACKS.
+#   1 = multi-track (filter + copy all)  |  0 = single-track (pick one per type)
+#SUB_MULTI_TRACK=0
+
+
+# =========================
+# External subtitle discovery
+# =========================
+
+# Discover external subtitle files alongside the source
+# (e.g. Movie.en.srt, Movie.en.forced.srt next to Movie.mkv).
+# Matched files are muxed in as additional subtitle tracks.
+#   1 = enabled (default)  |  0 = disable discovery entirely (--no-ext-subs)
+#EXT_SUB_ENABLED=1
+
+# Override the directory searched for external subtitles
+# (default: same directory as the source file)
+#EXT_SUB_DIR=
 
 
 # =========================
@@ -221,13 +270,16 @@ SUB_EXPORT_EXTERNAL=0
 # =========================
 
 # Output extension: mp4|m4v|mov|mkv
-OUTPUT_EXT=mp4
+OUTPUT_EXT=
 
 # Keep chapter markers in output
 KEEP_CHAPTERS=1
 
 # Strip non-essential metadata from output
 STRIP_METADATA=0
+
+# Embed profile tagline in container comment metadata (on by default when a profile is active)
+PROFILE_COMMENT=1
 
 # Default language tag for streams missing language metadata
 #TAG_LANGUAGE_DEFAULT=und
@@ -254,6 +306,9 @@ SKIP_IF_IDEAL=1
 
 # Warn when free disk space drops below this many GB during encode
 #DISK_FREE_WARN_GB=5
+
+# Enable smart disk space preflight estimation (1 = enabled, 0 = disable with --no-disk-check)
+#DISK_CHECK=1
 
 # Keep temporary workdir on failure (for debugging)
 #KEEP_TEMP=0
