@@ -56,7 +56,7 @@ readonly VERSION="1.2.0"
 # Canonical list of valid profile names (space-separated for compgen/iteration).
 # All profile validation, error messages, completions, and config generators
 # should reference this constant — never hardcode the list elsewhere.
-readonly VALID_PROFILES="archive hdr10-hq atv-directplay-hq atv-directplay-animation streaming animation universal"
+readonly VALID_PROFILES="archive hdr10-hq atv-directplay-hq atv-directplay-animation streaming animation universal youtube-upload"
 
 # _valid_profiles_display — return the profile list comma-separated for user-facing messages.
 _valid_profiles_display(){ echo "${VALID_PROFILES// /, }"; }
@@ -75,6 +75,11 @@ FAILED=0
 FAIL_MSG=""
 EXIT_CODE=1
 PRINT_EFFCONF=0
+
+# Multi-profile support (Change 2)
+declare -i _MULTI_PROFILE_MODE=0
+declare -a _MULTI_PROFILES=()
+declare -a _ORIG_FILTERED_ARGS=()
 
 # Metadata cache for performance optimization
 METADATA_CACHE=""
@@ -111,10 +116,11 @@ declare -a SII_AUDIO_INDICES=()
 declare -a SII_SUB_INDICES=()
 
 # ===== Section 4: Opinionated defaults ========================================================
-# ---- Video encode (x265)
+# ---- Video encode (x265/x264)
 declare -i CRF_VALUE=18
 PRESET_VALUE="slower"
 X265_PARAMS_BASE='profile=main10:repeat-headers=1:hdr-opt=1:aq-mode=3:aq-strength=1.3:psy-rd=2.0:psy-rdoq=1.0:rc-lookahead=60'
+X264_PARAMS_BASE=""   # Advanced x264 parameter string (e.g., youtube-upload profile)
 LEVEL_VALUE=""                 # e.g., 5.1 (blank = encoder decides)
 declare -i CONSERVATIVE_VBV=1
 LEVEL_VBV_4_1_MAXRATE=10000k; LEVEL_VBV_4_1_BUFSIZE=20000k
@@ -1065,8 +1071,17 @@ Profiles are named presets that configure muxm for a specific use case in a
 single flag. Every setting a profile changes can be individually overridden
 with CLI flags.
 .TP
-.BR \-\-profile " " NAME
-Apply a named format profile.
+.B \-\-profile \fINAME\fR[,\fINAME\fR,...]
+Select one or more encoding profiles. When a single name is given, the pipeline
+runs once with that profile's settings. When multiple names are separated by
+commas (e.g. \fB\-\-profile youtube\-upload,streaming\fR), each profile runs as
+a separate sequential pass from the same source.
+.PP
+In multi\-profile mode, output files are auto\-suffixed with the profile name
+(e.g. \fIsource.youtube\-upload.mp4\fR, \fIsource.streaming.mp4\fR). If an
+explicit output filename is provided, its stem and directory are used as the
+base; its extension is ignored (each profile determines its own container). A
+warning listing all output paths is printed before encoding starts.
 .PP
 .\" NOTE: Profile names below must match VALID_PROFILES in muxm (Section 2).
 Available profiles:
@@ -1080,6 +1095,10 @@ Audio filterable via
 subtitles filterable via
 .BR SUB_LANG_PREF ", " SUB_INCLUDE_FORCED / FULL / SDH ", and " SUB_MAX_TRACKS .
 Skip if already ideal. JSON report.
+.PP
+The former name
+.B dv\-archival
+is accepted as a backwards\-compatible alias and emits a deprecation notice.
 .TP
 .B hdr10\-hq
 Strip DV, keep HDR10. CRF 17, lossless audio + stereo fallback. MKV.
@@ -1107,6 +1126,11 @@ multi\-track subs (ASS/SSA + PGS bitmap).
 .B universal
 H.264 SDR, AAC stereo. Lean, play anywhere. MP4. Tone\-map HDR, burn forced subs,
 strip chapters/metadata.
+.TP
+.B youtube\-upload
+H.264 high\-profile, CRF 16, preset slow. AAC stereo 256k, burn forced subs,
+export full subs as external SRT. MP4. Strips metadata, keeps chapters.
+No tone\-mapping (YouTube handles HDR). Designed for master\-quality uploads.
 .SH COMMON OPTIONS
 .TP
 .BR \-h ", " \-\-help
@@ -1165,6 +1189,15 @@ writes to \fI$PWD/.muxmrc\fR
 \fIPROFILE\fR defaults to \fBatv\-directplay\-hq\fR if omitted.
 Refuses to overwrite an existing file; use \fB\-\-force\-create\-config\fR
 to overwrite.
+.PP
+Additional CLI flags may follow the scope and profile to pre\-populate specific
+values. For example, \fB\-\-create\-config user atv\-directplay\-hq \-\-crf 20
+\-\-preset medium\fR generates a config with \fBCRF_VALUE=20\fR and
+\fBPRESET_VALUE="medium"\fR uncommented. Supported overrides include
+\fB\-\-crf\fR, \fB\-\-preset\fR, \fB\-\-output\-ext\fR, \fB\-\-level\fR,
+\fB\-\-video\-codec\fR, \fB\-\-stereo\-bitrate\fR, \fB\-\-sub\-lang\-pref\fR,
+\fB\-\-audio\-lang\-pref\fR, and common boolean toggles. Unrecognized flags
+produce an error. Without overrides, behaviour is unchanged.
 .TP
 .BR \-\-force\-create\-config " " \fISCOPE\fR " " [\fIPROFILE\fR]
 Same as \fB\-\-create\-config\fR but overwrites an existing file.
@@ -1184,6 +1217,12 @@ x265 level\-idc (e.g., 5.1).
 .TP
 .BR \-\-x265\-params " " \fISTR\fR
 Advanced x265 parameter string.
+.TP
+.BR \-\-x264\-params " " \fISTR\fR
+Advanced x264 parameter string (used by
+.B youtube\-upload
+profile; e.g.,
+.BR "profile=high:rc-lookahead=60:aq-mode=2:aq-strength=1.0" ).
 .TP
 .BR \-\-tonemap " , " \-\-no\-tonemap
 Enable/disable HDR/HLG to SDR tone\-mapping.
@@ -1490,6 +1529,12 @@ set this to empty, deriving the output container from the source file extension
 Sources with unsupported containers fall back to mkv.
 .B \-\-output\-ext
 on the CLI always overrides passthrough resolution.
+.PP
+When an explicit output filename is provided with a recognised extension
+(\fB.mp4\fR, \fB.m4v\fR, \fB.mov\fR, \fB.mkv\fR), the container format is
+inferred from that extension as if \fB\-\-output\-ext\fR had been passed. An
+explicit \fB\-\-output\-ext\fR flag always takes precedence. This inference is
+disabled in multi\-profile mode.
 .TP
 .BR \-\-keep\-chapters " , " \-\-no\-keep\-chapters
 Keep/strip chapter markers.
@@ -1504,6 +1549,13 @@ output container's comment field (MP4 \(cocmt, MKV COMMENT).
 .TP
 .BR \-\-skip\-if\-ideal " , " \-\-no\-skip\-if\-ideal
 Skip processing if source already matches profile requirements.
+.PP
+The following conditions prevent a source from being considered ideal, even when
+this flag is set: video codec or pixel format mismatch; container mismatch;
+\fBVIDEO_COPY_IF_COMPLIANT=0\fR (profile requires re\-encode);
+\fBTONEMAP_HDR_TO_SDR=1\fR on an HDR source; \fBADD_STEREO_IF_MULTICH=1\fR
+with surround audio (stereo fallback needed); discovered external subtitle
+sidecar files that need muxing in.
 .TP
 .BR \-\-report\-json " , " \-\-no\-report\-json
 Generate/suppress JSON report alongside output.
@@ -1705,7 +1757,7 @@ commented with their defaults.
 Major variable groups:
 .TP
 .B Video
-.BR CRF_VALUE ", " PRESET_VALUE ", " VIDEO_CODEC ", " X265_PARAMS_BASE ", "
+.BR CRF_VALUE ", " PRESET_VALUE ", " VIDEO_CODEC ", " X265_PARAMS_BASE ", " X264_PARAMS_BASE ", "
 .BR LEVEL_VALUE ", " CONSERVATIVE_VBV ", " FORCE_CHROMA_420 ", "
 .BR SDR_USE_10BIT_IF_SRC_10BIT ", " SDR_FORCE_10BIT ", "
 .BR HDR_TARGET_PIXFMT ", " MAX_COPY_BITRATE ", "
@@ -1759,6 +1811,11 @@ Major variable groups:
 .BR LEVEL_VBV_5_0_MAXRATE ", " LEVEL_VBV_5_0_BUFSIZE ", "
 .BR LEVEL_VBV_5_1_MAXRATE ", " LEVEL_VBV_5_1_BUFSIZE ", "
 .BR LEVEL_VBV_5_2_MAXRATE ", " LEVEL_VBV_5_2_BUFSIZE .
+.TP
+.B X264_PARAMS_BASE
+Base x264 parameter string for H.264 encodes. Appended to the ffmpeg
+\fB\-x264\-params\fR flag. Used by the \fByoutube\-upload\fR profile.
+Default: empty.
 .PP
 Use
 .B \-\-print\-effective\-config
@@ -2286,63 +2343,25 @@ _create_config_emit() {
   # _V checks membership via: [[ "$_active" == *" VARNAME "* ]]
   # Leading/trailing spaces ensure whole-word matching (prevents "FOO"
   # from matching "FOO_BAR"). Each name must be space-delimited.
+  # _active tracks only CLI-overridden variables; all profile variables are written
+  # commented out by default. Only vars passed via override flags (--crf, --preset, etc.)
+  # are added to _active and emitted uncommented.
   local _active=" "
-  local _base="DISABLE_DV ALLOW_DV_FALLBACK DV_CONVERT_TO_P81_IF_FAIL "
-  _base+="OUTPUT_EXT VIDEO_CODEC VIDEO_COPY_IF_COMPLIANT "
-  _base+="AUDIO_LOSSLESS_PASSTHROUGH ADD_STEREO_IF_MULTICH STEREO_BITRATE "
-  _base+="SUB_INCLUDE_FORCED SUB_INCLUDE_FULL SUB_INCLUDE_SDH SUB_BURN_FORCED "
-  _base+="KEEP_CHAPTERS STRIP_METADATA PROFILE_COMMENT "
-  _active+="$_base"
-
-  case "$profile" in
-    archive)
-      _active+="SKIP_IF_IDEAL REPORT_JSON CHECKSUM "
-      _active+="AUDIO_LANG_PREF AUDIO_CODEC_PREFERENCE "
-      _active+="AUDIO_MULTI_TRACK AUDIO_KEEP_COMMENTARY "
-      _active+="SUB_LANG_PREF SUB_MULTI_TRACK SUB_MAX_TRACKS "
-      ;;
-    hdr10-hq)
-      _active+="CRF_VALUE PRESET_VALUE "
-      _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 "
-      ;;
-    atv-directplay-hq)
-      _active+="CRF_VALUE PRESET_VALUE "
-      _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 "
-      _active+="EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 "
-      _active+="MAX_COPY_BITRATE LEVEL_VALUE CONSERVATIVE_VBV "
-      _active+="SUB_EXPORT_EXTERNAL SKIP_IF_IDEAL "
-      ;;
-    atv-directplay-animation)
-      _active+="CRF_VALUE PRESET_VALUE "
-      _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 SDR_USE_10BIT_IF_SRC_10BIT SDR_FORCE_10BIT "
-      _active+="EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 "
-      _active+="MAX_COPY_BITRATE LEVEL_VALUE CONSERVATIVE_VBV "
-      _active+="SUB_MULTI_TRACK SUB_MAX_TRACKS SUB_EXPORT_EXTERNAL SUB_PRESERVE_TEXT_FORMAT "
-      _active+="SKIP_IF_IDEAL "
-      ;;
-    streaming)
-      _active+="CRF_VALUE PRESET_VALUE "
-      _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 "
-      _active+="EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 "
-      _active+="SUB_EXPORT_EXTERNAL "
-      ;;
-    animation)
-      _active+="CRF_VALUE PRESET_VALUE "
-      _active+="X265_PARAMS_BASE HDR_TARGET_PIXFMT FORCE_CHROMA_420 SDR_USE_10BIT_IF_SRC_10BIT SDR_FORCE_10BIT "
-      _active+="AUDIO_CODEC_PREFERENCE "
-      _active+="SUB_MULTI_TRACK SUB_MAX_TRACKS SUB_EXPORT_EXTERNAL SUB_PRESERVE_TEXT_FORMAT "
-      ;;
-    universal)
-      _active+="TONEMAP_HDR_TO_SDR CRF_VALUE PRESET_VALUE "
-      _active+="FORCE_CHROMA_420 "
-      _active+="AUDIO_FORCE_CODEC MAX_AUDIO_CHANNELS "
-      _active+="SUB_EXPORT_EXTERNAL "
-      ;;
-  esac
 
   # Apply the profile to populate variable values
   PROFILE_NAME="$profile"
   "apply_profile_${profile//-/_}"
+
+  # Apply CLI overrides: set variable values (globally so _V's indirect expansion sees them)
+  # and mark them active so they are emitted uncommented.
+  if (( ${#_CC_OVERRIDES[@]} > 0 )); then
+    local _ovr_var _ovr_val
+    for _ovr_var in "${!_CC_OVERRIDES[@]}"; do
+      _ovr_val="${_CC_OVERRIDES[$_ovr_var]}"
+      printf -v "$_ovr_var" '%s' "$_ovr_val"
+      [[ "$_active" != *" ${_ovr_var} "* ]] && _active+="${_ovr_var} "
+    done
+  fi
 
   # Helper: emit a variable — uncommented if it's in the _active set, commented otherwise.
   # Uses indirect expansion (${!var}) to read the variable's current value.
@@ -2354,13 +2373,13 @@ _create_config_emit() {
     local val="${!var}"
     if [[ "$_active" == *" ${var} "* ]]; then
       if [[ "$quote" == "quoted" ]]; then
-        printf "%s='%s'\n" "$var" "$val"
+        printf '%s="%s"\n' "$var" "$val"
       else
         printf '%s=%s\n' "$var" "$val"
       fi
     else
       if [[ "$quote" == "quoted" ]]; then
-        printf "#%s='%s'\n" "$var" "$val"
+        printf '#%s="%s"\n' "$var" "$val"
       else
         printf '#%s=%s\n' "$var" "$val"
       fi
@@ -2406,11 +2425,15 @@ HEADER
   echo ""
   echo "# Preset: speed/efficiency trade-off (faster → bigger files, slower → smaller)"
   echo "# Options: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow, placebo"
-  _V PRESET_VALUE
+  _V PRESET_VALUE quoted
   echo ""
   echo "# Base x265 params: advanced tuning as a single string"
   echo "# Keep values colon-separated. Override entirely if you know what you're doing."
   _V X265_PARAMS_BASE quoted
+  echo ""
+  echo "# Base x264 params: advanced tuning as a single string (used by youtube-upload profile)"
+  echo "# Keep values colon-separated (e.g., profile=high:rc-lookahead=60:aq-mode=2:aq-strength=1.0)"
+  _V X264_PARAMS_BASE quoted
   echo ""
   echo "# Level/IDR constraint for compatibility (e.g., 5.1). Leave empty to let encoder decide."
   _V LEVEL_VALUE
@@ -2480,7 +2503,7 @@ HEADER
   echo "# ========================="
   echo ""
   echo "# Threads for ffmpeg (empty = let ffmpeg decide)"
-  printf '#THREADS=\n'
+  _V THREADS
   echo ""
 
   echo ""
@@ -2741,7 +2764,7 @@ HEADER
   printf '#FFMPEG_HIDE_BANNER=1\n'
   echo ""
   echo "# ffmpeg log level: quiet|panic|fatal|error|warning|info|verbose|debug|trace"
-  printf '#FFMPEG_LOGLEVEL=error\n'
+  _V FFMPEG_LOGLEVEL "quoted"
   echo ""
   echo "# Overwrite outputs without prompting"
   printf '#FFMPEG_OVERWRITE=1\n'
@@ -2757,6 +2780,91 @@ _create_config() {
   local scope="$1"
   local profile="${2:-atv-directplay-hq}"
   local force="${3:-0}"
+  shift 3
+  local -a _cc_override_argv=("$@")
+
+  # Parse config override flags into global associative array _CC_OVERRIDES.
+  declare -gA _CC_OVERRIDES=()
+  local _cc_flag _cc_val _cc_oi=0
+  while (( _cc_oi < ${#_cc_override_argv[@]} )); do
+    _cc_flag="${_cc_override_argv[$_cc_oi]}"
+    case "$_cc_flag" in
+      --crf)                        _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[CRF_VALUE]="$_cc_val";                _cc_oi=$((_cc_oi+2)) ;;
+      --preset)                     _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[PRESET_VALUE]="$_cc_val";             _cc_oi=$((_cc_oi+2)) ;;
+      --output-ext)                 _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[OUTPUT_EXT]="$_cc_val";               _cc_oi=$((_cc_oi+2)) ;;
+      --level)                      _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[LEVEL_VALUE]="$_cc_val";              _cc_oi=$((_cc_oi+2)) ;;
+      --video-codec)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[VIDEO_CODEC]="$_cc_val";              _cc_oi=$((_cc_oi+2)) ;;
+      --stereo-bitrate)             _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[STEREO_BITRATE]="$_cc_val";           _cc_oi=$((_cc_oi+2)) ;;
+      --sub-lang-pref)              _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SUB_LANG_PREF]="$_cc_val";            _cc_oi=$((_cc_oi+2)) ;;
+      --audio-lang-pref)            _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AUDIO_LANG_PREF]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
+      --ext-subs)                   _CC_OVERRIDES[EXT_SUB_ENABLED]=1;                                                                  _cc_oi=$((_cc_oi+1)) ;;
+      --no-ext-subs)                _CC_OVERRIDES[EXT_SUB_ENABLED]=0;                                                                  _cc_oi=$((_cc_oi+1)) ;;
+      --sub-burn-forced)            _CC_OVERRIDES[SUB_BURN_FORCED]=1;                                                                  _cc_oi=$((_cc_oi+1)) ;;
+      --no-sub-burn-forced)         _CC_OVERRIDES[SUB_BURN_FORCED]=0;                                                                  _cc_oi=$((_cc_oi+1)) ;;
+      --skip-if-ideal)              _CC_OVERRIDES[SKIP_IF_IDEAL]=1;                                                                    _cc_oi=$((_cc_oi+1)) ;;
+      --no-skip-if-ideal)           _CC_OVERRIDES[SKIP_IF_IDEAL]=0;                                                                    _cc_oi=$((_cc_oi+1)) ;;
+      --audio-lossless-passthrough) _CC_OVERRIDES[AUDIO_LOSSLESS_PASSTHROUGH]=1;                                                       _cc_oi=$((_cc_oi+1)) ;;
+      --no-audio-lossless-passthrough) _CC_OVERRIDES[AUDIO_LOSSLESS_PASSTHROUGH]=0;                                                    _cc_oi=$((_cc_oi+1)) ;;
+      --disk-check)                 _CC_OVERRIDES[DISK_CHECK]=1;                                                                       _cc_oi=$((_cc_oi+1)) ;;
+      --no-disk-check)              _CC_OVERRIDES[DISK_CHECK]=0;                                                                       _cc_oi=$((_cc_oi+1)) ;;
+      --checksum)                   _CC_OVERRIDES[CHECKSUM]=1;                                                                         _cc_oi=$((_cc_oi+1)) ;;
+      --no-checksum)                _CC_OVERRIDES[CHECKSUM]=0;                                                                         _cc_oi=$((_cc_oi+1)) ;;
+      # Encoding params
+      --x265-params)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[X265_PARAMS_BASE]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
+      --x264-params)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[X264_PARAMS_BASE]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
+      --max-copy-bitrate)           _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[MAX_COPY_BITRATE]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
+      --video-copy-if-compliant)    _CC_OVERRIDES[VIDEO_COPY_IF_COMPLIANT]=1;                                                           _cc_oi=$((_cc_oi+1)) ;;
+      --no-video-copy-if-compliant) _CC_OVERRIDES[VIDEO_COPY_IF_COMPLIANT]=0;                                                           _cc_oi=$((_cc_oi+1)) ;;
+      --conservative-vbv)           _CC_OVERRIDES[CONSERVATIVE_VBV]=1;                                                                  _cc_oi=$((_cc_oi+1)) ;;
+      --no-conservative-vbv)        _CC_OVERRIDES[CONSERVATIVE_VBV]=0;                                                                  _cc_oi=$((_cc_oi+1)) ;;
+      --threads)                    _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[THREADS]="$_cc_val";                   _cc_oi=$((_cc_oi+2)) ;;
+      # HDR/DV
+      --tonemap)                    _CC_OVERRIDES[TONEMAP_HDR_TO_SDR]=1;                                                                _cc_oi=$((_cc_oi+1)) ;;
+      --no-tonemap)                 _CC_OVERRIDES[TONEMAP_HDR_TO_SDR]=0;                                                                _cc_oi=$((_cc_oi+1)) ;;
+      --dv)                         _CC_OVERRIDES[DISABLE_DV]=0;                                                                        _cc_oi=$((_cc_oi+1)) ;;
+      --no-dv)                      _CC_OVERRIDES[DISABLE_DV]=1;                                                                        _cc_oi=$((_cc_oi+1)) ;;
+      --allow-dv-fallback)          _CC_OVERRIDES[ALLOW_DV_FALLBACK]=1;                                                                 _cc_oi=$((_cc_oi+1)) ;;
+      --no-allow-dv-fallback)       _CC_OVERRIDES[ALLOW_DV_FALLBACK]=0;                                                                 _cc_oi=$((_cc_oi+1)) ;;
+      --dv-convert-p81)             _CC_OVERRIDES[DV_CONVERT_TO_P81_IF_FAIL]=1;                                                         _cc_oi=$((_cc_oi+1)) ;;
+      --no-dv-convert-p81)          _CC_OVERRIDES[DV_CONVERT_TO_P81_IF_FAIL]=0;                                                         _cc_oi=$((_cc_oi+1)) ;;
+      --sdr-force-10bit)            _CC_OVERRIDES[SDR_FORCE_10BIT]=1;                                                                   _cc_oi=$((_cc_oi+1)) ;;
+      --no-sdr-force-10bit)         _CC_OVERRIDES[SDR_FORCE_10BIT]=0;                                                                   _cc_oi=$((_cc_oi+1)) ;;
+      # Audio
+      --stereo-fallback)            _CC_OVERRIDES[ADD_STEREO_IF_MULTICH]=1;                                                             _cc_oi=$((_cc_oi+1)) ;;
+      --no-stereo-fallback)         _CC_OVERRIDES[ADD_STEREO_IF_MULTICH]=0;                                                             _cc_oi=$((_cc_oi+1)) ;;
+      --audio-force-codec)          _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AUDIO_FORCE_CODEC]="$_cc_val";         _cc_oi=$((_cc_oi+2)) ;;
+      --audio-titles)               _CC_OVERRIDES[INCLUDE_AUDIO_TITLES]=1;                                                              _cc_oi=$((_cc_oi+1)) ;;
+      --no-audio-titles)            _CC_OVERRIDES[INCLUDE_AUDIO_TITLES]=0;                                                              _cc_oi=$((_cc_oi+1)) ;;
+      # Subtitles
+      --sub-preserve-format)        _CC_OVERRIDES[SUB_PRESERVE_TEXT_FORMAT]=1;                                                          _cc_oi=$((_cc_oi+1)) ;;
+      --no-sub-preserve-format)     _CC_OVERRIDES[SUB_PRESERVE_TEXT_FORMAT]=0;                                                          _cc_oi=$((_cc_oi+1)) ;;
+      --sub-export-external)        _CC_OVERRIDES[SUB_EXPORT_EXTERNAL]=1;                                                               _cc_oi=$((_cc_oi+1)) ;;
+      --no-sub-export-external)     _CC_OVERRIDES[SUB_EXPORT_EXTERNAL]=0;                                                               _cc_oi=$((_cc_oi+1)) ;;
+      --sub-sole-ext-fallback)      _CC_OVERRIDES[SUB_SOLE_EXT_FALLBACK]=1;                                                             _cc_oi=$((_cc_oi+1)) ;;
+      --no-sub-sole-ext-fallback)   _CC_OVERRIDES[SUB_SOLE_EXT_FALLBACK]=0;                                                             _cc_oi=$((_cc_oi+1)) ;;
+      --no-sub-sdh)                 _CC_OVERRIDES[SUB_INCLUDE_SDH]=0;                                                                   _cc_oi=$((_cc_oi+1)) ;;
+      --ocr-lang)                   _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SUB_OCR_LANG]="$_cc_val";              _cc_oi=$((_cc_oi+2)) ;;
+      --ocr-tool)                   _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SUB_OCR_TOOL]="$_cc_val";              _cc_oi=$((_cc_oi+2)) ;;
+      --no-ocr)                     _CC_OVERRIDES[SUB_ENABLE_OCR]=0;                                                                    _cc_oi=$((_cc_oi+1)) ;;
+      # Metadata/pipeline
+      --keep-chapters)              _CC_OVERRIDES[KEEP_CHAPTERS]=1;                                                                     _cc_oi=$((_cc_oi+1)) ;;
+      --no-keep-chapters)           _CC_OVERRIDES[KEEP_CHAPTERS]=0;                                                                     _cc_oi=$((_cc_oi+1)) ;;
+      --strip-metadata)             _CC_OVERRIDES[STRIP_METADATA]=1;                                                                    _cc_oi=$((_cc_oi+1)) ;;
+      --no-strip-metadata)          _CC_OVERRIDES[STRIP_METADATA]=0;                                                                    _cc_oi=$((_cc_oi+1)) ;;
+      --report-json)                _CC_OVERRIDES[REPORT_JSON]=1;                                                                       _cc_oi=$((_cc_oi+1)) ;;
+      --no-report-json)             _CC_OVERRIDES[REPORT_JSON]=0;                                                                       _cc_oi=$((_cc_oi+1)) ;;
+      --profile-comment)            _CC_OVERRIDES[PROFILE_COMMENT]=1;                                                                   _cc_oi=$((_cc_oi+1)) ;;
+      --no-profile-comment)         _CC_OVERRIDES[PROFILE_COMMENT]=0;                                                                   _cc_oi=$((_cc_oi+1)) ;;
+      # Logging
+      --ffmpeg-loglevel)            _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[FFMPEG_LOGLEVEL]="$_cc_val";           _cc_oi=$((_cc_oi+2)) ;;
+      --ffprobe-loglevel)           _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[FFPROBE_LOGLEVEL]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
+      *)
+        printf '❌ ERROR: Unknown config override: %s\n' "$_cc_flag" >&2
+        printf '   Use --create-config without extra flags to generate a default template.\n' >&2
+        exit 11
+        ;;
+    esac
+  done
 
   # Normalize deprecated alias
   if [[ "$profile" == "dv-archival" ]]; then
@@ -2810,6 +2918,9 @@ _create_config() {
   _create_config_emit "$profile" > "$target_path"
 
   printf '✅ Created %s config → %s\n' "$profile" "$target_path"
+  if (( ${#_CC_OVERRIDES[@]} > 0 )); then
+    printf 'ℹ️  Applied %d override(s) to generated config.\n' "${#_CC_OVERRIDES[@]}"
+  fi
   printf '   Profile: %s\n' "$profile"
   printf '   Scope:   %s\n' "$scope"
   printf '\n'
@@ -2875,6 +2986,25 @@ done
 # Replace positional parameters with filtered args (--profile consumed)
 set -- "${_filtered_args[@]}"
 unset _prescan_args _filtered_args _i
+
+# Multi-profile: detect comma-separated --profile and validate all names upfront.
+# Single profile: behaviour is exactly as before (no multi-profile path activated).
+if [[ "${PROFILE_NAME:-}" == *,* ]]; then
+  # Reject malformed lists: leading comma, trailing comma, or consecutive commas
+  if [[ "$PROFILE_NAME" == ,* || "$PROFILE_NAME" == *, || "$PROFILE_NAME" == *,,* ]]; then
+    die 11 "--profile: empty profile name in list '$PROFILE_NAME'"
+  fi
+  IFS=',' read -ra _MULTI_PROFILES <<< "$PROFILE_NAME"
+  for _mp in "${_MULTI_PROFILES[@]}"; do
+    [[ -z "$_mp" ]] && die 11 "--profile: empty profile name in list '$PROFILE_NAME'"
+    _is_valid_profile "$_mp" || die 11 "Unknown profile '${_mp}' in --profile list. Valid: $(_valid_profiles_display)"
+  done
+  _MULTI_PROFILE_MODE=1
+  # Use first profile for single-pass config/conflict checks in the parent process
+  PROFILE_NAME="${_MULTI_PROFILES[0]}"
+fi
+# Save filtered CLI args (--profile consumed) for multi-profile re-invocation
+_ORIG_FILTERED_ARGS=("$@")
 
 # ---- Profile application functions (pure assignment, no side effects) ----
 
@@ -3144,6 +3274,41 @@ apply_profile_animation() {
   STRIP_METADATA=0
 }
 
+apply_profile_youtube_upload() {
+  # Goal: H.264 high-profile for YouTube ingestion. Master quality, AAC stereo, burn/export subs.
+  DISABLE_DV=1
+  ALLOW_DV_FALLBACK=0
+  DV_CONVERT_TO_P81_IF_FAIL=0
+  # Container: mp4 (required by YouTube)
+  OUTPUT_EXT="mp4"
+  # Video: H.264 high-profile, quality-first
+  VIDEO_CODEC="libx264"
+  VIDEO_COPY_IF_COMPLIANT=0
+  SKIP_IF_IDEAL=0
+  CRF_VALUE=16
+  PRESET_VALUE="slow"
+  FORCE_CHROMA_420=1
+  X264_PARAMS_BASE='profile=high:rc-lookahead=60:aq-mode=2:aq-strength=1.0'
+  # HDR: preserve pixel format, no DV, no tone-map (let YouTube handle it)
+  TONEMAP_HDR_TO_SDR=0
+  HDR_TARGET_PIXFMT="yuv420p10le"
+  # Audio: AAC stereo only (YouTube ingestion requirement)
+  AUDIO_FORCE_CODEC="aac"
+  MAX_AUDIO_CHANNELS=2
+  STEREO_BITRATE="256k"
+  AUDIO_LOSSLESS_PASSTHROUGH=0
+  ADD_STEREO_IF_MULTICH=0
+  # Subs: burn forced, export full as external SRT
+  SUB_INCLUDE_FORCED=1
+  SUB_INCLUDE_FULL=1
+  SUB_INCLUDE_SDH=0
+  SUB_BURN_FORCED=1
+  SUB_EXPORT_EXTERNAL=1
+  # Chapters/metadata: strip fluff, keep chapters
+  STRIP_METADATA=1
+  KEEP_CHAPTERS=1
+}
+
 # _profile_comment — return the profile tagline for container comment metadata.
 # Returns empty string for unrecognised/absent profiles (no comment written).
 _profile_comment() {
@@ -3155,6 +3320,7 @@ _profile_comment() {
     streaming)                  echo "Lean, mean, streaming machine." ;;
     animation)                  echo "psy-rd turned down, sakuga turned up." ;;
     universal)                  echo "Lowest common denominator, highest common decency." ;;
+    youtube-upload)             echo "Your master, YouTube's problem." ;;
     *)                          echo "" ;;
   esac
 }
@@ -3175,6 +3341,7 @@ apply_profile() {
     streaming)                   apply_profile_streaming ;;
     animation)                   apply_profile_animation ;;
     universal)                   apply_profile_universal ;;
+    youtube-upload)              apply_profile_youtube_upload ;;
     *)
       printf "❌ ERROR: Unknown profile: %s\n" "$PROFILE_NAME" >&2
       printf "   Valid profiles: %s\n" "$(_valid_profiles_display)" >&2
@@ -3208,7 +3375,7 @@ _create_config_prescan() {
           exit 11
         fi
         _cc_scope="${_cc_args[$((_cc_i + 1))]}"
-        # Optional: profile as third arg
+        # Optional: profile as third arg (only if it doesn't start with -)
         if (( _cc_i + 2 < ${#_cc_args[@]} )) && [[ "${_cc_args[$((_cc_i + 2))]}" != -* ]]; then
           _cc_profile="${_cc_args[$((_cc_i + 2))]}"
         fi
@@ -3218,13 +3385,137 @@ _create_config_prescan() {
     _cc_i=$((_cc_i + 1))
   done
   if (( _cc_found )); then
-    _create_config "$_cc_scope" "$_cc_profile" "$_cc_force"
+    # Collect any remaining args after scope+profile as config override flags
+    local _cc_override_start
+    if [[ -n "$_cc_profile" ]]; then
+      _cc_override_start=$(( _cc_i + 3 ))
+    else
+      _cc_override_start=$(( _cc_i + 2 ))
+    fi
+    local -a _cc_override_args=()
+    local _cc_oi=$(( _cc_override_start ))
+    while (( _cc_oi < ${#_cc_args[@]} )); do
+      _cc_override_args+=("${_cc_args[$_cc_oi]}")
+      _cc_oi=$(( _cc_oi + 1 ))
+    done
+    _create_config "$_cc_scope" "$_cc_profile" "$_cc_force" "${_cc_override_args[@]}"
     # _create_config always exits; this line is unreachable
   fi
 }
 _create_config_prescan "$@"
 
 apply_profile
+
+# _probe_profile_ext PROFILE — return the OUTPUT_EXT that apply_profile_PROFILE sets.
+# Runs in an isolated local scope so the caller's OUTPUT_EXT is never mutated.
+_probe_profile_ext() {
+  local OUTPUT_EXT="mp4"
+  "apply_profile_${1//-/_}" 2>/dev/null
+  echo "${OUTPUT_EXT}"
+}
+
+# _run_multi_profiles — multi-profile dispatch (Change 2).
+# Called when _MULTI_PROFILE_MODE=1 (--profile a,b,c detected in prescan).
+# Re-invokes the script once per profile as a subprocess, deriving a per-profile
+# output path automatically. Each subprocess gets its own fresh variable state.
+#
+# Args: none (reads _MULTI_PROFILES, _ORIG_FILTERED_ARGS, SRC_ABS, POSITIONALS)
+# Exits: 0 if all profiles succeed; 1 if any failed.
+_run_multi_profiles() {
+  local -i _total=${#_MULTI_PROFILES[@]}
+  local -a _results=()
+  local -i _fail_count=0
+  local _src_stem="${SRC_ABS%.*}"
+  local _src_ext="${SRC_ABS##*.}"
+
+  # Determine output stem base (full path prefix used for per-profile file names).
+  # If the user supplied an explicit output filename as the second positional arg,
+  # extract its stem and directory; otherwise fall back to the source stem.
+  local _out_stem_full
+  local -i _user_provided=0
+  if [[ ${#POSITIONALS[@]} -ge 2 && -n "${POSITIONALS[1]}" ]]; then
+    local _user_out="${POSITIONALS[1]}"
+    local _user_dir _user_base _user_stem
+    _user_dir="$(dirname "$_user_out")"
+    _user_base="$(basename "$_user_out")"
+    _user_stem="${_user_base%.*}"
+    _out_stem_full="${_user_dir}/${_user_stem}"
+    _user_provided=1
+  else
+    _out_stem_full="$_src_stem"
+  fi
+
+  # Build child flag args: _ORIG_FILTERED_ARGS with source/output positionals stripped.
+  # Positionals are always collected at the end by the CLI parser; strip the last
+  # ${#POSITIONALS[@]} elements (1 = source only, 2 = source + explicit output).
+  local -a _child_flags=()
+  local -i _nargs=${#_ORIG_FILTERED_ARGS[@]}
+  local -i _npos=${#POSITIONALS[@]}
+  local -i _nflags=$(( _nargs - _npos ))
+  (( _nflags < 0 )) && _nflags=0
+  _child_flags=("${_ORIG_FILTERED_ARGS[@]:0:$_nflags}")
+
+  # Pre-compute per-profile extensions and output paths (needed for warning + invocation).
+  local -a _prof_exts=()
+  local -a _child_outs=()
+  local _mp _prof_ext
+  for _mp in "${_MULTI_PROFILES[@]}"; do
+    _prof_ext="$(_probe_profile_ext "$_mp")"
+    # Passthrough profiles set OUTPUT_EXT="" — fall back to source extension
+    [[ -z "$_prof_ext" ]] && _prof_ext="$_src_ext"
+    _prof_ext="${_prof_ext,,}"
+    _prof_exts+=("$_prof_ext")
+    _child_outs+=("${_out_stem_full}.${_mp}.${_prof_ext}")
+  done
+
+  # If the user supplied an explicit output filename, warn that it will be split
+  # into per-profile files before the first encode starts.
+  if (( _user_provided )); then
+    warn "Multi-profile mode: output will be split into per-profile files:"
+    local _co
+    for _co in "${_child_outs[@]}"; do
+      printf "     %s\n" "$_co" >&2
+    done
+  fi
+
+  local -i _idx=0
+  for _mp in "${_MULTI_PROFILES[@]}"; do
+    _idx=$((_idx + 1))
+
+    # Header per profile pass
+    printf "━━━ Profile %d/%d: %s ━━━\n" "$_idx" "$_total" "$_mp" >&2
+
+    _prof_ext="${_prof_exts[$((_idx-1))]}"
+    local _child_out="${_child_outs[$((_idx-1))]}"
+
+    # Re-invoke muxm for this profile
+    local -i _child_rc=0
+    "$0" --profile "$_mp" --output-ext "$_prof_ext" \
+      "${_child_flags[@]}" "$SRC_ABS" "$_child_out" || _child_rc=$?
+
+    if (( _child_rc == 0 )); then
+      _results+=("${_mp}:PASS")
+    else
+      _results+=("${_mp}:FAIL:${_child_rc}")
+      _fail_count=$((_fail_count + 1))
+      warn "Profile '${_mp}' failed (exit ${_child_rc}) — continuing with remaining profiles."
+    fi
+  done
+
+  # Per-profile summary
+  printf "\n" >&2
+  say "Multi-profile summary:"
+  for _r in "${_results[@]}"; do
+    local _rp="${_r%%:*}" _rs="${_r#*:}"
+    if [[ "$_rs" == "PASS" ]]; then
+      say "  ✅ ${_rp}: PASS"
+    else
+      say "  ❌ ${_rp}: FAIL (exit ${_rs#*:})"
+    fi
+  done
+
+  return $(( _fail_count > 0 ? 1 : 0 ))
+}
 
 # ===== Section 12: CLI parsing =================================================================
 if [[ -n "$OUTPUT_EXT" ]]; then
@@ -3246,6 +3537,7 @@ Profiles (--profile NAME):
   streaming                  HEVC CRF 20 for Plex/Jellyfin. HDR10, E-AC-3. MP4.
   animation                  Anime/cartoon. CRF 16, lossless audio, ASS subs. MKV.
   universal                  H.264 SDR, AAC stereo. Lean, play anywhere. MP4.
+  youtube-upload             H.264 high-profile CRF 16. AAC stereo, burn forced subs. MP4.
 
 Common options:
   -h, --help                  Show this help
@@ -3312,6 +3604,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --x265-params) X265_PARAMS_BASE="${2:-}"; shift 2 ;;
+    --x264-params) X264_PARAMS_BASE="${2:-}"; shift 2 ;;
     -l|--level) LEVEL_VALUE="${2:-}"; shift 2 ;;
     --conservative-vbv) CONSERVATIVE_VBV=1; shift ;;
     --no-conservative-vbv) CONSERVATIVE_VBV=0; shift ;;
@@ -3652,6 +3945,18 @@ if [[ -n "${PROFILE_NAME:-}" ]]; then
           "Dolby Vision in an SDR/H.264 universal output is contradictory. DV will be stripped."
       ;;
 
+    youtube-upload)
+      # MKV won't ingest well on YouTube
+      [[ "$OUTPUT_EXT" == "mkv" ]] && \
+        _warn_conflict "$PROFILE_NAME" "--output-ext mkv" \
+          "YouTube requires MP4. MKV output may be rejected or not process correctly."
+
+      # Lossless audio won't survive YouTube's transcode pipeline
+      (( AUDIO_LOSSLESS_PASSTHROUGH )) && \
+        _warn_conflict "$PROFILE_NAME" "--audio-lossless-passthrough" \
+          "YouTube transcodes all audio. Lossless passthrough is unnecessary overhead; use AAC."
+      ;;
+
   esac
 
   # Cross-profile: warn on any flag combination that is inherently contradictory
@@ -3699,6 +4004,7 @@ Effective config (post config-files + profile + CLI):
   CRF_VALUE                 = $CRF_VALUE
   PRESET_VALUE              = $PRESET_VALUE
   X265_PARAMS_BASE          = $X265_PARAMS_BASE
+  X264_PARAMS_BASE          = ${X264_PARAMS_BASE:-<none>}
   LEVEL_VALUE               = ${LEVEL_VALUE:-<auto>}
   CONSERVATIVE_VBV          = $CONSERVATIVE_VBV
   THREADS                   = ${THREADS:-<auto>}
@@ -3847,6 +4153,36 @@ SRC_ABS="$(realpath_fallback "$SRC")"
 if [[ "$SRC_ABS" =~ [[:cntrl:]] ]]; then
   die 11 "Source filename contains control characters - potential security risk"
 fi
+
+# ---- Multi-profile dispatch (Change 2) -------------------------------------------------------
+# Must run after SRC_ABS is validated so we have a clean absolute source path,
+# but before WORKDIR/TMP_OUT creation (those belong to single-profile children only).
+# Each child sub-invocation runs independently with its own workdir and pipeline.
+if (( _MULTI_PROFILE_MODE )); then
+  _run_multi_profiles
+  # on_exit EXIT trap fires after this exit; WORKDIR/TMP_OUT are empty → no-op cleanup.
+  exit $?
+fi
+# ---- End multi-profile dispatch --------------------------------------------------------------
+
+# ---- Infer output container from explicit output filename -----------------------------------
+# If the user provided an explicit output filename with a recognized extension, infer
+# OUTPUT_EXT from it (as if --output-ext was passed). This prevents a mismatch where
+# passthrough would derive the container from the source, but the output file has a
+# different extension (e.g., muxm --profile archive movie.mkv output.mp4).
+# Only applies in single-profile mode; --output-ext flag wins if already set.
+if [[ -n "${OUT:-}" ]] && (( ! _OUTPUT_EXT_EXPLICIT )); then
+  _out_inferred_ext="$(_lower "${OUT##*.}")"
+  case "$_out_inferred_ext" in
+    mp4|m4v|mov|mkv)
+      OUTPUT_EXT="$_out_inferred_ext"
+      _OUTPUT_EXT_EXPLICIT=1
+      log "[output] Inferred output container .$_out_inferred_ext from explicit output filename"
+      ;;
+  esac
+  unset _out_inferred_ext
+fi
+# ---- End output filename inference ----------------------------------------------------------
 
 # ---- Container passthrough resolution -------------------------------------------------------
 # If OUTPUT_EXT is empty (set by a profile or left at default), derive the container from the
@@ -4340,7 +4676,11 @@ check_skip_if_ideal() {
   # ---- Video compliance (reuse the copy-compliant check) ----
   # _video_is_copy_compliant checks: codec, pixel format, tone-map, DV profile, bitrate.
   # On rejection it sets _COPY_REJECT_REASON with a specific diagnostic.
-  if ! _video_is_copy_compliant; then
+  # VIDEO_COPY_IF_COMPLIANT=0 means the profile requires re-encoding; skip-if-ideal cannot apply.
+  if (( ! VIDEO_COPY_IF_COMPLIANT )); then
+    ideal=0
+    reason="VIDEO_COPY_IF_COMPLIANT=0 (profile requires re-encode)"
+  elif ! _video_is_copy_compliant; then
     ideal=0
     reason="${_COPY_REJECT_REASON:-video stream not copy-compliant}"
   fi
@@ -4390,6 +4730,17 @@ check_skip_if_ideal() {
     fi
   fi
 
+  # ---- Stereo fallback check (skip-if-ideal only) ----
+  # If ADD_STEREO_IF_MULTICH is set and the primary audio track is surround,
+  # the source is not ideal because a stereo downmix track would need to be added.
+  if (( ideal )) && (( ADD_STEREO_IF_MULTICH )); then
+    local _sii_ch
+    _sii_ch="$(_audio_channels 0)"
+    if [[ -n "$_sii_ch" ]] && (( _sii_ch > 2 )); then
+      ideal=0; reason="stereo fallback needed (${_sii_ch}ch audio, ADD_STEREO_IF_MULTICH=1)"
+    fi
+  fi
+
   # ---- Subtitle compliance (skip-if-ideal only) ----
   if (( ideal )) && (( SUB_MULTI_TRACK )); then
     # Multi-track: source is ideal only if every subtitle track survives the filter.
@@ -4404,6 +4755,13 @@ check_skip_if_ideal() {
     if [[ "$_ideal_sub_n_keep" != "$_ideal_sub_n_total" ]]; then
       ideal=0; reason="subtitle filter would drop $(( _ideal_sub_n_total - _ideal_sub_n_keep )) of $_ideal_sub_n_total tracks"
     fi
+  fi
+
+  # ---- External subtitle check ----
+  # If sidecar subtitle files were discovered, they must be muxed in — the source
+  # cannot be considered ideal because a straight copy would silently omit them.
+  if (( ideal )) && (( ${#EXT_SUB_PATHS[@]} > 0 )); then
+    ideal=0; reason="${#EXT_SUB_PATHS[@]} external subtitle(s) need to be muxed in"
   fi
 
   if (( ideal )); then
@@ -5003,10 +5361,16 @@ _video_is_copy_compliant() {
     return 1
   fi
 
-  # If tone-mapping is requested, can't copy
-  if (( TONEMAP_HDR_TO_SDR )) && [[ "$PROFILE_DESC" == "SDR-TONEMAP" ]]; then
-    _COPY_REJECT_REASON="tone-mapping required (cannot copy)"
-    return 1
+  # If tone-mapping is requested, can't copy — check actual source color metadata
+  # (PROFILE_DESC is not yet set when check_skip_if_ideal runs, so probe directly)
+  if (( TONEMAP_HDR_TO_SDR )); then
+    local _sii_prim _sii_trc
+    _sii_prim="$(_lower "$(_probe_field color_primaries)")"
+    _sii_trc="$(_lower "$(_probe_field color_transfer)")"
+    if [[ "$_sii_prim" == "bt2020" || "$_sii_trc" == "smpte2084" || "$_sii_trc" == "arib-std-b67" ]]; then
+      _COPY_REJECT_REASON="tone-mapping required (HDR source cannot be copied)"
+      return 1
+    fi
   fi
 
   # Check DV profile compatibility when DV handling is active.
@@ -5217,7 +5581,7 @@ run_video_pipeline() {
   fi
 
   if [[ "$VIDEO_CODEC" == "libx264" ]]; then
-    # H.264 encode (universal profile)
+    # H.264 encode (universal / youtube-upload profile)
     log "→ Encoding video (H.264/SDR, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
     encode_args=(
       -c:v libx264
@@ -5226,6 +5590,7 @@ run_video_pipeline() {
       -pix_fmt yuv420p
       "${COLOR_ARGS[@]}"
     )
+    [[ -n "$X264_PARAMS_BASE" ]] && encode_args+=( -x264-params "$X264_PARAMS_BASE" )
     report_add "video_codec" "h264"
   else
     # HEVC encode (default, hdr10-hq, atv-directplay-hq)
@@ -6410,17 +6775,79 @@ run_audio_pipeline(){
 
   # Add stereo fallback if needed
   if (( ADD_STEREO_IF_MULTICH )) && (( effective_ch > 2 )); then
-    log "→ Preparing stereo fallback → $AAC_STEREO"
+    # Scan for a native stereo track before falling back to a synthetic downmix.
+    local _native_si="" _native_sc=""
+    local _ns_total _ns_i _ns_info _ns_c _ns_ch _ns_l _ns_br _ns_t _ns_vi _ns_hi
+    _ns_total="$(_audio_stream_count)"
+    for (( _ns_i = 0; _ns_i < _ns_total; _ns_i++ )); do
+      (( _ns_i == idx )) && continue
+      _ns_info="$(_audio_stream_info "$_ns_i")"
+      IFS=$'\t' read -r _ns_c _ns_ch _ns_l _ns_br _ns_t <<< "$_ns_info"
+      _ns_c="${_ns_c,,}"; _ns_l="${_ns_l,,}"
+      [[ -z "$_ns_l" ]] && _ns_l="$TAG_LANGUAGE_DEFAULT"
+      [[ -z "$_ns_ch" || ! "$_ns_ch" =~ ^[0-9]+$ ]] && _ns_ch=0
+      # Must be exactly 2 channels
+      (( _ns_ch != 2 )) && continue
+      # Language must match primary track (und matches anything)
+      if [[ "$_ns_l" != "und" && "$lang" != "und" && "$_ns_l" != "$lang" ]]; then continue; fi
+      # Not commentary or descriptive audio (title check)
+      _audio_is_commentary "$_ns_t" && continue
+      # Not flagged as visually impaired or hearing impaired (disposition flags)
+      _ns_vi="$(_jq_cache -r "[.streams[] | select(.codec_type==\"audio\")] | .[$_ns_i].disposition.visual_impaired // 0")"
+      _ns_hi="$(_jq_cache -r "[.streams[] | select(.codec_type==\"audio\")] | .[$_ns_i].disposition.hearing_impaired // 0")"
+      (( _ns_vi )) && continue
+      (( _ns_hi )) && continue
+      _native_si="$_ns_i"
+      _native_sc="$_ns_c"
+      break
+    done
+
     local stereo_total_secs
     stereo_total_secs="$(_get_source_duration_secs)"
-    # shellcheck disable=SC2034  # used by name-reference in _ffmpeg_run_with_ui
-    local -a stereo_cmd=("${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
-      -c:a aac -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO")
-    if ! _ffmpeg_run_with_ui stereo_cmd "Creating stereo fallback" "$WORKDIR/audio_stereo.err" "$stereo_total_secs"; then
-      warn "Stereo fallback creation failed - continuing without it. See: $WORKDIR/audio_stereo.err"
-      AAC_STEREO=""
+
+    if [[ -n "$_native_si" ]]; then
+      note "[Audio] Native stereo track found (stream #${_native_si}, ${_native_sc} 2ch). Preferring over synthetic downmix."
+      # Copy if codec is compatible with the output container; otherwise transcode to AAC.
+      local _ns_do_copy=0
+      case "$OUTPUT_EXT" in
+        mkv) _ns_do_copy=1 ;;
+        mp4|m4v|mov)
+          case "$_native_sc" in aac|ac3|eac3) _ns_do_copy=1 ;; esac ;;
+      esac
+      if (( _ns_do_copy )); then
+        ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map "0:a:${_native_si}" -c copy "$AAC_STEREO" \
+          2>"$WORKDIR/audio_stereo.err" &
+        local _ns_pid=$!
+        spinner "$_ns_pid" "Copying native stereo track"
+        if ! wait "$_ns_pid" 2>/dev/null; then
+          warn "Native stereo copy failed - continuing without it. See: $WORKDIR/audio_stereo.err"
+          AAC_STEREO=""
+        else
+          mark_done "Stereo fallback prepared (native)"
+        fi
+      else
+        # shellcheck disable=SC2034  # used by name-reference in _ffmpeg_run_with_ui
+        local -a stereo_cmd=("${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map "0:a:${_native_si}" \
+          -c:a aac -b:a "$STEREO_BITRATE" "$AAC_STEREO")
+        if ! _ffmpeg_run_with_ui stereo_cmd "Transcoding native stereo" "$WORKDIR/audio_stereo.err" "$stereo_total_secs"; then
+          warn "Native stereo transcode failed - continuing without it. See: $WORKDIR/audio_stereo.err"
+          AAC_STEREO=""
+        else
+          mark_done "Stereo fallback prepared (native)"
+        fi
+      fi
     else
-      mark_done "Stereo fallback prepared"
+      note "[Audio] No native stereo track available. Creating downmix from surround."
+      log "→ Preparing stereo fallback → $AAC_STEREO"
+      # shellcheck disable=SC2034  # used by name-reference in _ffmpeg_run_with_ui
+      local -a stereo_cmd=("${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map 0:a:"$idx" \
+        -c:a aac -b:a "$STEREO_BITRATE" -ac 2 "$AAC_STEREO")
+      if ! _ffmpeg_run_with_ui stereo_cmd "Creating stereo fallback" "$WORKDIR/audio_stereo.err" "$stereo_total_secs"; then
+        warn "Stereo fallback creation failed - continuing without it. See: $WORKDIR/audio_stereo.err"
+        AAC_STEREO=""
+      else
+        mark_done "Stereo fallback prepared"
+      fi
     fi
   else
     note "Primary audio is stereo (or fallback disabled); no extra stereo needed."

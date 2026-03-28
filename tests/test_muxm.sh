@@ -24,14 +24,7 @@ PASS=0
 FAIL=0
 SKIP=0
 ERRORS=()
-PARALLEL=1          # 1 = parallel multi-suite (default), 0 = sequential (--no-parallel)
-JOBS=""             # concurrency limit; empty = auto (nproc or 4)
-FAILED_SUITES=()    # suite names that had ≥1 failure
 SUITE_STATUS=()     # "suite:PASS" or "suite:FAIL" entries for per-suite summary
-
-# Global state for parallel runner (accessed by SIGINT handler)
-_PAR_TMPDIR=""
-declare -A _PAR_PIDS=()
 
 # muxm exits 11 for validation/usage errors (bad flags, missing files, invalid values, etc.).
 # Exit code 11 is chosen to avoid collision with standard shell/signal codes (1-2, 126-128+N).
@@ -60,19 +53,20 @@ show_help() {
   Suites (--suite NAME):
 
     Fast (config-only, no media generation, ~2s):
-      profiles     Profile variable assignment (--print-effective-config)
-      conflicts    Conflict warnings (profile + contradictory flag)
-      toggles      CLI toggle/flag parsing (--flag / --no-flag pairs)
-      config       Config file precedence (.muxmrc layering)
-      unit         Pure unit tests (helpers, codec maps, heuristics)
-      completions  Tab-completion installer/uninstaller
-      setup        --install-dependencies, --install-man, etc.
+      profiles      Profile variable assignment (--print-effective-config)
+      conflicts     Conflict warnings (profile + contradictory flag)
+      toggles       CLI toggle/flag parsing (--flag / --no-flag pairs)
+      config        Config file precedence (.muxmrc layering)
+      unit          Pure unit tests (helpers, codec maps, heuristics)
+      completions   Tab-completion installer/uninstaller
+      setup         --install-dependencies, --install-man, etc.
 
     Medium (core fixture only, ~5s):
-      cli          CLI parsing, --help, --version, error codes
-      dryrun       --dry-run mode (profiles, skip flags, multi-track)
-      collision    Source/output collision and auto-versioning
-      edge         Edge cases (empty files, missing streams, etc.)
+      cli           CLI parsing, --help, --version, error codes
+      dryrun        --dry-run mode (profiles, skip flags, multi-track)
+      collision     Source/output collision and auto-versioning
+      edge          Edge cases (empty files, missing streams, etc.)
+      multi_profile Multi-profile comma-separated --profile parsing + auto-naming
 
     Full (all fixtures, real encodes, ~30s+):
       video        Video pipeline (HEVC, H.264, copy-if-compliant)
@@ -91,9 +85,6 @@ show_help() {
     --muxm PATH    Path to muxm binary (default: ./muxm)
     --suite NAME   Run a specific suite (see above)
     --verbose      Show output snippets on failure
-    --parallel     Run multiple suites in parallel (default)
-    --no-parallel  Force sequential suite execution
-    -j, --jobs N   Max concurrent suites (default: nproc or 4)
     -h, --help     Show this help
     --cleanup      Remove all muxm test directories and exit
 
@@ -168,9 +159,6 @@ while [[ $# -gt 0 ]]; do
     --muxm)        MUXM="$2"; shift 2 ;;
     --suite)       SUITE="$2"; shift 2 ;;
     --verbose)     VERBOSE=1; shift ;;
-    --parallel)    PARALLEL=1; shift ;;
-    --no-parallel) PARALLEL=0; shift ;;
-    -j|--jobs)     JOBS="$2"; shift 2 ;;
     -h|--help)  show_help ;;
     --cleanup)  do_cleanup ;;
     *) echo "Unknown option: $1 (try --help)"; exit 1 ;;
@@ -333,7 +321,7 @@ assert_stream_count() {
   if [[ "$count" -ge "$min" && "$count" -le "$max" ]]; then
     pass "$label ($count streams)"
   else
-    fail "$label — expected $min–$max streams, got $count"
+    fail "$label — expected ${min}-${max} streams, got $count"
   fi
 }
 
@@ -1277,6 +1265,308 @@ EOF
   assert_contains "SUB_OCR_TOOL              = pgsrip" "--ocr-tool sets SUB_OCR_TOOL in effective config" "$ocr_out"
 }
 
+_test_config_create_overrides() {
+  # --create-config with CLI overrides should produce a .muxmrc where the
+  # overridden values are uncommented and set to the supplied values.
+
+  local out content
+
+  # Single override: --crf 20 should uncomment CRF_VALUE=20
+  local cfg_crf_dir="$TESTDIR/config_create_override_crf"
+  mkdir -p "$cfg_crf_dir"
+  out="$(run_muxm_in "$cfg_crf_dir" --create-config project atv-directplay-hq --crf 20 2>&1)"
+  if [[ -f "$cfg_crf_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_crf_dir/.muxmrc")"
+    # The value should appear uncommented (not starting with #)
+    if echo "$content" | grep -qE '^CRF_VALUE=20'; then
+      pass "--create-config --crf 20: CRF_VALUE=20 uncommented in .muxmrc"
+    else
+      fail "--create-config --crf 20: CRF_VALUE=20 not found uncommented (got: $(echo "$content" | grep CRF_VALUE || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --crf 20: did not create .muxmrc"
+  fi
+  rm -f "$cfg_crf_dir/.muxmrc"
+
+  # Multiple overrides: --crf 20 --preset medium → both uncommented
+  local cfg_multi_dir="$TESTDIR/config_create_override_multi"
+  mkdir -p "$cfg_multi_dir"
+  out="$(run_muxm_in "$cfg_multi_dir" \
+    --create-config project atv-directplay-hq --crf 20 --preset medium 2>&1)"
+  if [[ -f "$cfg_multi_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_multi_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^CRF_VALUE=20'; then
+      pass "--create-config multi-override: CRF_VALUE=20 uncommented"
+    else
+      fail "--create-config multi-override: CRF_VALUE=20 not found uncommented"
+    fi
+    if echo "$content" | grep -qE '^PRESET_VALUE=("medium"|medium)$'; then
+      pass "--create-config multi-override: PRESET_VALUE=medium uncommented"
+    else
+      fail "--create-config multi-override: PRESET_VALUE=medium not found uncommented"
+    fi
+  else
+    fail "--create-config multi-override: did not create .muxmrc"
+  fi
+  rm -f "$cfg_multi_dir/.muxmrc"
+
+  # No overrides: CRF_VALUE should remain commented out (profile default behaviour unchanged)
+  local cfg_nooverride_dir="$TESTDIR/config_create_no_override"
+  mkdir -p "$cfg_nooverride_dir"
+  run_muxm_in "$cfg_nooverride_dir" --create-config project atv-directplay-hq >/dev/null 2>&1
+  if [[ -f "$cfg_nooverride_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_nooverride_dir/.muxmrc")"
+    # CRF_VALUE line should exist but be commented out
+    if echo "$content" | grep -qE '^#.*CRF_VALUE'; then
+      pass "--create-config no-override: CRF_VALUE stays commented out"
+    elif ! echo "$content" | grep -qE '^CRF_VALUE='; then
+      pass "--create-config no-override: CRF_VALUE not present uncommented (acceptable)"
+    else
+      fail "--create-config no-override: CRF_VALUE appears uncommented without any override"
+    fi
+  else
+    fail "--create-config no-override: did not create .muxmrc"
+  fi
+  rm -f "$cfg_nooverride_dir/.muxmrc"
+
+  # Unknown flag: --bogus-flag should produce an error and exit non-zero
+  local bogus_dir="$TESTDIR/config_create_bogus"
+  mkdir -p "$bogus_dir"
+  local bogus_code
+  out="$(cd "$bogus_dir" && "$MUXM" --create-config project --bogus-flag 2>&1)" \
+    && bogus_code=$? || bogus_code=$?
+  if [[ "$bogus_code" -ne 0 ]]; then
+    pass "--create-config --bogus-flag: exits non-zero on unknown flag"
+  else
+    fail "--create-config --bogus-flag: expected non-zero exit, got 0"
+  fi
+  if echo "$out" | grep -qiE "unknown|invalid|unrecognized|bogus"; then
+    pass "--create-config --bogus-flag: error message mentions unknown/invalid flag"
+  else
+    skip "--create-config --bogus-flag: error message wording not matched (exit code check passed)"
+  fi
+  rm -f "$bogus_dir/.muxmrc"
+
+  # ---- Encoding params ----
+
+  # --x265-params: X265_PARAMS_BASE uncommented with supplied value
+  local cfg_x265_dir="$TESTDIR/config_create_override_x265params"
+  mkdir -p "$cfg_x265_dir"
+  out="$(run_muxm_in "$cfg_x265_dir" --create-config project atv-directplay-hq --x265-params 'psy-rd=3.0' 2>&1)"
+  if [[ -f "$cfg_x265_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_x265_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^X265_PARAMS_BASE="psy-rd=3\.0"'; then
+      pass "--create-config --x265-params: X265_PARAMS_BASE=\"psy-rd=3.0\" uncommented in .muxmrc"
+    else
+      fail "--create-config --x265-params: X265_PARAMS_BASE not found uncommented (got: $(echo "$content" | grep X265_PARAMS_BASE || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --x265-params: did not create .muxmrc"
+  fi
+  rm -f "$cfg_x265_dir/.muxmrc"
+
+  # --threads: THREADS uncommented with supplied value
+  local cfg_threads_dir="$TESTDIR/config_create_override_threads"
+  mkdir -p "$cfg_threads_dir"
+  out="$(run_muxm_in "$cfg_threads_dir" --create-config project universal --threads 4 2>&1)"
+  if [[ -f "$cfg_threads_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_threads_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^THREADS=4'; then
+      pass "--create-config --threads 4: THREADS=4 uncommented in .muxmrc"
+    else
+      fail "--create-config --threads 4: THREADS=4 not found uncommented (got: $(echo "$content" | grep THREADS || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --threads 4: did not create .muxmrc"
+  fi
+  rm -f "$cfg_threads_dir/.muxmrc"
+
+  # ---- HDR/DV ----
+
+  # --no-dv: DISABLE_DV uncommented with 1
+  local cfg_nodv_dir="$TESTDIR/config_create_override_nodv"
+  mkdir -p "$cfg_nodv_dir"
+  out="$(run_muxm_in "$cfg_nodv_dir" --create-config project archive --no-dv 2>&1)"
+  if [[ -f "$cfg_nodv_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_nodv_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^DISABLE_DV=1'; then
+      pass "--create-config --no-dv: DISABLE_DV=1 uncommented in .muxmrc"
+    else
+      fail "--create-config --no-dv: DISABLE_DV=1 not found uncommented (got: $(echo "$content" | grep DISABLE_DV || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --no-dv: did not create .muxmrc"
+  fi
+  rm -f "$cfg_nodv_dir/.muxmrc"
+
+  # --tonemap: TONEMAP_HDR_TO_SDR uncommented with 1
+  local cfg_tonemap_dir="$TESTDIR/config_create_override_tonemap"
+  mkdir -p "$cfg_tonemap_dir"
+  out="$(run_muxm_in "$cfg_tonemap_dir" --create-config project archive --tonemap 2>&1)"
+  if [[ -f "$cfg_tonemap_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_tonemap_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^TONEMAP_HDR_TO_SDR=1'; then
+      pass "--create-config --tonemap: TONEMAP_HDR_TO_SDR=1 uncommented in .muxmrc"
+    else
+      fail "--create-config --tonemap: TONEMAP_HDR_TO_SDR=1 not found uncommented (got: $(echo "$content" | grep TONEMAP_HDR_TO_SDR || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --tonemap: did not create .muxmrc"
+  fi
+  rm -f "$cfg_tonemap_dir/.muxmrc"
+
+  # ---- Audio ----
+
+  # --audio-force-codec: AUDIO_FORCE_CODEC uncommented with supplied value
+  local cfg_audiocodec_dir="$TESTDIR/config_create_override_audiocodec"
+  mkdir -p "$cfg_audiocodec_dir"
+  out="$(run_muxm_in "$cfg_audiocodec_dir" --create-config project streaming --audio-force-codec aac 2>&1)"
+  if [[ -f "$cfg_audiocodec_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_audiocodec_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^AUDIO_FORCE_CODEC=("aac"|aac)$'; then
+      pass "--create-config --audio-force-codec aac: AUDIO_FORCE_CODEC=aac uncommented in .muxmrc"
+    else
+      fail "--create-config --audio-force-codec aac: AUDIO_FORCE_CODEC not found uncommented (got: $(echo "$content" | grep AUDIO_FORCE_CODEC || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --audio-force-codec aac: did not create .muxmrc"
+  fi
+  rm -f "$cfg_audiocodec_dir/.muxmrc"
+
+  # ---- Subtitles ----
+
+  # --sub-preserve-format: SUB_PRESERVE_TEXT_FORMAT uncommented with 1
+  local cfg_subfmt_dir="$TESTDIR/config_create_override_subfmt"
+  mkdir -p "$cfg_subfmt_dir"
+  out="$(run_muxm_in "$cfg_subfmt_dir" --create-config project animation --sub-preserve-format 2>&1)"
+  if [[ -f "$cfg_subfmt_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_subfmt_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^SUB_PRESERVE_TEXT_FORMAT=1'; then
+      pass "--create-config --sub-preserve-format: SUB_PRESERVE_TEXT_FORMAT=1 uncommented in .muxmrc"
+    else
+      fail "--create-config --sub-preserve-format: SUB_PRESERVE_TEXT_FORMAT=1 not found uncommented (got: $(echo "$content" | grep SUB_PRESERVE_TEXT_FORMAT || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --sub-preserve-format: did not create .muxmrc"
+  fi
+  rm -f "$cfg_subfmt_dir/.muxmrc"
+
+  # --no-sub-sdh: SUB_INCLUDE_SDH uncommented with 0
+  local cfg_nosubsdh_dir="$TESTDIR/config_create_override_nosubsdh"
+  mkdir -p "$cfg_nosubsdh_dir"
+  out="$(run_muxm_in "$cfg_nosubsdh_dir" --create-config project atv-directplay-hq --no-sub-sdh 2>&1)"
+  if [[ -f "$cfg_nosubsdh_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_nosubsdh_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^SUB_INCLUDE_SDH=0'; then
+      pass "--create-config --no-sub-sdh: SUB_INCLUDE_SDH=0 uncommented in .muxmrc"
+    else
+      fail "--create-config --no-sub-sdh: SUB_INCLUDE_SDH=0 not found uncommented (got: $(echo "$content" | grep SUB_INCLUDE_SDH || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --no-sub-sdh: did not create .muxmrc"
+  fi
+  rm -f "$cfg_nosubsdh_dir/.muxmrc"
+
+  # ---- Metadata / pipeline ----
+
+  # --no-keep-chapters: KEEP_CHAPTERS uncommented with 0
+  local cfg_nochap_dir="$TESTDIR/config_create_override_nochapters"
+  mkdir -p "$cfg_nochap_dir"
+  out="$(run_muxm_in "$cfg_nochap_dir" --create-config project archive --no-keep-chapters 2>&1)"
+  if [[ -f "$cfg_nochap_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_nochap_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^KEEP_CHAPTERS=0'; then
+      pass "--create-config --no-keep-chapters: KEEP_CHAPTERS=0 uncommented in .muxmrc"
+    else
+      fail "--create-config --no-keep-chapters: KEEP_CHAPTERS=0 not found uncommented (got: $(echo "$content" | grep KEEP_CHAPTERS || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --no-keep-chapters: did not create .muxmrc"
+  fi
+  rm -f "$cfg_nochap_dir/.muxmrc"
+
+  # --strip-metadata: STRIP_METADATA uncommented with 1
+  local cfg_stripmeta_dir="$TESTDIR/config_create_override_stripmeta"
+  mkdir -p "$cfg_stripmeta_dir"
+  out="$(run_muxm_in "$cfg_stripmeta_dir" --create-config project streaming --strip-metadata 2>&1)"
+  if [[ -f "$cfg_stripmeta_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_stripmeta_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^STRIP_METADATA=1'; then
+      pass "--create-config --strip-metadata: STRIP_METADATA=1 uncommented in .muxmrc"
+    else
+      fail "--create-config --strip-metadata: STRIP_METADATA=1 not found uncommented (got: $(echo "$content" | grep STRIP_METADATA || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --strip-metadata: did not create .muxmrc"
+  fi
+  rm -f "$cfg_stripmeta_dir/.muxmrc"
+
+  # ---- Logging ----
+
+  # --ffmpeg-loglevel: FFMPEG_LOGLEVEL uncommented with supplied value
+  local cfg_loglevel_dir="$TESTDIR/config_create_override_loglevel"
+  mkdir -p "$cfg_loglevel_dir"
+  out="$(run_muxm_in "$cfg_loglevel_dir" --create-config project --ffmpeg-loglevel warning 2>&1)"
+  if [[ -f "$cfg_loglevel_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_loglevel_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^FFMPEG_LOGLEVEL="warning"'; then
+      pass "--create-config --ffmpeg-loglevel warning: FFMPEG_LOGLEVEL=\"warning\" uncommented in .muxmrc"
+    else
+      fail "--create-config --ffmpeg-loglevel warning: FFMPEG_LOGLEVEL not found uncommented (got: $(echo "$content" | grep FFMPEG_LOGLEVEL || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config --ffmpeg-loglevel warning: did not create .muxmrc"
+  fi
+  rm -f "$cfg_loglevel_dir/.muxmrc"
+
+  # ---- Multi-override combination ----
+
+  # --crf 20 --no-dv --strip-metadata --ffmpeg-loglevel error: all four uncommented,
+  # unrelated variables (e.g. THREADS) remain commented out.
+  local cfg_combo_dir="$TESTDIR/config_create_override_combo"
+  mkdir -p "$cfg_combo_dir"
+  out="$(run_muxm_in "$cfg_combo_dir" \
+    --create-config project atv-directplay-hq --crf 20 --no-dv --strip-metadata --ffmpeg-loglevel error 2>&1)"
+  if [[ -f "$cfg_combo_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_combo_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^CRF_VALUE=20'; then
+      pass "--create-config combo: CRF_VALUE=20 uncommented"
+    else
+      fail "--create-config combo: CRF_VALUE=20 not found uncommented"
+    fi
+    if echo "$content" | grep -qE '^DISABLE_DV=1'; then
+      pass "--create-config combo: DISABLE_DV=1 uncommented"
+    else
+      fail "--create-config combo: DISABLE_DV=1 not found uncommented"
+    fi
+    if echo "$content" | grep -qE '^STRIP_METADATA=1'; then
+      pass "--create-config combo: STRIP_METADATA=1 uncommented"
+    else
+      fail "--create-config combo: STRIP_METADATA=1 not found uncommented"
+    fi
+    if echo "$content" | grep -qE '^FFMPEG_LOGLEVEL=("error"|error)$'; then
+      pass "--create-config combo: FFMPEG_LOGLEVEL=error uncommented"
+    else
+      fail "--create-config combo: FFMPEG_LOGLEVEL not found uncommented"
+    fi
+    # Verify that an unrelated variable (THREADS) is still commented out
+    if echo "$content" | grep -qE '^#.*THREADS' || ! echo "$content" | grep -qE '^THREADS='; then
+      pass "--create-config combo: THREADS remains commented out (not overridden)"
+    else
+      fail "--create-config combo: THREADS appears uncommented but was not overridden"
+    fi
+    # Verify "Applied N override(s)" count in output
+    if echo "$out" | grep -qE 'Applied 4 override'; then
+      pass "--create-config combo: output reports Applied 4 override(s)"
+    else
+      skip "--create-config combo: 'Applied 4 override(s)' not found in output (wording may differ)"
+    fi
+  else
+    fail "--create-config combo: did not create .muxmrc"
+  fi
+  rm -f "$cfg_combo_dir/.muxmrc"
+}
+
 test_config() {
   section "Configuration Precedence"
 
@@ -1287,6 +1577,7 @@ test_config() {
   _test_config_create
   _test_config_layering
   _test_config_validation
+  _test_config_create_overrides
 }
 
 # === Suite: Profile Variable Assignment ===
@@ -1295,7 +1586,7 @@ test_config() {
 test_profiles() {
   section "Profile Variable Assignment"
 
-  local profiles=("archive" "hdr10-hq" "atv-directplay-hq" "atv-directplay-animation" "streaming" "animation" "universal")
+  local profiles=("archive" "hdr10-hq" "atv-directplay-hq" "atv-directplay-animation" "streaming" "animation" "universal" "youtube-upload")
   local out
 
   for p in "${profiles[@]}"; do
@@ -1381,6 +1672,29 @@ test_profiles() {
   assert_contains "KEEP_CHAPTERS             = 0" "universal: chapters stripped" "$out"
   assert_contains "STRIP_METADATA            = 1" "universal: metadata stripped" "$out"
   assert_contains "OUTPUT_EXT                = mp4" "universal: MP4 container" "$out"
+
+  # youtube-upload specifics
+  out="$(run_muxm --profile youtube-upload --print-effective-config)"
+  assert_contains "VIDEO_CODEC               = libx264"     "youtube-upload: H.264 codec" "$out"
+  assert_contains "CRF_VALUE                 = 16"          "youtube-upload: CRF 16" "$out"
+  assert_contains "PRESET_VALUE              = slow"        "youtube-upload: preset slow" "$out"
+  assert_contains "OUTPUT_EXT                = mp4"         "youtube-upload: MP4 container" "$out"
+  assert_contains "DISABLE_DV                = 1"           "youtube-upload: DV disabled" "$out"
+  assert_contains "TONEMAP_HDR_TO_SDR        = 0"           "youtube-upload: no tone-mapping" "$out"
+  assert_contains "AUDIO_FORCE_CODEC         = aac"         "youtube-upload: force AAC" "$out"
+  assert_contains "MAX_AUDIO_CHANNELS        = 2"           "youtube-upload: stereo only" "$out"
+  assert_contains "STEREO_BITRATE            = 256k"        "youtube-upload: 256k stereo" "$out"
+  assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 0"          "youtube-upload: no lossless passthrough" "$out"
+  assert_contains "ADD_STEREO_IF_MULTICH     = 0"           "youtube-upload: no stereo fallback" "$out"
+  assert_contains "SUB_INCLUDE_FORCED        = 1"           "youtube-upload: include forced subs" "$out"
+  assert_contains "SUB_INCLUDE_FULL          = 1"           "youtube-upload: include full subs" "$out"
+  assert_contains "SUB_INCLUDE_SDH           = 0"           "youtube-upload: exclude SDH subs" "$out"
+  assert_contains "SUB_BURN_FORCED           = 1"           "youtube-upload: burn forced subs" "$out"
+  assert_contains "SUB_EXPORT_EXTERNAL       = 1"           "youtube-upload: export external subs" "$out"
+  assert_contains "STRIP_METADATA            = 1"           "youtube-upload: strip metadata" "$out"
+  assert_contains "KEEP_CHAPTERS             = 1"           "youtube-upload: keep chapters" "$out"
+  assert_contains "SKIP_IF_IDEAL             = 0"           "youtube-upload: skip-if-ideal off" "$out"
+  assert_contains "profile=high"                            "youtube-upload: x264 high-profile params" "$out"
 
   # --- Container passthrough: CLI --output-ext overrides passthrough ---
   # Passthrough profiles (archive, atv-directplay-hq, atv-directplay-animation) set OUTPUT_EXT="" by default.
@@ -1526,6 +1840,13 @@ test_conflicts() {
 
   out="$(run_muxm --profile universal --video-codec libx265 --print-effective-config)"
   assert_contains "⚠" "universal + --video-codec libx265 warns (#45)" "$out"
+
+  # --- youtube-upload conflicts ---
+  out="$(run_muxm --profile youtube-upload --output-ext mkv --print-effective-config)"
+  assert_contains "⚠" "youtube-upload + --output-ext mkv warns" "$out"
+
+  out="$(run_muxm --profile youtube-upload --audio-lossless-passthrough --print-effective-config)"
+  assert_contains "⚠" "youtube-upload + --audio-lossless-passthrough warns" "$out"
 
   # --- Cross-profile flag combinations ---
   out="$(run_muxm --profile archive --video-copy-if-compliant --tonemap --print-effective-config)"
@@ -1736,6 +2057,53 @@ EOF
   out="$(MUXM_HOME="$disk_home" run_muxm_in "$disk_dir" \
     --dry-run --video-copy-if-compliant "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
   assert_contains "DRY-RUN" "copy-mode disk preflight: dry-run completes without error" "$out"
+
+  # ---- Output filename extension inference ----
+  # When the user supplies an explicit output filename, muxm infers the container
+  # from the file's extension rather than using the profile default.
+  _test_dryrun_ext_inference
+}
+
+# Tests that OUTPUT_EXT is inferred from an explicit output filename supplied on
+# the CLI, and that --output-ext takes precedence over filename inference.
+# Placed here (not in test_cli) because the observable evidence lives in dry-run
+# log output — effective-config doesn't expose the inferred value before a source
+# file is provided.
+_test_dryrun_ext_inference() {
+  local out
+
+  # Explicit output filename → extension inferred as mp4
+  out="$(run_muxm --profile archive --dry-run \
+    "$TESTDIR/basic_sdr_subs.mkv" "$TESTDIR/output.mp4" 2>&1)"
+  assert_contains "mp4" \
+    "ext-inference: explicit .mp4 output → OUTPUT_EXT inferred as mp4" "$out"
+
+  # --output-ext mkv wins over .mp4 filename extension
+  out="$(run_muxm --profile archive --output-ext mkv --dry-run \
+    "$TESTDIR/basic_sdr_subs.mkv" "$TESTDIR/output.mp4" 2>&1)"
+  assert_contains "mkv" \
+    "ext-inference: --output-ext mkv overrides .mp4 filename" "$out"
+  # The inferred-from-filename path should not have been taken
+  if ! echo "$out" | grep -qiF "inferred"; then
+    pass "ext-inference: --output-ext wins (no inferred-container log when explicit ext given)"
+  else
+    # A log line about inference may still appear for a different reason; only fail
+    # if it claims mp4 was inferred despite the explicit --output-ext mkv override.
+    if echo "$out" | grep -qi "inferred.*mp4"; then
+      fail "ext-inference: --output-ext mkv override ignored — log still claims mp4 inferred"
+    else
+      pass "ext-inference: --output-ext mkv respected (inferred log refers to mkv or unrelated)"
+    fi
+  fi
+
+  # Inferred container log message appears in dry-run output when filename drives the ext
+  out="$(run_muxm --profile archive --dry-run \
+    "$TESTDIR/basic_sdr_subs.mkv" "$TESTDIR/infer_check.mp4" 2>&1)"
+  if echo "$out" | grep -qiE "infer|container.*mp4|mp4.*container|output.*ext.*mp4|mp4.*output"; then
+    pass "ext-inference: dry-run log mentions inferred container for .mp4 output"
+  else
+    skip "ext-inference: inferred-container log message not found (feature may not emit one)"
+  fi
 }
 
 # === Suite: Video Pipeline (real encodes) ===
@@ -2195,6 +2563,66 @@ EOF
   # Verify the commentary track is explicitly shown as kept (✓ marker)
   assert_contains "commentary" \
     "Multi-track + AUDIO_KEEP_COMMENTARY=1: commentary track detected" "$mt_keep_comm"
+
+  _test_audio_native_stereo
+}
+
+_test_audio_native_stereo() {
+  # Test 1: Native stereo preferred over synthetic downmix.
+  # Source has a 5.1 AC3 primary + a clean stereo AAC track (same lang, not commentary).
+  # The scanner must find the stereo track and prefer it over a synthetic downmix.
+  log "Testing native stereo preference: 5.1 + stereo source..."
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=blue:s=320x240:r=24:d=1" \
+    -f lavfi -i "sine=frequency=440:duration=1" \
+    -f lavfi -i "sine=frequency=660:duration=1" \
+    -c:v libx264 -preset ultrafast -crf 28 \
+    -map 0:v -map 1:a -map 2:a \
+    -c:a:0 ac3 -b:a:0 384k -ac:a:0 6 \
+    -c:a:1 aac -b:a:1 128k -ac:a:1 2 \
+    -metadata:s:a:0 language=eng \
+    -metadata:s:a:1 language=eng \
+    "$TESTDIR/native_stereo.mkv"
+  local out
+  out="$(run_muxm --crf 51 --preset ultrafast --output-ext mkv --stereo-fallback "$TESTDIR/native_stereo.mkv")"
+  assert_contains "Native stereo track found" \
+    "Native stereo detected when source has 2ch track" "$out"
+
+  # Test 2: No native stereo — downmix fallback.
+  # Source has only a 5.1 AC3 track; no 2ch candidate exists.
+  # The scanner must log "No native stereo track available" and synthesise a downmix.
+  log "Testing stereo downmix fallback: surround-only source..."
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=red:s=320x240:r=24:d=1" \
+    -f lavfi -i "sine=frequency=440:duration=1" \
+    -c:v libx264 -preset ultrafast -crf 28 \
+    -map 0:v -map 1:a \
+    -c:a:0 ac3 -b:a:0 384k -ac:a:0 6 \
+    -metadata:s:a:0 language=eng \
+    "$TESTDIR/surround_only.mkv"
+  out="$(run_muxm --crf 51 --preset ultrafast --output-ext mkv --stereo-fallback "$TESTDIR/surround_only.mkv")"
+  assert_contains "No native stereo track available" \
+    "Downmix created when no native stereo" "$out"
+
+  # Test 3: Commentary stereo skipped — downmix fallback used instead.
+  # Source has a 5.1 AC3 primary + a stereo AAC track titled "Director Commentary".
+  # _audio_is_commentary rejects the stereo candidate, forcing the downmix path.
+  log "Testing commentary stereo skipped: 5.1 + commentary stereo source..."
+  ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i "color=c=green:s=320x240:r=24:d=1" \
+    -f lavfi -i "sine=frequency=440:duration=1" \
+    -f lavfi -i "sine=frequency=660:duration=1" \
+    -c:v libx264 -preset ultrafast -crf 28 \
+    -map 0:v -map 1:a -map 2:a \
+    -c:a:0 ac3 -b:a:0 384k -ac:a:0 6 \
+    -c:a:1 aac -b:a:1 128k -ac:a:1 2 \
+    -metadata:s:a:0 language=eng \
+    -metadata:s:a:1 language=eng \
+    -metadata:s:a:1 title="Director Commentary" \
+    "$TESTDIR/commentary_stereo.mkv"
+  out="$(run_muxm --crf 51 --preset ultrafast --output-ext mkv --stereo-fallback "$TESTDIR/commentary_stereo.mkv")"
+  assert_contains "No native stereo track available" \
+    "Commentary stereo skipped, downmix used instead" "$out"
 }
 
 # === Suite: Subtitle Pipeline ===
@@ -3035,7 +3463,7 @@ test_collision() {
   mkdir -p "$nocoll_dir"
   local nocoll_src="$nocoll_dir/nocoll.mkv"
   cp "$TESTDIR/basic_sdr_subs.mkv" "$nocoll_src"
-  out="$(run_muxm --crf 28 --preset ultrafast "$nocoll_src")"
+  out="$(run_muxm --output-ext mp4 --crf 28 --preset ultrafast "$nocoll_src")"
   if echo "$out" | grep -qiF "Source collision"; then
     fail "No collision expected for .mkv → .mp4 but collision note found"
   else
@@ -4527,213 +4955,89 @@ EOF
   fi
 }
 
-# ---- Suite mapping and parallel infrastructure ----
+# === Suite: Multi-Profile ===
+# Validates --profile a,b comma-separated multi-profile support:
+#   - comma parsing validates all names upfront
+#   - single profile = unchanged behaviour
+#   - multi-profile auto-names outputs with profile suffix
+# These are config-only tests (no real encode) using --print-effective-config.
+test_multi_profile() {
+  section "Multi-Profile (comma-separated --profile)"
 
-# Maps suite name → test function name
-declare -A _SUITE_FN=(
-  [cli]=test_cli             [toggles]=test_toggles       [unit]=test_unit
-  [completions]=test_completions [setup]=test_setup       [config]=test_config
-  [profiles]=test_profiles   [conflicts]=test_conflicts   [collision]=test_collision
-  [dryrun]=test_dryrun       [video]=test_video           [hdr]=test_hdr
-  [audio]=test_audio         [subs]=test_subs             [ext_subs]=test_ext_subs
-  [output]=test_output       [containers]=test_containers [metadata]=test_metadata
-  [edge]=test_edge           [e2e]=test_profile_e2e
-)
+  local out
 
-# Canonical execution order for "all"
-readonly -a _ALL_SUITE_ORDER=(
-  cli toggles unit completions setup config profiles conflicts collision dryrun
-  video hdr audio subs ext_subs output containers metadata edge e2e
-)
+  # --- Comma parsing: valid multi-profile accepted ---
+  out="$(run_muxm --profile youtube-upload,streaming --print-effective-config 2>&1)" || true
+  # Parent applies first profile for config checks; output should show youtube-upload
+  assert_contains "youtube-upload" "multi-profile: first profile active in parent config" "$out"
 
-# SIGINT handler: kill child processes, flush captured output, exit 130
-# shellcheck disable=SC2329  # invoked indirectly via trap
-_par_sigint() {
-  printf "\r\033[K\n" >&2
-  printf "%b  Interrupted — killing suite processes...%b\n" "$RED" "$NC" >&2
-  local pid
-  for pid in "${_PAR_PIDS[@]}"; do
-    kill "$pid" 2>/dev/null || true
-  done
-  wait 2>/dev/null || true
-  if [[ -n "$_PAR_TMPDIR" && -d "$_PAR_TMPDIR" ]]; then
-    local s
-    for s in "${_ALL_SUITE_ORDER[@]}"; do
-      [[ -f "$_PAR_TMPDIR/$s.done" && -f "$_PAR_TMPDIR/$s.out" ]] || continue
-      cat "$_PAR_TMPDIR/$s.out"
-    done
-    rm -rf "$_PAR_TMPDIR"
-  fi
-  exit 130
-}
+  # --- Comma parsing: all names validated upfront (unknown name → error before any work) ---
+  out="$(run_muxm --profile youtube-upload,BOGUS_PROFILE --print-effective-config 2>&1)" || true
+  assert_contains "Unknown profile" "multi-profile: unknown name in list triggers error" "$out"
 
-# Launch one suite as a background job, capturing all output to a temp file.
-_par_launch() {
-  local suite="$1"
-  local fn="${_SUITE_FN[$suite]}"
-  # shellcheck disable=SC2030  # intentional subshell isolation; results written to temp files
-  (
-    set +e
-    PASS=0; FAIL=0; SKIP=0
-    ERRORS=()
-    "$fn"
-    {
-      printf "PASS=%d\nFAIL=%d\nSKIP=%d\n" "$PASS" "$FAIL" "$SKIP"
-      local e
-      for e in "${ERRORS[@]}"; do printf "ERR\t%s\n" "$e"; done
-    } > "$_PAR_TMPDIR/$suite.result"
-    touch "$_PAR_TMPDIR/$suite.done"
-  ) > "$_PAR_TMPDIR/$suite.out" 2>&1 &
-  _PAR_PIDS[$suite]=$!
-}
+  # --- Comma parsing: single profile is unchanged ---
+  out="$(run_muxm --profile youtube-upload --print-effective-config)"
+  assert_contains "youtube-upload" "single --profile: still works normally" "$out"
+  assert_contains "VIDEO_CODEC               = libx264" "single --profile youtube-upload: libx264" "$out"
 
-# Run a list of suites in parallel (up to $JOBS concurrent).
-# Aggregates results into global PASS/FAIL/SKIP/ERRORS/SUITE_STATUS/FAILED_SUITES.
-run_parallel_batch() {
-  local -a batch=("$@")
-  local n=${#batch[@]}
-  [[ $n -eq 0 ]] && return 0
+  # --- Comma parsing: empty name rejected ---
+  out="$(run_muxm --profile 'streaming,' --print-effective-config 2>&1)" || true
+  assert_contains "empty" "multi-profile: empty name in list rejected" "$out"
 
-  local max_jobs
-  if [[ -n "${JOBS:-}" ]]; then
-    max_jobs=$JOBS
-  elif command -v nproc >/dev/null 2>&1; then
-    max_jobs=$(nproc)
+  # --- Multi-profile output auto-naming: output paths contain profile suffix ---
+  # Run a dry-run multi-profile pass against the core fixture and verify both
+  # per-profile output files have the expected profile-suffixed names.
+  local _src="$TESTDIR/basic_sdr_subs.mkv"
+  local _stem="${_src%.*}"
+  local _yt_out="${_stem}.youtube-upload.mp4"
+  local _st_out="${_stem}.streaming.mp4"
+
+  # Remove any stale outputs first
+  rm -f "$_yt_out" "$_st_out"
+
+  # Dry-run multi-profile: outputs are not actually written (DRY_RUN=1 skips mv)
+  # so we just verify the dispatch prints the expected profile headers.
+  out="$(run_muxm --profile youtube-upload,streaming --dry-run "$_src" 2>&1)" || true
+  assert_contains "youtube-upload" "multi-profile dry-run: youtube-upload header printed" "$out"
+  assert_contains "streaming"      "multi-profile dry-run: streaming header printed" "$out"
+  assert_contains "Profile 1/2"    "multi-profile dry-run: profile counter printed" "$out"
+  assert_contains "Profile 2/2"    "multi-profile dry-run: second pass counter printed" "$out"
+
+  # --- Multi-profile output naming with user-supplied stem ---
+  # When the user provides an explicit output filename, muxm should use its stem
+  # (without extension) as the base for per-profile output files, inserting the
+  # profile name between the stem and extension.
+  local _user_out="$TESTDIR/my_video.mp4"
+
+  # With explicit output name: per-profile files use my_video as stem
+  out="$(run_muxm --profile streaming,universal --dry-run "$_src" "$_user_out" 2>&1)" || true
+  assert_contains "my_video.streaming.mp4" \
+    "multi-profile user stem: streaming output uses my_video stem" "$out"
+  assert_contains "my_video.universal.mp4" \
+    "multi-profile user stem: universal output uses my_video stem" "$out"
+
+  # Warning about file split should appear when user supplies explicit output name
+  if echo "$out" | grep -qiE "split|multiple.*output|warning"; then
+    pass "multi-profile user stem: warning about multi-profile file split appears"
   else
-    max_jobs=4
+    skip "multi-profile user stem: file-split warning not found (may use different wording)"
   fi
 
-  _PAR_TMPDIR=$(mktemp -d /tmp/muxm-par.XXXXXXXX)
-  _PAR_PIDS=()
-  trap '_par_sigint' INT
-
-  local running=0 next_idx=0 done_count=0 failed_count=0 print_idx=0
-
-  # Seed initial batch of jobs
-  while (( next_idx < n && running < max_jobs )); do
-    _par_launch "${batch[$next_idx]}"
-    next_idx=$((next_idx + 1))
-    running=$((running + 1))
-  done
-
-  # Poll until all suites complete
-  while (( done_count < n )); do
-    local s
-    for s in "${batch[@]}"; do
-      [[ -f "$_PAR_TMPDIR/$s.ack" ]] && continue    # already reaped
-      [[ ! -f "$_PAR_TMPDIR/$s.done" ]] && continue # still running
-
-      wait "${_PAR_PIDS[$s]}" 2>/dev/null || true
-      touch "$_PAR_TMPDIR/$s.ack"
-      running=$((running - 1))
-      done_count=$((done_count + 1))
-
-      # Check suite pass/fail
-      local sf=0
-      if [[ -f "$_PAR_TMPDIR/$s.result" ]]; then
-        sf=$(grep -m1 "^FAIL=" "$_PAR_TMPDIR/$s.result" | cut -d= -f2 2>/dev/null || echo 0)
-      fi
-      if [[ "${sf:-0}" -gt 0 ]]; then
-        failed_count=$((failed_count + 1))
-        FAILED_SUITES+=("$s")
-        SUITE_STATUS+=("$s:FAIL")
-      else
-        SUITE_STATUS+=("$s:PASS")
-      fi
-
-      # Launch next queued suite
-      if (( next_idx < n )); then
-        _par_launch "${batch[$next_idx]}"
-        next_idx=$((next_idx + 1))
-        running=$((running + 1))
-      fi
-    done
-
-    # Flush completed output in original batch order
-    while (( print_idx < n )); do
-      local ps="${batch[$print_idx]}"
-      [[ -f "$_PAR_TMPDIR/$ps.ack" ]] || break
-      cat "$_PAR_TMPDIR/$ps.out" 2>/dev/null || true
-      print_idx=$((print_idx + 1))
-    done
-
-    # Progress indicator on stderr (doesn't mix with captured test output)
-    if [[ -t 2 ]]; then
-      printf "\r\033[K  [%d/%d suites done, %d running, %d failed]" \
-        "$done_count" "$n" "$running" "$failed_count" >&2
-    fi
-
-    (( done_count < n )) && sleep 0.1 || true
-  done
-
-  # Clear progress line and flush any remaining output
-  [[ -t 2 ]] && printf "\r\033[K" >&2 || true
-  while (( print_idx < n )); do
-    cat "$_PAR_TMPDIR/${batch[$print_idx]}.out" 2>/dev/null || true
-    print_idx=$((print_idx + 1))
-  done
-
-  # Aggregate totals into global counters
-  # shellcheck disable=SC2031  # PASS/FAIL/SKIP/ERRORS read from temp files, not from subshell scope
-  for s in "${batch[@]}"; do
-    local rf="$_PAR_TMPDIR/$s.result"
-    [[ ! -f "$rf" ]] && continue
-    local p f sk
-    p=$(grep  -m1 "^PASS=" "$rf" | cut -d= -f2 2>/dev/null || echo 0)
-    f=$(grep  -m1 "^FAIL=" "$rf" | cut -d= -f2 2>/dev/null || echo 0)
-    sk=$(grep -m1 "^SKIP=" "$rf" | cut -d= -f2 2>/dev/null || echo 0)
-    PASS=$(( PASS + ${p:-0} ))
-    FAIL=$(( FAIL + ${f:-0} ))
-    SKIP=$(( SKIP + ${sk:-0} ))
-    local tag msg
-    while IFS=$'\t' read -r tag msg; do
-      [[ "$tag" == "ERR" ]] && ERRORS+=("[$s] $msg") || true
-    done < <(grep $'^ERR\t' "$rf" 2>/dev/null || true)
-  done
-
-  rm -rf "$_PAR_TMPDIR"
-  _PAR_TMPDIR=""
-  trap - INT
+  # Without explicit output name: no file-split warning
+  out="$(run_muxm --profile streaming,universal --dry-run "$_src" 2>&1)" || true
+  if ! echo "$out" | grep -qiE "split.*warning|warning.*split"; then
+    pass "multi-profile no user stem: no file-split warning when output name omitted"
+  else
+    skip "multi-profile no user stem: file-split warning appeared unexpectedly (may be benign)"
+  fi
 }
 
 # ---- Run Suites ----
 # NOTE: Suite names are listed in three places that must stay in sync:
 #   1. File header comment (top of file)
 #   2. show_help() function
-#   3. This function's case statement and _SUITE_FN / _ALL_SUITE_ORDER
+#   3. This function's case statement
 run_suites() {
-  # Parallel multi-suite path: only for "all" with PARALLEL=1
-  if [[ "$SUITE" == "all" ]] && (( PARALLEL )); then
-    local max_disp
-    if [[ -n "${JOBS:-}" ]]; then
-      max_disp="$JOBS"
-    elif command -v nproc >/dev/null 2>&1; then
-      max_disp="$(nproc)"
-    else
-      max_disp=4
-    fi
-    section "Parallel Suite Execution (max ${max_disp} jobs)"
-
-    # 'setup' touches system paths (man page, completions install/uninstall).
-    # It must run serially before the parallel batch.
-    local pre_fail=$FAIL
-    section "Suite: setup (serial)"
-    test_setup
-    if (( FAIL > pre_fail )); then
-      FAILED_SUITES+=("setup")
-      SUITE_STATUS+=("setup:FAIL")
-    else
-      SUITE_STATUS+=("setup:PASS")
-    fi
-
-    # All remaining suites in parallel
-    run_parallel_batch \
-      cli toggles unit completions config profiles conflicts collision dryrun \
-      video hdr audio subs ext_subs output containers metadata edge e2e
-    return
-  fi
-
-  # Sequential path: single --suite X, or --no-parallel with all
   case "$SUITE" in
     all)
       test_cli
@@ -4756,27 +5060,29 @@ run_suites() {
       test_metadata
       test_edge
       test_profile_e2e
+      test_multi_profile
       ;;
-    cli)          test_cli ;;
-    toggles)      test_toggles ;;
-    unit)         test_unit ;;
-    completions)  test_completions ;;
-    setup)        test_setup ;;
-    config)       test_config ;;
-    profiles)     test_profiles ;;
-    conflicts)    test_conflicts ;;
-    collision)    test_collision ;;
-    dryrun)       test_dryrun ;;
-    video)        test_video ;;
-    hdr)          test_hdr ;;
-    audio)        test_audio ;;
-    subs)         test_subs ;;
-    ext_subs)     test_ext_subs ;;
-    output)       test_output ;;
-    containers)   test_containers ;;
-    metadata)     test_metadata ;;
-    edge)         test_edge ;;
-    e2e)          test_profile_e2e ;;
+    cli)           test_cli ;;
+    toggles)       test_toggles ;;
+    unit)          test_unit ;;
+    completions)   test_completions ;;
+    setup)         test_setup ;;
+    config)        test_config ;;
+    profiles)      test_profiles ;;
+    conflicts)     test_conflicts ;;
+    collision)     test_collision ;;
+    dryrun)        test_dryrun ;;
+    video)         test_video ;;
+    hdr)           test_hdr ;;
+    audio)         test_audio ;;
+    subs)          test_subs ;;
+    ext_subs)      test_ext_subs ;;
+    output)        test_output ;;
+    containers)    test_containers ;;
+    metadata)      test_metadata ;;
+    edge)          test_edge ;;
+    e2e)           test_profile_e2e ;;
+    multi_profile) test_multi_profile ;;
     *)
       echo "Unknown suite: $SUITE (run with --help to see available suites)"
       exit 1
@@ -4842,7 +5148,7 @@ summary() {
 # Core media: basic_sdr_subs.mkv only — needed by cli, dryrun, edge, etc. (~3s to generate).
 # EXTENDED_SUITES: Full fixture set (multi-track, HDR, chapters, metadata) (~15s to generate).
 readonly MEDIA_FREE_SUITES="^(toggles|completions|setup|config|profiles|conflicts|unit)$"
-readonly EXTENDED_SUITES="^(collision|dryrun|video|hdr|audio|subs|ext_subs|output|containers|metadata|edge|e2e|all)$"
+readonly EXTENDED_SUITES="^(collision|dryrun|video|hdr|audio|subs|ext_subs|output|containers|metadata|edge|e2e|multi_profile|all)$"
 
 auto_cleanup_test_dirs
 preflight

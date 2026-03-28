@@ -70,10 +70,13 @@ muxm --profile <name> input.mkv
 | `animation` | Anime/cartoon optimized | HEVC CRF 16, 10-bit | Lossless + stereo fallback | Multi-track stream-copy (up to 6); preserve ASS/SSA | Strip |
 | `atv-directplay-animation` | Anime for Apple TV Direct Play | HEVC CRF 16, slower, animation psy params | E-AC-3 (lossless transcoded for ATV) | Multi-track; native ASS/SSA; soft forced (MKV) | Strip |
 | `universal` | Play anywhere | H.264 SDR (tone-map HDR) | AAC stereo | Burn forced; export others as external SRT | Strip |
+| `youtube-upload` | YouTube upload prep | H.264 High CRF 16, slow | AAC stereo 256k | Burn forced; export full subs as SRT | Disabled (HDR10 preserved) |
 
 ### `archive` — Lossless Archival
 
 For collectors who want bit-perfect preservation. Copies video without re-encoding, keeps all matching audio and subtitle tracks via lossless stream-copy, and generates a JSON report with SHA-256 checksum. Always outputs MKV. Commentary and descriptive audio tracks are dropped by default. Language filtering is controlled by `AUDIO_LANG_PREF` and `SUB_LANG_PREF` — when empty (the default), all languages pass. Skips processing entirely if the source already matches.
+
+> Formerly `dv-archival`, which is still accepted as a deprecated alias.
 
 ```bash
 muxm --profile archive movie.mkv
@@ -125,6 +128,16 @@ Plays on everything: old Rokus, mobile devices, web browsers, and non-HDR TVs. T
 
 ```bash
 muxm --profile universal movie.mkv
+```
+
+### `youtube-upload` — YouTube Upload Prep
+
+Optimized for uploading to YouTube. Encodes to H.264 High profile at CRF 16 with the `slow` preset and AAC stereo at 256k in an MP4 container. Forced subtitles are burned into the video stream; all other dialogue subtitles (excluding SDH) are exported as an external `.srt` file for upload to YouTube Studio. Dolby Vision is disabled; HDR10 metadata is preserved so YouTube can use it during its own re-encode. Strips non-essential metadata and chapters.
+
+Because YouTube re-encodes every upload regardless, the goal is to give YouTube's encoder the cleanest, highest-quality source possible — not to minimize file size. CRF 16 with `slow` delivers near-transparent quality that survives YouTube's compression with noticeably less artifacting than a smaller source would.
+
+```bash
+muxm --profile youtube-upload movie.mkv
 ```
 
 ### Overriding Profile Defaults
@@ -294,7 +307,7 @@ muxm [options] <source> [target.mp4]
 
 | Flag | Description |
 | --- | --- |
-| `--profile NAME` | Apply a format profile (`archive`, `hdr10-hq`, `atv-directplay-hq`, `streaming`, `animation`, `atv-directplay-animation`, `universal`) |
+| `--profile NAME` | Apply a format profile (`archive`, `hdr10-hq`, `atv-directplay-hq`, `atv-directplay-animation`, `streaming`, `animation`, `universal`, `youtube-upload`) |
 | `--dry-run` | Simulate without writing output |
 | `--crf N` | Set video CRF value |
 | `-p, --preset NAME` | x265 encoder preset (e.g., `slow`, `medium`) |
@@ -315,6 +328,15 @@ muxm [options] <source> [target.mp4]
 | `--replace-source` | Replace the original source file (interactive confirmation) |
 | `--force-replace-source` | Replace the original source file (no prompt; scripting-friendly) |
 | `--print-effective-config` | Show resolved config after config file imports |
+
+**Multi-profile encoding:** Pass comma-separated profiles to encode the same source once per profile. Output filenames are auto-suffixed with the profile name, and each profile runs sequentially:
+
+```bash
+muxm --profile youtube-upload,streaming source.mkv
+# → source.youtube-upload.mp4  source.streaming.mp4
+```
+
+**Output container inference:** When you provide an explicit output filename, `muxm` infers the container from its extension — `output.mkv` forces MKV regardless of the profile default.
 
 Run `muxm --help` for the full flag reference.
 
@@ -350,23 +372,25 @@ CLI `--profile` always overrides a config-file `PROFILE_NAME`.
 
 ### Creating a Config File
 
-Use `--create-config` to generate a full `.muxmrc` file pre-configured for a specific profile:
+Use `--create-config` to generate a `.muxmrc` file pre-configured for a profile:
 
 ```bash
 muxm --create-config <scope> [profile]
 ```
 
-| Scope | Path | Use case |
-| --- | --- | --- |
-| `system` | `/etc/.muxmrc` | Organization-wide defaults (requires sudo) |
-| `user` | `~/.muxmrc` | Personal defaults across all projects |
-| `project` | `$PWD/.muxmrc` | Per-project settings |
+| Scope | Path |
+|---|---|
+| `system` | `/etc/.muxmrc` |
+| `user` | `~/.muxmrc` |
+| `project` | `./.muxmrc` (current directory) |
 
-The generated file contains the complete config template. Variables set by the chosen profile are uncommented and active; everything else is commented with defaults for easy customization.
+Pass CLI flags to pre-set specific values:
 
-Profile defaults to `atv-directplay-hq` if omitted. Use `--force-create-config` to overwrite an existing file.
+```bash
+muxm --create-config user atv-directplay-hq --crf 20 --preset medium
+```
 
-**Example workflow:** You generate a user config seeded with the `streaming` profile (`muxm --create-config user streaming`). Now every encode defaults to HEVC CRF 20 with E-AC-3 audio — no flags needed. Later you create a project config in your anime directory seeded with `animation` (`muxm --create-config project animation`). Files encoded from that directory automatically get animation-tuned settings. And when you need a one-off override, `muxm --crf 14` on the command line wins over everything without touching any config file.
+See `man muxm` for the full list of 40+ supported override flags. Use `--force-create-config` to overwrite an existing file.
 
 ### Verifying Effective Configuration
 
@@ -417,7 +441,7 @@ DV processing requires `dovi_tool` and, for MP4 container signaling, `MP4Box` (g
 Probably not. If the source already matches the target profile (correct codec, container, color space, and audio layout), `muxm` skips the encode and copies/links the file. This is the Skip-if-Ideal feature — it saves time and avoids generation loss. You'll see a message indicating the skip. To force a re-encode, pass `--no-skip-if-ideal` or override a setting (e.g., `--crf 18`) so the source no longer matches.
 
 **Which profile should I use?**
-If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you want broad device compatibility across Plex/Jellyfin/Emby clients: `streaming`. If you're archiving a disc rip and want all audio and subtitle tracks preserved losslessly: `archive`. If you need it to play on everything including old hardware and phones: `universal`. For anime or cartoons: `animation`. For anime or cartoons that need to direct-play on an Apple TV: `atv-directplay-animation`. For clean HDR10 without DV complexity: `hdr10-hq`. When in doubt, start with `--dry-run` to preview what a profile will do to your file.
+If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you want broad device compatibility across Plex/Jellyfin/Emby clients: `streaming`. If you're archiving a disc rip and want all audio and subtitle tracks preserved losslessly: `archive`. If you need it to play on everything including old hardware and phones: `universal`. For anime or cartoons: `animation`. For anime or cartoons that need to direct-play on an Apple TV: `atv-directplay-animation`. For clean HDR10 without DV complexity: `hdr10-hq`. If you're uploading to YouTube and want to give YouTube's encoder the cleanest possible source to re-encode from: `youtube-upload`. When in doubt, start with `--dry-run` to preview what a profile will do to your file.
 
 **Can I process a batch of files?**
 `muxm` is a per-file tool by design. For a batch, a simple shell loop works:

@@ -29,8 +29,17 @@ Profiles are named presets that configure muxm for a specific use case in a
 single flag. Every setting a profile changes can be individually overridden
 with CLI flags.
 .TP
-.BR \-\-profile " " NAME
-Apply a named format profile.
+.B \-\-profile \fINAME\fR[,\fINAME\fR,...]
+Select one or more encoding profiles. When a single name is given, the pipeline
+runs once with that profile's settings. When multiple names are separated by
+commas (e.g. \fB\-\-profile youtube\-upload,streaming\fR), each profile runs as
+a separate sequential pass from the same source.
+.PP
+In multi\-profile mode, output files are auto\-suffixed with the profile name
+(e.g. \fIsource.youtube\-upload.mp4\fR, \fIsource.streaming.mp4\fR). If an
+explicit output filename is provided, its stem and directory are used as the
+base; its extension is ignored (each profile determines its own container). A
+warning listing all output paths is printed before encoding starts.
 .PP
 .\" NOTE: Profile names below must match VALID_PROFILES in muxm (Section 2).
 Available profiles:
@@ -44,6 +53,10 @@ Audio filterable via
 subtitles filterable via
 .BR SUB_LANG_PREF ", " SUB_INCLUDE_FORCED / FULL / SDH ", and " SUB_MAX_TRACKS .
 Skip if already ideal. JSON report.
+.PP
+The former name
+.B dv\-archival
+is accepted as a backwards\-compatible alias and emits a deprecation notice.
 .TP
 .B hdr10\-hq
 Strip DV, keep HDR10. CRF 17, lossless audio + stereo fallback. MKV.
@@ -71,6 +84,11 @@ multi\-track subs (ASS/SSA + PGS bitmap).
 .B universal
 H.264 SDR, AAC stereo. Lean, play anywhere. MP4. Tone\-map HDR, burn forced subs,
 strip chapters/metadata.
+.TP
+.B youtube\-upload
+H.264 high\-profile, CRF 16, preset slow. AAC stereo 256k, burn forced subs,
+export full subs as external SRT. MP4. Strips metadata, keeps chapters.
+No tone\-mapping (YouTube handles HDR). Designed for master\-quality uploads.
 .SH COMMON OPTIONS
 .TP
 .BR \-h ", " \-\-help
@@ -129,6 +147,15 @@ writes to \fI$PWD/.muxmrc\fR
 \fIPROFILE\fR defaults to \fBatv\-directplay\-hq\fR if omitted.
 Refuses to overwrite an existing file; use \fB\-\-force\-create\-config\fR
 to overwrite.
+.PP
+Additional CLI flags may follow the scope and profile to pre\-populate specific
+values. For example, \fB\-\-create\-config user atv\-directplay\-hq \-\-crf 20
+\-\-preset medium\fR generates a config with \fBCRF_VALUE=20\fR and
+\fBPRESET_VALUE="medium"\fR uncommented. Supported overrides include
+\fB\-\-crf\fR, \fB\-\-preset\fR, \fB\-\-output\-ext\fR, \fB\-\-level\fR,
+\fB\-\-video\-codec\fR, \fB\-\-stereo\-bitrate\fR, \fB\-\-sub\-lang\-pref\fR,
+\fB\-\-audio\-lang\-pref\fR, and common boolean toggles. Unrecognized flags
+produce an error. Without overrides, behaviour is unchanged.
 .TP
 .BR \-\-force\-create\-config " " \fISCOPE\fR " " [\fIPROFILE\fR]
 Same as \fB\-\-create\-config\fR but overwrites an existing file.
@@ -148,6 +175,12 @@ x265 level\-idc (e.g., 5.1).
 .TP
 .BR \-\-x265\-params " " \fISTR\fR
 Advanced x265 parameter string.
+.TP
+.BR \-\-x264\-params " " \fISTR\fR
+Advanced x264 parameter string (used by
+.B youtube\-upload
+profile; e.g.,
+.BR "profile=high:rc-lookahead=60:aq-mode=2:aq-strength=1.0" ).
 .TP
 .BR \-\-tonemap " , " \-\-no\-tonemap
 Enable/disable HDR/HLG to SDR tone\-mapping.
@@ -454,6 +487,12 @@ set this to empty, deriving the output container from the source file extension
 Sources with unsupported containers fall back to mkv.
 .B \-\-output\-ext
 on the CLI always overrides passthrough resolution.
+.PP
+When an explicit output filename is provided with a recognised extension
+(\fB.mp4\fR, \fB.m4v\fR, \fB.mov\fR, \fB.mkv\fR), the container format is
+inferred from that extension as if \fB\-\-output\-ext\fR had been passed. An
+explicit \fB\-\-output\-ext\fR flag always takes precedence. This inference is
+disabled in multi\-profile mode.
 .TP
 .BR \-\-keep\-chapters " , " \-\-no\-keep\-chapters
 Keep/strip chapter markers.
@@ -468,6 +507,13 @@ output container's comment field (MP4 \(cocmt, MKV COMMENT).
 .TP
 .BR \-\-skip\-if\-ideal " , " \-\-no\-skip\-if\-ideal
 Skip processing if source already matches profile requirements.
+.PP
+The following conditions prevent a source from being considered ideal, even when
+this flag is set: video codec or pixel format mismatch; container mismatch;
+\fBVIDEO_COPY_IF_COMPLIANT=0\fR (profile requires re\-encode);
+\fBTONEMAP_HDR_TO_SDR=1\fR on an HDR source; \fBADD_STEREO_IF_MULTICH=1\fR
+with surround audio (stereo fallback needed); discovered external subtitle
+sidecar files that need muxing in.
 .TP
 .BR \-\-report\-json " , " \-\-no\-report\-json
 Generate/suppress JSON report alongside output.
@@ -669,7 +715,7 @@ commented with their defaults.
 Major variable groups:
 .TP
 .B Video
-.BR CRF_VALUE ", " PRESET_VALUE ", " VIDEO_CODEC ", " X265_PARAMS_BASE ", "
+.BR CRF_VALUE ", " PRESET_VALUE ", " VIDEO_CODEC ", " X265_PARAMS_BASE ", " X264_PARAMS_BASE ", "
 .BR LEVEL_VALUE ", " CONSERVATIVE_VBV ", " FORCE_CHROMA_420 ", "
 .BR SDR_USE_10BIT_IF_SRC_10BIT ", " SDR_FORCE_10BIT ", "
 .BR HDR_TARGET_PIXFMT ", " MAX_COPY_BITRATE ", "
@@ -723,6 +769,11 @@ Major variable groups:
 .BR LEVEL_VBV_5_0_MAXRATE ", " LEVEL_VBV_5_0_BUFSIZE ", "
 .BR LEVEL_VBV_5_1_MAXRATE ", " LEVEL_VBV_5_1_BUFSIZE ", "
 .BR LEVEL_VBV_5_2_MAXRATE ", " LEVEL_VBV_5_2_BUFSIZE .
+.TP
+.B X264_PARAMS_BASE
+Base x264 parameter string for H.264 encodes. Appended to the ffmpeg
+\fB\-x264\-params\fR flag. Used by the \fByoutube\-upload\fR profile.
+Default: empty.
 .PP
 Use
 .B \-\-print\-effective\-config
