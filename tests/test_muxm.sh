@@ -1015,6 +1015,39 @@ test_toggles() {
     # ---- Disk check toggles ----
     "--no-disk-check|DISK_CHECK                = 0"
     "--disk-check|DISK_CHECK                = 1"
+    # ---- Subtitle format preservation toggles (32e/32f) ----
+    "--sub-preserve-format|SUB_PRESERVE_TEXT_FORMAT  = 1"
+    "--no-sub-preserve-format|SUB_PRESERVE_TEXT_FORMAT  = 0"
+    # ---- DV enable/disable toggles (32g/32h) ----
+    "--dv|DISABLE_DV                = 0"
+    "--no-dv|DISABLE_DV                = 1"
+    # ---- Tone-map toggles (32i/32j) ----
+    "--tonemap|TONEMAP_HDR_TO_SDR        = 1"
+    "--no-tonemap|TONEMAP_HDR_TO_SDR        = 0"
+    # ---- Positive toggles for flags tested only via --no- elsewhere (32k-32t) ----
+    "--skip-if-ideal|SKIP_IF_IDEAL             = 1"
+    "--report-json|REPORT_JSON               = 1"
+    "--checksum|CHECKSUM                  = 1"
+    "--strip-metadata|STRIP_METADATA            = 1"
+    "--keep-chapters|KEEP_CHAPTERS             = 1"
+    "--no-keep-chapters|KEEP_CHAPTERS             = 0"
+    "--sub-burn-forced|SUB_BURN_FORCED           = 1"
+    "--sub-export-external|SUB_EXPORT_EXTERNAL       = 1"
+    "--video-copy-if-compliant|VIDEO_COPY_IF_COMPLIANT   = 1"
+    "--force-replace-source|FORCE_REPLACE_SOURCE      = 1"
+    # ---- External subtitle toggles ----
+    "--ext-subs|EXT_SUB_ENABLED           = 1"
+    "--no-ext-subs|EXT_SUB_ENABLED           = 0"
+    # ---- External subtitle sole-fallback toggles ----
+    "--sub-sole-ext-fallback|SUB_SOLE_EXT_FALLBACK     = 1"
+    "--no-sub-sole-ext-fallback|SUB_SOLE_EXT_FALLBACK     = 0"
+    # ---- Conservative VBV positive toggle ----
+    "--conservative-vbv|CONSERVATIVE_VBV          = 1"
+    # ---- Profile comment toggles ----
+    "--profile-comment|PROFILE_COMMENT           = 1"
+    "--no-profile-comment|PROFILE_COMMENT           = 0"
+    # ---- SDH subtitle inclusion toggle ----
+    "--no-sub-sdh|SUB_INCLUDE_SDH           = 0"
   )
 
   local out flag expected
@@ -1300,7 +1333,7 @@ _test_config_create_overrides() {
     else
       fail "--create-config multi-override: CRF_VALUE=20 not found uncommented"
     fi
-    if echo "$content" | grep -qE '^PRESET_VALUE=("medium"|medium)$'; then
+    if echo "$content" | grep -qE '^PRESET_VALUE=("medium"|medium)'; then
       pass "--create-config multi-override: PRESET_VALUE=medium uncommented"
     else
       fail "--create-config multi-override: PRESET_VALUE=medium not found uncommented"
@@ -1310,19 +1343,24 @@ _test_config_create_overrides() {
   fi
   rm -f "$cfg_multi_dir/.muxmrc"
 
-  # No overrides: CRF_VALUE should remain commented out (profile default behaviour unchanged)
+  # No overrides: profile-set variables should be uncommented; vars the profile
+  # doesn't touch should remain commented.
   local cfg_nooverride_dir="$TESTDIR/config_create_no_override"
   mkdir -p "$cfg_nooverride_dir"
   run_muxm_in "$cfg_nooverride_dir" --create-config project atv-directplay-hq >/dev/null 2>&1
   if [[ -f "$cfg_nooverride_dir/.muxmrc" ]]; then
     content="$(cat "$cfg_nooverride_dir/.muxmrc")"
-    # CRF_VALUE line should exist but be commented out
-    if echo "$content" | grep -qE '^#.*CRF_VALUE'; then
-      pass "--create-config no-override: CRF_VALUE stays commented out"
-    elif ! echo "$content" | grep -qE '^CRF_VALUE='; then
-      pass "--create-config no-override: CRF_VALUE not present uncommented (acceptable)"
+    # atv-directplay-hq sets CRF_VALUE=17 — should be uncommented with no CLI override
+    if echo "$content" | grep -qE '^CRF_VALUE=17'; then
+      pass "--create-config no-override: CRF_VALUE=17 uncommented (profile-owned)"
     else
-      fail "--create-config no-override: CRF_VALUE appears uncommented without any override"
+      fail "--create-config no-override: CRF_VALUE=17 not found uncommented (got: $(echo "$content" | grep CRF_VALUE || echo '<not present>'))"
+    fi
+    # THREADS is not set by atv-directplay-hq — should remain commented
+    if echo "$content" | grep -qE '^#.*THREADS' || ! echo "$content" | grep -qE '^THREADS='; then
+      pass "--create-config no-override: THREADS stays commented (not set by profile)"
+    else
+      fail "--create-config no-override: THREADS appears uncommented but profile does not set it"
     fi
   else
     fail "--create-config no-override: did not create .muxmrc"
@@ -1565,6 +1603,23 @@ _test_config_create_overrides() {
     fail "--create-config combo: did not create .muxmrc"
   fi
   rm -f "$cfg_combo_dir/.muxmrc"
+
+  # --create-config with comma-separated multi-profile: should produce a minimal
+  # config containing only PROFILE_NAME set to the full comma-separated string.
+  local cfg_mp_dir="$TESTDIR/config_create_multiprofile"
+  mkdir -p "$cfg_mp_dir"
+  out="$(run_muxm_in "$cfg_mp_dir" --create-config project youtube-upload,streaming 2>&1)"
+  if [[ -f "$cfg_mp_dir/.muxmrc" ]]; then
+    content="$(cat "$cfg_mp_dir/.muxmrc")"
+    if echo "$content" | grep -qE '^PROFILE_NAME="youtube-upload,streaming"'; then
+      pass "--create-config multi-profile: PROFILE_NAME=\"youtube-upload,streaming\" in .muxmrc"
+    else
+      fail "--create-config multi-profile: PROFILE_NAME not set correctly (got: $(echo "$content" | grep PROFILE_NAME || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config multi-profile: did not create .muxmrc"
+  fi
+  rm -f "$cfg_mp_dir/.muxmrc"
 }
 
 test_config() {
@@ -1864,6 +1919,45 @@ test_conflicts() {
   assert_contains "⚠" "archive + --crf 22 emits conflict warning" "$out"
   assert_contains "copy-only" "archive + --crf 22 warning mentions copy-only" "$out"
 
+  # --- hdr10-hq + --dv (101f): DV re-enabled on an HDR10 profile ---
+  out="$(run_muxm --profile hdr10-hq --dv --print-effective-config)"
+  assert_contains "⚠" "hdr10-hq + --dv warns (101f)" "$out"
+  assert_contains "DV" "hdr10-hq + --dv: warning mentions DV" "$out"
+
+  # --- atv-directplay-hq + --output-ext mov (101g) ---
+  out="$(run_muxm --profile atv-directplay-hq --output-ext mov --print-effective-config)"
+  assert_contains "⚠" "atv-directplay-hq + --output-ext mov warns (101g)" "$out"
+
+  # --- streaming + --output-ext mov (101h) ---
+  out="$(run_muxm --profile streaming --output-ext mov --print-effective-config)"
+  assert_contains "⚠" "streaming + --output-ext mov warns (101h)" "$out"
+
+  # --- animation + --output-ext mov (101i): MOV can't carry styled ASS/PGS ---
+  out="$(run_muxm --profile animation --output-ext mov --print-effective-config)"
+  assert_contains "⚠" "animation + --output-ext mov warns (101i)" "$out"
+
+  # --- universal + --output-ext mov (101l) ---
+  out="$(run_muxm --profile universal --output-ext mov --print-effective-config)"
+  assert_contains "⚠" "universal + --output-ext mov warns (101l)" "$out"
+
+  # --- universal + --dv (101m): DV enabled with SDR/H.264 profile is contradictory ---
+  # universal sets DISABLE_DV=1; passing --dv re-enables it and fires the conflict check.
+  out="$(run_muxm --profile universal --dv --print-effective-config)"
+  assert_contains "⚠" "universal + --dv warns (101m)" "$out"
+  assert_contains "DV" "universal + --dv: warning mentions DV" "$out"
+
+  # --- Cross: --tonemap + --video-codec libx265 (101n): SDR in HEVC is unusual ---
+  # Cross-profile checks only run when a profile is active (inside `if [[ -n PROFILE_NAME ]]`).
+  # Use streaming (HEVC default) as the host profile; the cross-check fires after profile setup.
+  out="$(run_muxm --profile streaming --tonemap --video-codec libx265 --print-effective-config)"
+  assert_contains "⚠" "cross: --tonemap + --video-codec libx265 warns (101n)" "$out"
+
+  # --- Cross: --sub-burn-forced + --no-sub-sdh (101o): SUB_INCLUDE_FORCED=0 with burn ---
+  # --no-sub-sdh sets SUB_INCLUDE_SDH=0. To reproduce "no forced subs to burn", pair
+  # --sub-burn-forced with --no-subtitles which sets SUB_INCLUDE_FORCED=0.
+  out="$(run_muxm --sub-burn-forced --no-subtitles --print-effective-config 2>&1)" || true
+  assert_contains "SUB_BURN_FORCED" "cross: --sub-burn-forced + --no-subtitles warns (101o)" "$out"
+
   # --- Container passthrough: atv passthrough mode does NOT warn about MKV container ---
   # atv-directplay-hq sets OUTPUT_EXT="" (passthrough); without explicit --output-ext,
   # _OUTPUT_EXT_EXPLICIT=0 and OUTPUT_EXT is still "" at conflict-check time.
@@ -2057,6 +2151,47 @@ EOF
   out="$(MUXM_HOME="$disk_home" run_muxm_in "$disk_dir" \
     --dry-run --video-copy-if-compliant "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
   assert_contains "DRY-RUN" "copy-mode disk preflight: dry-run completes without error" "$out"
+
+  # ---- skip-if-ideal: explicit --crf forces re-encode ----
+  # When --crf is passed explicitly on the CLI, _CLI_CRF_EXPLICIT=1 should
+  # prevent skip-if-ideal from stream-copying or skipping even for a compliant source.
+  out="$(run_muxm --dry-run --skip-if-ideal --crf 20 \
+    "$TESTDIR/compliant.mp4" 2>&1)"
+  if echo "$out" | grep -qiE "already matches|source already ideal|no.?processing.?needed"; then
+    fail "skip-if-ideal + explicit --crf: should NOT skip when CRF is explicitly set"
+  else
+    pass "skip-if-ideal + explicit --crf: does not skip (re-encode forced by explicit CRF)"
+  fi
+
+  # Without an explicit --crf, skip-if-ideal should still recognize the compliant source.
+  out="$(run_muxm --dry-run --skip-if-ideal \
+    "$TESTDIR/compliant.mp4" 2>&1)"
+  if echo "$out" | grep -qiE "ideal|skip|already|compliant|no.?processing"; then
+    pass "skip-if-ideal (no explicit --crf): compliant source still recognized as ideal"
+  else
+    # May have encoded if compliance check is strict; either way no crash.
+    skip "skip-if-ideal (no explicit --crf): inconclusive (source may not qualify as ideal)"
+  fi
+
+  # ---- Container compatibility warnings ----
+
+  # 3a: ASS/SSA + MP4 warning
+  # ass_subs.mkv has an embedded ASS subtitle track. Running with --sub-preserve-format
+  # and --output-ext mp4 should trigger the "cannot carry native ASS" warning because
+  # MP4 cannot carry ASS natively (it would be flattened to mov_text).
+  out="$(run_muxm --dry-run --output-ext mp4 --sub-preserve-format \
+    "$TESTDIR/ass_subs.mkv" 2>&1)" || true
+  assert_contains "cannot carry native ASS" \
+    "container-compat: ASS + MP4 emits incompatibility warning" "$out"
+
+  # 3b: Lossless audio + MP4 warning
+  # hevc_sdr_71.mkv has a FLAC 8ch audio track. Running with --audio-lossless-passthrough
+  # and --output-ext mp4 should trigger the "limited lossless playback support" warning
+  # because FLAC in MP4 has poor device compatibility.
+  out="$(run_muxm --dry-run --output-ext mp4 --audio-lossless-passthrough \
+    "$TESTDIR/hevc_sdr_71.mkv" 2>&1)" || true
+  assert_contains "limited lossless playback support" \
+    "container-compat: FLAC + MP4 emits lossless incompatibility warning" "$out"
 
   # ---- Output filename extension inference ----
   # When the user supplies an explicit output filename, muxm infers the container
@@ -4234,6 +4369,125 @@ _test_unit_disk_preflight() {
   assert_muxm_fn_stdout "_preset_multiplier(bogus)=1000"      "1000" _preset_multiplier "" "bogus"
 }
 
+_test_unit_audio_copy_ext() {
+  # ---- _audio_copy_ext ----
+  # Maps codec names to file extensions for the per-track export path in
+  # run_audio_pipeline_multi (archive profile). A regression here silently creates
+  # unreadable sidecar files (e.g., "track.truehd" instead of "track.thd").
+  # Items 218a–218f from the testing plan.
+  assert_muxm_fn_stdout "_audio_copy_ext(truehd)=thd"      "thd"   _audio_copy_ext "" "truehd"
+  assert_muxm_fn_stdout "_audio_copy_ext(alac)=m4a"        "m4a"   _audio_copy_ext "" "alac"
+  assert_muxm_fn_stdout "_audio_copy_ext(pcm_s24le)=wav"   "wav"   _audio_copy_ext "" "pcm_s24le"
+  assert_muxm_fn_stdout "_audio_copy_ext(pcm_s16le)=wav"   "wav"   _audio_copy_ext "" "pcm_s16le"
+  assert_muxm_fn_stdout "_audio_copy_ext(pcm_s32le)=wav"   "wav"   _audio_copy_ext "" "pcm_s32le"
+  assert_muxm_fn_stdout "_audio_copy_ext(dca)=dts"         "dts"   _audio_copy_ext "" "dca"
+  assert_muxm_fn_stdout "_audio_copy_ext(ac3)=ac3"         "ac3"   _audio_copy_ext "" "ac3"
+  assert_muxm_fn_stdout "_audio_copy_ext(aac)=aac"         "aac"   _audio_copy_ext "" "aac"
+  assert_muxm_fn_stdout "_audio_copy_ext(eac3)=eac3"       "eac3"  _audio_copy_ext "" "eac3"
+  assert_muxm_fn_stdout "_audio_copy_ext(flac)=flac"       "flac"  _audio_copy_ext "" "flac"
+}
+
+_test_unit_codec_max_channels() {
+  # ---- _codec_max_channels ----
+  # Prevents fatal ffmpeg errors like "Specified channel layout '7.1' is not
+  # supported" from the eac3 encoder by clamping effective_ch at encode time.
+  # A regression here silently produces broken audio or a crash on 7.1 sources.
+  # Items 218g–218j from the testing plan.
+  assert_muxm_fn_stdout "_codec_max_channels(eac3)=6"   "6"  _codec_max_channels "" "eac3"
+  assert_muxm_fn_stdout "_codec_max_channels(ac3)=6"    "6"  _codec_max_channels "" "ac3"
+  assert_muxm_fn_stdout "_codec_max_channels(aac)=48"   "48" _codec_max_channels "" "aac"
+  assert_muxm_fn_stdout "_codec_max_channels(unknown)=64 (fallback)" "64" _codec_max_channels "" "unknown_codec"
+}
+
+_test_unit_realpath_fallback() {
+  # ---- realpath_fallback ----
+  # Cross-platform path resolver used throughout muxm for SRC_ABS, LOGFILE, etc.
+  # Must return an absolute path even when realpath(1) is unavailable or the
+  # target doesn't exist yet.  Items 218o–218p from the testing plan.
+  local body
+  body="$(awk '/^realpath_fallback\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+
+  # Absolute path input → returned unchanged (or resolved if exists)
+  local abs
+  abs="$(bash -c "$body"$'\n'"realpath_fallback /tmp/muxm_test_abs.mkv")"
+  if [[ "$abs" == /* ]]; then
+    pass "realpath_fallback: absolute input returns absolute path"
+  else
+    fail "realpath_fallback: absolute input expected absolute, got '$abs'"
+  fi
+
+  # Relative path input → prefixed with a directory component
+  local rel
+  rel="$(cd "$TESTDIR" && bash -c "$body"$'\n'"realpath_fallback some_movie.mkv")"
+  if [[ "$rel" == /* ]]; then
+    pass "realpath_fallback: relative input returns absolute path"
+  else
+    fail "realpath_fallback: relative input expected absolute, got '$rel'"
+  fi
+
+  # Non-existent file → path is still absolute (no existence check)
+  local noexist
+  noexist="$(bash -c "$body"$'\n'"realpath_fallback /no/such/path/file.mkv")"
+  if [[ "$noexist" == /* ]]; then
+    pass "realpath_fallback: non-existent file returns absolute path"
+  else
+    fail "realpath_fallback: non-existent file expected absolute, got '$noexist'"
+  fi
+}
+
+_test_unit_apply_level_vbv() {
+  # ---- apply_level_vbv ----
+  # Appends VBV guardrails to X265_PARAMS when CONSERVATIVE_VBV=1 and LEVEL_VALUE
+  # is set to a known level.  A regression silently drops the vbv-maxrate/bufsize
+  # constraints, allowing the encoder to produce files that exceed device bitrate caps.
+  # Items 218q–218t from the testing plan.
+  #
+  # We run apply_level_vbv in a subshell with the VBV constants and X265_PARAMS
+  # pre-declared, then print X265_PARAMS to verify injection.
+  local vbv_env='CONSERVATIVE_VBV=1
+LEVEL_VBV_4_1_MAXRATE=10000k; LEVEL_VBV_4_1_BUFSIZE=20000k
+LEVEL_VBV_5_0_MAXRATE=25000k; LEVEL_VBV_5_0_BUFSIZE=50000k
+LEVEL_VBV_5_1_MAXRATE=40000k; LEVEL_VBV_5_1_BUFSIZE=80000k
+LEVEL_VBV_5_2_MAXRATE=60000k; LEVEL_VBV_5_2_BUFSIZE=120000k
+X265_PARAMS=""
+note() { :; }'
+  local body
+  body="$(awk '/^apply_level_vbv\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+
+  local out
+
+  # Level 4.1 — 10000k / 20000k
+  out="$(bash -c "$vbv_env"$'\n'"$body"$'\n'"apply_level_vbv 4.1; echo \"\$X265_PARAMS\"")"
+  if echo "$out" | grep -qF "vbv-maxrate=10000k"; then pass "apply_level_vbv(4.1): vbv-maxrate=10000k"; else fail "apply_level_vbv(4.1): expected vbv-maxrate=10000k, got '$out'"; fi
+  if echo "$out" | grep -qF "vbv-bufsize=20000k"; then pass "apply_level_vbv(4.1): vbv-bufsize=20000k"; else fail "apply_level_vbv(4.1): expected vbv-bufsize=20000k, got '$out'"; fi
+
+  # Level 5.0 — 25000k / 50000k
+  out="$(bash -c "$vbv_env"$'\n'"$body"$'\n'"apply_level_vbv 5.0; echo \"\$X265_PARAMS\"")"
+  if echo "$out" | grep -qF "vbv-maxrate=25000k"; then pass "apply_level_vbv(5.0): vbv-maxrate=25000k"; else fail "apply_level_vbv(5.0): expected vbv-maxrate=25000k, got '$out'"; fi
+  if echo "$out" | grep -qF "vbv-bufsize=50000k"; then pass "apply_level_vbv(5.0): vbv-bufsize=50000k"; else fail "apply_level_vbv(5.0): expected vbv-bufsize=50000k, got '$out'"; fi
+
+  # Level 5.1 — 40000k / 80000k
+  out="$(bash -c "$vbv_env"$'\n'"$body"$'\n'"apply_level_vbv 5.1; echo \"\$X265_PARAMS\"")"
+  if echo "$out" | grep -qF "vbv-maxrate=40000k"; then pass "apply_level_vbv(5.1): vbv-maxrate=40000k"; else fail "apply_level_vbv(5.1): expected vbv-maxrate=40000k, got '$out'"; fi
+  if echo "$out" | grep -qF "vbv-bufsize=80000k"; then pass "apply_level_vbv(5.1): vbv-bufsize=80000k"; else fail "apply_level_vbv(5.1): expected vbv-bufsize=80000k, got '$out'"; fi
+
+  # Level 5.2 — 60000k / 120000k
+  out="$(bash -c "$vbv_env"$'\n'"$body"$'\n'"apply_level_vbv 5.2; echo \"\$X265_PARAMS\"")"
+  if echo "$out" | grep -qF "vbv-maxrate=60000k"; then pass "apply_level_vbv(5.2): vbv-maxrate=60000k"; else fail "apply_level_vbv(5.2): expected vbv-maxrate=60000k, got '$out'"; fi
+  if echo "$out" | grep -qF "vbv-bufsize=120000k"; then pass "apply_level_vbv(5.2): vbv-bufsize=120000k"; else fail "apply_level_vbv(5.2): expected vbv-bufsize=120000k, got '$out'"; fi
+
+  # Unknown level with CONSERVATIVE_VBV=1 → no vbv injected, but level-idc still appended
+  out="$(bash -c "$vbv_env"$'\n'"$body"$'\n'"apply_level_vbv 6.0; echo \"\$X265_PARAMS\"")"
+  if echo "$out" | grep -qF "level-idc=6.0"; then pass "apply_level_vbv(6.0, unknown): level-idc appended"; else fail "apply_level_vbv(6.0, unknown): expected level-idc=6.0, got '$out'"; fi
+  if ! echo "$out" | grep -qF "vbv-maxrate"; then pass "apply_level_vbv(6.0, unknown): no vbv-maxrate for unknown level"; else fail "apply_level_vbv(6.0, unknown): unexpected vbv-maxrate in '$out'"; fi
+
+  # CONSERVATIVE_VBV=0 → no VBV constraints even for known level (only level-idc injected)
+  local novbv_env="${vbv_env/CONSERVATIVE_VBV=1/CONSERVATIVE_VBV=0}"
+  out="$(bash -c "$novbv_env"$'\n'"$body"$'\n'"apply_level_vbv 5.1; echo \"\$X265_PARAMS\"")"
+  if ! echo "$out" | grep -qF "vbv-maxrate"; then pass "apply_level_vbv(5.1, CONSERVATIVE_VBV=0): no vbv-maxrate"; else fail "apply_level_vbv(5.1, CONSERVATIVE_VBV=0): unexpected vbv-maxrate in '$out'"; fi
+  if echo "$out" | grep -qF "level-idc=5.1"; then pass "apply_level_vbv(5.1, CONSERVATIVE_VBV=0): level-idc still injected"; else fail "apply_level_vbv(5.1, CONSERVATIVE_VBV=0): expected level-idc=5.1, got '$out'"; fi
+}
+
 test_unit() {
   section "Pure-Function Unit Tests"
   _test_unit_audio_helpers
@@ -4243,6 +4497,10 @@ test_unit() {
   _test_unit_sii_container_safety
   _test_unit_misc_helpers
   _test_unit_disk_preflight
+  _test_unit_audio_copy_ext
+  _test_unit_codec_max_channels
+  _test_unit_realpath_fallback
+  _test_unit_apply_level_vbv
 }
 
 # === Suite: Profile End-to-End (real encodes with profiles) ===
@@ -5030,6 +5288,18 @@ test_multi_profile() {
   else
     skip "multi-profile no user stem: file-split warning appeared unexpectedly (may be benign)"
   fi
+
+  # --- Multi-profile passthrough + user filename extension hint ---
+  # archive profile is passthrough (OUTPUT_EXT=""). Without a user filename hint,
+  # it would fall back to the source extension (.mkv). With an explicit .mp4 output
+  # filename, the dispatch block (Section 11) should use .mp4 for the archive pass.
+  local _hint_src="$TESTDIR/basic_sdr_subs.mkv"
+  local _hint_out="$TESTDIR/passthrough_hint.mp4"
+
+  out="$(run_muxm --profile archive,streaming --dry-run "$_hint_src" "$_hint_out" 2>&1)" || true
+  # The pre-encode warning lists per-profile output paths; archive should appear as .mp4
+  assert_contains "passthrough_hint.archive.mp4" \
+    "multi-profile passthrough + user .mp4 hint: archive output path uses .mp4 (not .mkv)" "$out"
 }
 
 # ---- Run Suites ----

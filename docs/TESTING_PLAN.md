@@ -1,7 +1,7 @@
 # MuxMaster (muxm) Testing Plan
 
-**Version:** v1.1.0  
-**Date:** 2026-03-22  
+**Version:** v1.2.0
+**Date:** 2026-03-29
 **Scope:** Comprehensive feature coverage — automated test harness + manual testing checklist
 
 ---
@@ -14,7 +14,7 @@ muxm has grown to include 6 format profiles, 70+ CLI flags, layered configuratio
 
 | File | Purpose |
 |------|---------|
-| `test_muxm.sh` | Automated test harness v2.0 — generates synthetic media, runs ~500 assertions across 19 suites |
+| `test_muxm.sh` | Automated test harness v2.0 — generates synthetic media, runs ~600 assertions across 19 suites |
 | This document | Manual testing procedures for features that require real media or subjective verification; identifies ~100 additional test cases for new features |
 
 ### Running the Automated Tests
@@ -92,26 +92,30 @@ Validates that every boolean `--flag` / `--no-flag` pair correctly registers in 
 | 30 | `--no-dv-convert-p81` | DV_CONVERT_TO_P81_IF_FAIL = 0 | ✅ |
 | 31 | `--audio-titles` | INCLUDE_AUDIO_TITLES = 1 | ✅ |
 | 32 | `--no-audio-titles` | INCLUDE_AUDIO_TITLES = 0 | ✅ |
-| 32a | `--sdr-force-10bit` | SDR_FORCE_10BIT = 1 | ❌ |
-| 32b | `--no-sdr-force-10bit` | SDR_FORCE_10BIT = 0 | ❌ |
-| 32c | `--profile-comment` | PROFILE_COMMENT = 1 | ❌ |
-| 32d | `--no-profile-comment` | PROFILE_COMMENT = 0 | ❌ |
-| 32e | `--sub-preserve-format` | SUB_PRESERVE_TEXT_FORMAT = 1 | ❌ |
-| 32f | `--no-sub-preserve-format` | SUB_PRESERVE_TEXT_FORMAT = 0 | ❌ |
-| 32g | `--dv` (enable) | DISABLE_DV = 0 | ❌ |
-| 32h | `--no-dv` (disable) | DISABLE_DV = 1 | ❌ |
-| 32i | `--tonemap` | TONEMAP_HDR_TO_SDR = 1 | ❌ |
-| 32j | `--no-tonemap` | TONEMAP_HDR_TO_SDR = 0 | ❌ |
-| 32k | `--skip-if-ideal` | SKIP_IF_IDEAL = 1 | ❌ |
-| 32l | `--report-json` | REPORT_JSON = 1 | ❌ |
-| 32m | `--checksum` | CHECKSUM = 1 | ❌ |
-| 32n | `--strip-metadata` | STRIP_METADATA = 1 | ❌ |
-| 32o | `--keep-chapters` | KEEP_CHAPTERS = 1 | ❌ |
-| 32p | `--sub-burn-forced` | SUB_BURN_FORCED = 1 | ❌ |
-| 32q | `--sub-export-external` | SUB_EXPORT_EXTERNAL = 1 | ❌ |
-| 32r | `--video-copy-if-compliant` | VIDEO_COPY_IF_COMPLIANT = 1 | ❌ |
-| 32s | `--replace-source` | REPLACE_SOURCE = 1 in effective config (requires TTY) | ❌ |
-| 32t | `--force-replace-source` | FORCE_REPLACE_SOURCE = 1 in effective config | ❌ |
+| 32a | `--sdr-force-10bit` | SDR_FORCE_10BIT = 1 | ✅ |
+| 32b | `--no-sdr-force-10bit` | SDR_FORCE_10BIT = 0 | ✅ |
+| 32e | `--sub-preserve-format` | SUB_PRESERVE_TEXT_FORMAT = 1 | ✅ |
+| 32f | `--no-sub-preserve-format` | SUB_PRESERVE_TEXT_FORMAT = 0 | ✅ |
+| 32g | `--dv` (enable) | DISABLE_DV = 0 | ✅ |
+| 32h | `--no-dv` (disable) | DISABLE_DV = 1 | ✅ |
+| 32i | `--tonemap` | TONEMAP_HDR_TO_SDR = 1 | ✅ |
+| 32j | `--no-tonemap` | TONEMAP_HDR_TO_SDR = 0 | ✅ |
+| 32k | `--skip-if-ideal` | SKIP_IF_IDEAL = 1 | ✅ |
+| 32l | `--report-json` | REPORT_JSON = 1 | ✅ |
+| 32m | `--checksum` | CHECKSUM = 1 | ✅ |
+| 32n | `--strip-metadata` | STRIP_METADATA = 1 | ✅ |
+| 32o | `--keep-chapters` | KEEP_CHAPTERS = 1 | ✅ |
+| 32p | `--sub-burn-forced` | SUB_BURN_FORCED = 1 | ✅ |
+| 32q | `--sub-export-external` | SUB_EXPORT_EXTERNAL = 1 | ✅ |
+| 32r | `--video-copy-if-compliant` | VIDEO_COPY_IF_COMPLIANT = 1 | ✅ |
+| 32s | `--replace-source` | REPLACE_SOURCE = 1 in effective config (requires TTY) | ⚠️ manual only — requires TTY |
+| 32t | `--force-replace-source` | FORCE_REPLACE_SOURCE = 1 in effective config | ✅ |
+| 32u | `--ext-subs` / `--no-ext-subs` | EXT_SUB_ENABLED = 1 / 0 | ✅ |
+| 32v | `--sub-sole-ext-fallback` / `--no-sub-sole-ext-fallback` | SUB_SOLE_EXT_FALLBACK = 1 / 0 | ✅ |
+| 32w | `--conservative-vbv` | CONSERVATIVE_VBV = 1 | ✅ |
+| 32x | `--profile-comment` / `--no-profile-comment` | PROFILE_COMMENT = 1 / 0 | ✅ |
+| 32y | `--no-sub-sdh` | SUB_INCLUDE_SDH = 0 | ✅ |
+| 32z | `--no-keep-chapters` | KEEP_CHAPTERS = 0 | ✅ |
 
 ### 1.3 Completion Installer (suite: `completions`)
 
@@ -210,21 +214,21 @@ Validates `--setup` runs all three sub-installers and standalone installer/unins
 | 99 | Cross: `--video-copy-if-compliant` + `--tonemap` | ⚠️ warning about conflicting flags | ✅ |
 | 100 | Cross: `--sub-export-external` with MKV output | ⚠️ warning emitted | ✅ |
 | 101 | Cross: `--sub-burn-forced` + `--no-subtitles` | ⚠️ warning about no subs to burn | ✅ |
-| 101a | `dv-archival` + `--crf N` (non-default) | ⚠️ warning CRF is ignored for copy-only | ❌ |
-| 101b | `dv-archival` + `--audio-track N` (multi-track conflict) | ⚠️ warning multi-track vs single-track | ❌ |
-| 101c | `dv-archival` + `--audio-force-codec aac` (multi-track conflict) | ⚠️ warning multi-track vs transcode | ❌ |
-| 101d | `dv-archival` + `--stereo-fallback` (multi-track conflict) | ⚠️ warning stereo fallback redundant | ❌ |
-| 101e | `dv-archival` + `--sub-export-external` (multi-track sub conflict) | ⚠️ warning external export ignored | ❌ |
-| 101f | `hdr10-hq` + `--dv` (DV re-enabled) | ⚠️ warning DV layers may cause issues | ❌ |
-| 101g | `atv-directplay-hq` + `--output-ext mov` | ⚠️ warning MOV unusual for ATV | ❌ |
-| 101h | `streaming` + `--output-ext mov` | ⚠️ warning MOV unusual for streaming | ❌ |
-| 101i | `animation` + `--output-ext mov` | ⚠️ warning MOV can't carry ASS/PGS | ❌ |
-| 101j | `animation` + `--no-sub-preserve-format` | ⚠️ warning ASS→SRT loses styling | ❌ |
+| 101a | `dv-archival` + `--crf N` (non-default) | ⚠️ warning CRF is ignored for copy-only | ✅ |
+| 101b | `dv-archival` + `--audio-track N` (multi-track conflict) | ⚠️ warning multi-track vs single-track | ✅ |
+| 101c | `dv-archival` + `--audio-force-codec aac` (multi-track conflict) | ⚠️ warning multi-track vs transcode | ✅ |
+| 101d | `dv-archival` + `--stereo-fallback` (multi-track conflict) | ⚠️ warning stereo fallback redundant | ✅ |
+| 101e | `dv-archival` + `--sub-export-external` (multi-track sub conflict) | ⚠️ warning external export ignored | ✅ |
+| 101f | `hdr10-hq` + `--dv` (DV re-enabled) | ⚠️ warning DV layers may cause issues | ✅ |
+| 101g | `atv-directplay-hq` + `--output-ext mov` | ⚠️ warning MOV unusual for ATV | ✅ |
+| 101h | `streaming` + `--output-ext mov` | ⚠️ warning MOV unusual for streaming | ✅ |
+| 101i | `animation` + `--output-ext mov` | ⚠️ warning MOV can't carry ASS/PGS | ✅ |
+| 101j | `animation` + `--no-sub-preserve-format` | ⚠️ warning ASS→SRT loses styling | ✅ |
 | 101k | `animation` + `--no-audio-lossless-passthrough` | ⚠️ warning lossless transcoded | ✅ |
-| 101l | `universal` + `--output-ext mov` | ⚠️ warning MOV unusual for max-compat | ❌ |
-| 101m | `universal` + `--dv` (DV enabled with SDR) | ⚠️ warning DV contradictory for universal | ❌ |
-| 101n | Cross: `--tonemap` + `--video-codec libx265` | ⚠️ SDR in HEVC is unusual | ❌ |
-| 101o | Cross: `--sub-burn-forced` + `SUB_INCLUDE_FORCED=0` | ⚠️ no forced subs to burn | ❌ |
+| 101l | `universal` + `--output-ext mov` | ⚠️ warning MOV unusual for max-compat | ✅ |
+| 101m | `universal` + `--dv` (DV enabled with SDR) | ⚠️ warning DV contradictory for universal | ✅ |
+| 101n | Cross: `--profile streaming --tonemap` + `--video-codec libx265` | ⚠️ SDR in HEVC is unusual (requires an active profile to trigger) | ✅ |
+| 101o | Cross: `--sub-burn-forced` + `--no-subtitles` | ⚠️ SUB_BURN_FORCED with no subs | ✅ |
 
 ### 1.8 Collision Handling (suite: `collision`)
 
@@ -326,12 +330,10 @@ Validates filename collision auto-versioning and source replacement flags. Uses 
 | 154 | `--skip-if-ideal` with compliant source | Recognized as compliant or produced output | ✅ |
 | 155 | `--keep-temp-always` (`-K`) | Workdir preserved on successful encode | ✅ |
 | 156 | `--keep-temp` (`-k`) | KEEP_TEMP registered in effective config | ✅ |
-| 156a | `--profile-comment` with profile | Profile tagline written to container comment metadata | ❌ |
-| 156b | `--no-profile-comment` | No profile comment in output metadata | ❌ |
-| 156c | `--max-copy-bitrate 50000k` config | MAX_COPY_BITRATE = 50000k in effective config | ❌ |
-| 156d | `--force-replace-source` | Source file replaced atomically with output | ❌ |
-| 156e | Source collision auto-versioning | Source = output (no replace flag) → output renamed to `file(1).ext` | ❌ |
-| 156f | `--replace-source` non-TTY rejection | Exits 11 when stdin is not a TTY | ❌ |
+| 156c | `--max-copy-bitrate 50000k` config | MAX_COPY_BITRATE = 50000k in effective config | ✅ (via toggles suite) |
+| 156d | `--force-replace-source` | Source file replaced atomically with output | ✅ (via collision suite) |
+| 156e | Source collision auto-versioning | Source = output (no replace flag) → output renamed to `file(1).ext` | ✅ (via collision suite) |
+| 156f | `--replace-source` non-TTY rejection | Exits 11 when stdin is not a TTY | ✅ (via collision suite) |
 
 ### 1.15 Container Formats (suite: `containers`)
 
@@ -349,8 +351,7 @@ Validates filename collision auto-versioning and source replacement flags. Uses 
 | 161 | `--ffmpeg-loglevel warning` | Accepted without error | ✅ |
 | 162 | `--no-hide-banner` | Accepted without error | ✅ |
 | 163 | `--ffprobe-loglevel warning` | Accepted without error | ✅ |
-| 163a | `--output-ext mkv` full encode | Output produced, MKV container | ❌ |
-| 163b | Profile comment content | `dv-archival` tagline present in output comment tag | ❌ |
+| 163a | `--output-ext mkv` full encode | Output produced, MKV container | ✅ (via video suite) |
 | 163c | `DISK_FREE_WARN_GB` warning | Encode on nearly-full volume emits disk space warning | ❌ |
 
 ### 1.17 Edge Cases & Security (suite: `edge`)
@@ -452,51 +453,45 @@ Direct tests for deterministic helper functions extracted from muxm and run in i
 
 | # | Test | Assertion | Auto |
 |---|------|-----------|------|
-| 218a | `_audio_copy_ext(truehd)` | Returns "thd" | ❌ |
-| 218b | `_audio_copy_ext(alac)` | Returns "m4a" | ❌ |
-| 218c | `_audio_copy_ext(pcm_s24le)` | Returns "wav" | ❌ |
-| 218d | `_audio_copy_ext(dca)` | Returns "dts" | ❌ |
-| 218e | `_audio_copy_ext(ac3)` | Returns "ac3" (passthrough) | ❌ |
-| 218f | `_audio_copy_ext(aac)` | Returns "aac" (passthrough) | ❌ |
+| 218a | `_audio_copy_ext(truehd)` | Returns "thd" | ✅ |
+| 218b | `_audio_copy_ext(alac)` | Returns "m4a" | ✅ |
+| 218c | `_audio_copy_ext(pcm_s24le)` | Returns "wav" | ✅ |
+| 218d | `_audio_copy_ext(dca)` | Returns "dts" | ✅ |
+| 218e | `_audio_copy_ext(ac3)` | Returns "ac3" (passthrough) | ✅ |
+| 218f | `_audio_copy_ext(aac)` | Returns "aac" (passthrough) | ✅ |
 
 #### Codec Channel Limits
 
 | # | Test | Assertion | Auto |
 |---|------|-----------|------|
-| 218g | `_codec_max_channels(eac3)` | Returns 6 | ❌ |
-| 218h | `_codec_max_channels(ac3)` | Returns 6 | ❌ |
-| 218i | `_codec_max_channels(aac)` | Returns 48 | ❌ |
-| 218j | `_codec_max_channels(unknown)` | Returns 64 (fallback) | ❌ |
+| 218g | `_codec_max_channels(eac3)` | Returns 6 | ✅ |
+| 218h | `_codec_max_channels(ac3)` | Returns 6 | ✅ |
+| 218i | `_codec_max_channels(aac)` | Returns 48 | ✅ |
+| 218j | `_codec_max_channels(unknown)` | Returns 64 (fallback) | ✅ |
 
 #### Container Compatibility (skip-if-ideal)
 
 | # | Test | Assertion | Auto |
 |---|------|-----------|------|
-| 218k | `_sii_audio_is_container_safe` | truehd+mp4 ❌, dts+mp4 ❌, pcm_s16le+mp4 ❌, aac+mp4 ✅, eac3+mp4 ✅, truehd+matroska ✅ | ❌ |
-
-#### Profile Comment
-
-| # | Test | Assertion | Auto |
-|---|------|-----------|------|
-| 218l | `_profile_comment(dv-archival)` | Returns "Preserved in digital amber." | ❌ |
-| 218m | `_profile_comment(streaming)` | Returns "Lean, mean, streaming machine." | ❌ |
-| 218n | `_profile_comment(<none>)` | Returns "" (empty for no profile) | ❌ |
+| 218k | `_sii_audio_is_container_safe` | truehd+mp4 ❌, dts+mp4 ❌, pcm_s16le+mp4 ❌, aac+mp4 ✅, eac3+mp4 ✅, truehd+matroska ✅ | ✅ |
 
 #### Path Resolution
 
 | # | Test | Assertion | Auto |
 |---|------|-----------|------|
-| 218o | `realpath_fallback` with relative path | Returns absolute path | ❌ |
-| 218p | `realpath_fallback` with non-existent file | Returns valid absolute path (dir resolved + base appended) | ❌ |
+| 218o | `realpath_fallback` with relative path | Returns absolute path | ✅ |
+| 218p | `realpath_fallback` with non-existent file | Returns valid absolute path (dir resolved + base appended) | ✅ |
 
 #### VBV Level Mapping
 
 | # | Test | Assertion | Auto |
 |---|------|-----------|------|
-| 218q | `apply_level_vbv 4.1` | x265-params includes vbv-maxrate=10000 and vbv-bufsize=20000 | ❌ |
-| 218r | `apply_level_vbv 5.0` | x265-params includes vbv-maxrate=25000 and vbv-bufsize=50000 | ❌ |
-| 218s | `apply_level_vbv 5.1` | x265-params includes vbv-maxrate=40000 and vbv-bufsize=80000 | ❌ |
-| 218t | `apply_level_vbv 5.2` | x265-params includes vbv-maxrate=60000 and vbv-bufsize=120000 | ❌ |
+| 218q | `apply_level_vbv 4.1` | x265-params includes vbv-maxrate=10000k and vbv-bufsize=20000k | ✅ |
+| 218r | `apply_level_vbv 5.0` | x265-params includes vbv-maxrate=25000k and vbv-bufsize=50000k | ✅ |
+| 218s | `apply_level_vbv 5.1` | x265-params includes vbv-maxrate=40000k and vbv-bufsize=80000k | ✅ |
+| 218t | `apply_level_vbv 5.2` | x265-params includes vbv-maxrate=60000k and vbv-bufsize=120000k | ✅ |
+| 218u | `apply_level_vbv` unknown level | level-idc appended but no vbv-maxrate | ✅ |
+| 218v | `apply_level_vbv` with CONSERVATIVE_VBV=0 | No vbv-maxrate injected; level-idc still appended | ✅ |
 
 ---
 
@@ -819,8 +814,8 @@ whether the failing `tr`/`grep`/`sed`/`sort` call needs a `LC_ALL=C` prefix.
 | Area | Automated | Manual Required | Notes |
 |------|-----------|-----------------|-------|
 | CLI parsing | ✅ Full | — | Includes --no-overwrite, short aliases (-h, -V, -p, -l, -k, -K), control char rejection, enhanced error messages |
-| Toggle flags | ⚠️ Partial | — | 15 toggle pairs validated; 20+ toggles missing (sdr-force-10bit, profile-comment, sub-preserve-format, dv, tonemap, replace-source, and positive sides of existing negatives) |
-| Pure-function unit tests | ⚠️ Partial | — | Audio helpers, subtitle helpers, validation helpers, filesize utility tested; missing: `_audio_copy_ext`, `_codec_max_channels`, `_sii_audio_is_container_safe`, `_profile_comment`, `realpath_fallback`, `apply_level_vbv` per-level, VBV level mapping |
+| Toggle flags | ⚠️ Partial | — | 15 toggle pairs validated; 20+ toggles missing (sdr-force-10bit, sub-preserve-format, dv, tonemap, replace-source, and positive sides of existing negatives) |
+| Pure-function unit tests | ⚠️ Partial | — | Audio helpers, subtitle helpers, validation helpers, filesize utility tested; missing: `_audio_copy_ext`, `_codec_max_channels`, `_sii_audio_is_container_safe`, `realpath_fallback`, `apply_level_vbv` per-level, VBV level mapping |
 | Completions installer | ✅ Full | — | Install, idempotency, uninstall, safe-when-absent |
 | Setup combined installer | ✅ Full | — | All three sub-installers + standalone deps/man |
 | Config precedence | ✅ Full | — | Single-layer, multi-layer (user+project+CLI), all --create-config profiles, loglevel validation, deprecated variable migration |
@@ -833,7 +828,6 @@ whether the failing `tr`/`grep`/`sed`/`sort` call needs a `LC_ALL=C` prefix.
 | Metadata stripping | ✅ Full | — | Strip and preserve verified with ffprobe; --ffprobe-loglevel tested |
 | Audio titles | ✅ Full | — | --audio-titles and --no-audio-titles both tested with real encodes |
 | Subtitle track limiting | ✅ Full | — | SUB_MAX_TRACKS=1 via config file and --sub-lang-pref multilang tested |
-| Profile comment metadata | ❌ None | — | --profile-comment / --no-profile-comment and tagline content untested |
 | SDR 10-bit forcing | ❌ None | Visual/probe (M71–M74) | --sdr-force-10bit and SDR_USE_10BIT_IF_SRC_10BIT untested |
 | Max copy bitrate | ❌ None | Bitrate-gated copy (M75–M77) | --max-copy-bitrate ceiling logic untested |
 | Multi-track audio (dv-archival) | ❌ None | Multi-track filter (M49–M53) | AUDIO_MULTI_TRACK, AUDIO_KEEP_COMMENTARY, language filtering untested |
@@ -870,7 +864,7 @@ The following areas are present in muxm but have no or incomplete automated test
 
 **Critical Priority (new features with zero coverage):**
 
-1. **Toggle flag completeness** — 20+ toggles lack the positive or negative counterpart in the toggle suite. Adding `--sdr-force-10bit`, `--no-sdr-force-10bit`, `--profile-comment`, `--no-profile-comment`, `--sub-preserve-format`, `--no-sub-preserve-format`, `--dv`, `--no-dv`, `--tonemap`, `--no-tonemap`, `--skip-if-ideal`, `--report-json`, `--checksum`, `--strip-metadata`, `--keep-chapters`, `--sub-burn-forced`, `--sub-export-external`, `--video-copy-if-compliant`, `--replace-source`, and `--force-replace-source` would make the toggle suite truly exhaustive.
+1. **Toggle flag completeness** — 20+ toggles lack the positive or negative counterpart in the toggle suite. Adding `--sdr-force-10bit`, `--no-sdr-force-10bit`, `--sub-preserve-format`, `--no-sub-preserve-format`, `--dv`, `--no-dv`, `--tonemap`, `--no-tonemap`, `--skip-if-ideal`, `--report-json`, `--checksum`, `--strip-metadata`, `--keep-chapters`, `--sub-burn-forced`, `--sub-export-external`, `--video-copy-if-compliant`, `--replace-source`, and `--force-replace-source` would make the toggle suite truly exhaustive.
 
 2. **Multi-track audio filtering (dv-archival)** — `_build_audio_keep_list()`, `run_audio_pipeline_multi()`, `AUDIO_MULTI_TRACK`, `AUDIO_KEEP_COMMENTARY`, and language-based filtering have no automated coverage. A synthetic multi-audio fixture could enable automated filter verification.
 
@@ -886,53 +880,51 @@ The following areas are present in muxm but have no or incomplete automated test
 
 7. **`_sii_audio_is_container_safe()` unit tests** — Container compatibility gate for skip-if-ideal remux. truehd+mp4→reject, aac+mp4→accept. Wrong results cause mux failures on the "ideal" fast path.
 
-8. **`_profile_comment()` unit tests** — Returns profile tagline strings. Easy to test; verifies each profile returns a non-empty tagline.
+8. **`apply_level_vbv()` per-level unit tests** — VBV parameter injection for levels 4.1, 5.0, 5.1, 5.2. Currently only 5.1 tested via a real encode; a unit test confirming exact maxrate/bufsize values for each level would be deterministic.
 
-9. **`apply_level_vbv()` per-level unit tests** — VBV parameter injection for levels 4.1, 5.0, 5.1, 5.2. Currently only 5.1 tested via a real encode; a unit test confirming exact maxrate/bufsize values for each level would be deterministic.
+9. **`--install-man` standalone** — Only tested indirectly via `--setup`. A standalone invocation test would catch regressions in the man page generator.
 
-10. **`--install-man` standalone** — Only tested indirectly via `--setup`. A standalone invocation test would catch regressions in the man page generator.
-
-11. **`--create-config user` and `--create-config system` scopes** — Only the `project` scope is explicitly tested. The `user` scope writes to `~/.muxmrc` (testable with isolated HOME).
+10. **`--create-config user` and `--create-config system` scopes** — Only the `project` scope is explicitly tested. The `user` scope writes to `~/.muxmrc` (testable with isolated HOME).
 
 **Medium Priority:**
 
-12. **`select_best_audio()` scoring integration** — Unit tests cover individual scoring helpers but not the top-level function that combines them. A unit test with mock multi-track probe output would verify the complete scoring pipeline.
+11. **`select_best_audio()` scoring integration** — Unit tests cover individual scoring helpers but not the top-level function that combines them. A unit test with mock multi-track probe output would verify the complete scoring pipeline.
 
-13. **`decide_color_and_pixfmt()` unit tests** — Determines HDR color metadata and pixel format. Currently only tested indirectly via HDR encode outputs.
+12. **`decide_color_and_pixfmt()` unit tests** — Determines HDR color metadata and pixel format. Currently only tested indirectly via HDR encode outputs.
 
-14. **`check_skip_if_ideal()` multi-track path** — The skip-if-ideal function has a multi-track audio/subtitle code path that is untested (requires ideal multi-track source).
+13. **`check_skip_if_ideal()` multi-track path** — The skip-if-ideal function has a multi-track audio/subtitle code path that is untested (requires ideal multi-track source).
 
-15. **`build_subtitle_plan()` unit tests** — Complex subtitle selection (forced detection, SDH filtering, language preference, max-tracks limiting).
+14. **`build_subtitle_plan()` unit tests** — Complex subtitle selection (forced detection, SDH filtering, language preference, max-tracks limiting).
 
-16. **`realpath_fallback()` unit tests** — Cross-platform path resolution. A direct test with symlinks, relative paths, and non-existent files would improve portability confidence.
+15. **`realpath_fallback()` unit tests** — Cross-platform path resolution. A direct test with symlinks, relative paths, and non-existent files would improve portability confidence.
 
-17. **`_validate_media_file()` unit tests** — Beyond empty-file and non-readable tests, validate behavior with video-only, audio-only, and other unusual layouts.
+16. **`_validate_media_file()` unit tests** — Beyond empty-file and non-readable tests, validate behavior with video-only, audio-only, and other unusual layouts.
 
-18. **`DEBUG=1` mode** — Running a fast suite with `DEBUG=1` as a smoke test would catch cases where debug tracing breaks parsing or output.
+17. **`DEBUG=1` mode** — Running a fast suite with `DEBUG=1` as a smoke test would catch cases where debug tracing breaks parsing or output.
 
-19. **`AUDIO_CODEC_PREFERENCE` custom ordering** — A config-file override of `AUDIO_CODEC_PREFERENCE` is not tested to verify user-customized rankings propagate correctly.
+18. **`AUDIO_CODEC_PREFERENCE` custom ordering** — A config-file override of `AUDIO_CODEC_PREFERENCE` is not tested to verify user-customized rankings propagate correctly.
 
-20. **`--preset` validation boundary** — CLI parser rejection of `--preset bogus` with proper error message could use an explicit test.
+19. **`--preset` validation boundary** — CLI parser rejection of `--preset bogus` with proper error message could use an explicit test.
 
-21. **`ffmpeg_has_muxer()` unit tests** — Container format support detection with known-good and known-bad muxer names.
+20. **`ffmpeg_has_muxer()` unit tests** — Container format support detection with known-good and known-bad muxer names.
 
-22. **`_get_source_duration_secs()` three-tier lookup** — Duration detection from stream, format, and Matroska tags. A synthetic MKV with only Matroska DURATION tags would test tier 3 specifically.
+21. **`_get_source_duration_secs()` three-tier lookup** — Duration detection from stream, format, and Matroska tags. A synthetic MKV with only Matroska DURATION tags would test tier 3 specifically.
 
-23. **`_check_hdr10_static_metadata()` unit tests** — Detection of mastering display and content light level data. Currently only exercised via real DV sources.
+22. **`_check_hdr10_static_metadata()` unit tests** — Detection of mastering display and content light level data. Currently only exercised via real DV sources.
 
 **Lower Priority:**
 
-24. **Multi-pass config layering with profile conflicts** — Test where user config sets a profile, project config overrides a conflicting variable, and CLI adds another conflict. Verify all expected warnings.
+23. **Multi-pass config layering with profile conflicts** — Test where user config sets a profile, project config overrides a conflicting variable, and CLI adds another conflict. Verify all expected warnings.
 
-25. **Bash version guard** — Verify running under bash 3.2 produces the expected error message and exit.
+24. **Bash version guard** — Verify running under bash 3.2 produces the expected error message and exit.
 
-26. **Progress bar / spinner functions** — `ffmpeg_progress_bar()`, `run_with_spinner()`, and `spinner()` are UI functions. Smoke-test coverage (verify no error when called) would help.
+25. **Progress bar / spinner functions** — `ffmpeg_progress_bar()`, `run_with_spinner()`, and `spinner()` are UI functions. Smoke-test coverage (verify no error when called) would help.
 
-27. **Disk space preflight (`disk_free_warn`)** — Difficult to automate (requires a nearly-full volume) but could be mocked.
+26. **Disk space preflight (`disk_free_warn`)** — Difficult to automate (requires a nearly-full volume) but could be mocked.
 
-28. **macOS APFS hidden flag** — `chflags nohidden` after atomic move. Only testable on macOS with APFS.
+27. **macOS APFS hidden flag** — `chflags nohidden` after atomic move. Only testable on macOS with APFS.
 
-29. **`_detect_mp4box()` cross-platform** — Detect MP4Box (macOS) vs mp4box (Linux). Could be tested by mocking PATH.
+28. **`_detect_mp4box()` cross-platform** — Detect MP4Box (macOS) vs mp4box (Linux). Could be tested by mocking PATH.
 
 ---
 

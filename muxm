@@ -101,6 +101,8 @@ declare -i _H264_HDR_WARN_PENDING=0
 
 declare -i _OUTPUT_EXT_EXPLICIT=0   # 1 when --output-ext was explicitly passed on the CLI
 declare -i _CLI_SUB_BURN_FORCED=0   # 1 when --sub-burn-forced was explicitly passed on CLI
+declare -i _CLI_CRF_EXPLICIT=0      # 1 when --crf was explicitly passed on the CLI
+declare -i _CLI_PRESET_EXPLICIT=0   # 1 when --preset/-p was explicitly passed on the CLI
 
 # Grep pattern for detecting DOVI container-level metadata (dvcC/dvvC box) in
 # ffprobe output. Used by verify_dv_container_record and pre-wrap checks.
@@ -2334,30 +2336,64 @@ unset _arg
 _create_config_emit() {
   local profile="$1"
 
-  # Build the set of variables that this profile explicitly sets.
-  # These will be emitted uncommented; all others stay commented.
-  #
-  # Shared base: variables set by ALL profiles (DV, container, video, audio, subs, output).
-  # Per-profile deltas add profile-specific variables on top.
-  # Space-padded set of "active" variable names for this profile.
-  # _V checks membership via: [[ "$_active" == *" VARNAME "* ]]
-  # Leading/trailing spaces ensure whole-word matching (prevents "FOO"
-  # from matching "FOO_BAR"). Each name must be space-delimited.
-  # _active tracks only CLI-overridden variables; all profile variables are written
-  # commented out by default. Only vars passed via override flags (--crf, --preset, etc.)
-  # are added to _active and emitted uncommented.
+  # Space-padded sets for O(1) whole-word membership tests:
+  #   _active            — variables to emit uncommented (profile-owned + CLI overrides)
+  #   _manually_adjusted — CLI-overridden variables whose value differs from what the
+  #                        profile set; these get a trailing "# Manually adjusted" comment.
   local _active=" "
+  local _manually_adjusted=" "
+
+  # Snapshot all _V-tracked variables before applying the profile so we can
+  # detect which ones the profile changes (those become "active" = uncommented).
+  local _snap_vars=(
+    VIDEO_CODEC CRF_VALUE PRESET_VALUE X265_PARAMS_BASE X264_PARAMS_BASE
+    LEVEL_VALUE CONSERVATIVE_VBV
+    LEVEL_VBV_4_1_MAXRATE LEVEL_VBV_4_1_BUFSIZE
+    LEVEL_VBV_5_0_MAXRATE LEVEL_VBV_5_0_BUFSIZE
+    LEVEL_VBV_5_1_MAXRATE LEVEL_VBV_5_1_BUFSIZE
+    LEVEL_VBV_5_2_MAXRATE LEVEL_VBV_5_2_BUFSIZE
+    VIDEO_COPY_IF_COMPLIANT MAX_COPY_BITRATE
+    FORCE_CHROMA_420 SDR_USE_10BIT_IF_SRC_10BIT SDR_FORCE_10BIT HDR_TARGET_PIXFMT
+    TONEMAP_HDR_TO_SDR
+    THREADS
+    DISABLE_DV ALLOW_DV_FALLBACK DV_CONVERT_TO_P81_IF_FAIL
+    AUDIO_LANG_PREF AUDIO_CODEC_PREFERENCE
+    AUDIO_MULTI_TRACK AUDIO_KEEP_COMMENTARY
+    STEREO_BITRATE MAX_AUDIO_CHANNELS ADD_STEREO_IF_MULTICH
+    EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 AUDIO_FORCE_CODEC AUDIO_LOSSLESS_PASSTHROUGH
+    SUB_LANG_PREF SUB_INCLUDE_FORCED SUB_INCLUDE_FULL SUB_INCLUDE_SDH SUB_MAX_TRACKS
+    SUB_BURN_FORCED SUB_EXPORT_EXTERNAL SUB_PRESERVE_TEXT_FORMAT
+    SUB_MULTI_TRACK
+    OUTPUT_EXT KEEP_CHAPTERS STRIP_METADATA PROFILE_COMMENT INCLUDE_AUDIO_TITLES
+    CHECKSUM SKIP_IF_IDEAL REPORT_JSON
+    FFMPEG_LOGLEVEL
+  )
+  local -A _pre_snapshot
+  local _sv
+  for _sv in "${_snap_vars[@]}"; do
+    _pre_snapshot[$_sv]="${!_sv}"
+  done
 
   # Apply the profile to populate variable values
   PROFILE_NAME="$profile"
   "apply_profile_${profile//-/_}"
 
-  # Apply CLI overrides: set variable values (globally so _V's indirect expansion sees them)
-  # and mark them active so they are emitted uncommented.
+  # Diff: mark any variable the profile changed as active (will be emitted uncommented).
+  for _sv in "${_snap_vars[@]}"; do
+    if [[ "${!_sv}" != "${_pre_snapshot[$_sv]}" ]]; then
+      [[ "$_active" != *" ${_sv} "* ]] && _active+="${_sv} "
+    fi
+  done
+
+  # Apply CLI overrides: update variable values and ensure they're active.
+  # If the profile already set a variable AND the CLI value differs, mark as "manually adjusted".
   if (( ${#_CC_OVERRIDES[@]} > 0 )); then
     local _ovr_var _ovr_val
     for _ovr_var in "${!_CC_OVERRIDES[@]}"; do
       _ovr_val="${_CC_OVERRIDES[$_ovr_var]}"
+      if [[ "$_active" == *" ${_ovr_var} "* && "${!_ovr_var}" != "$_ovr_val" ]]; then
+        [[ "$_manually_adjusted" != *" ${_ovr_var} "* ]] && _manually_adjusted+="${_ovr_var} "
+      fi
       printf -v "$_ovr_var" '%s' "$_ovr_val"
       [[ "$_active" != *" ${_ovr_var} "* ]] && _active+="${_ovr_var} "
     done
@@ -2367,15 +2403,17 @@ _create_config_emit() {
   # Uses indirect expansion (${!var}) to read the variable's current value.
   # Membership test: _active is space-padded, so *" VARNAME "* matches whole names only.
   # Usage: _V VARNAME [quoted]
-  # "quoted" wraps the value in single quotes (for strings with special chars).
+  # "quoted" wraps the value in double quotes (for strings with special chars).
   _V() {
     local var="$1" quote="${2:-}"
     local val="${!var}"
+    local suffix=""
+    [[ "$_manually_adjusted" == *" ${var} "* ]] && suffix=" # Manually adjusted"
     if [[ "$_active" == *" ${var} "* ]]; then
       if [[ "$quote" == "quoted" ]]; then
-        printf '%s="%s"\n' "$var" "$val"
+        printf '%s="%s"%s\n' "$var" "$val" "$suffix"
       else
-        printf '%s=%s\n' "$var" "$val"
+        printf '%s=%s%s\n' "$var" "$val" "$suffix"
       fi
     else
       if [[ "$quote" == "quoted" ]]; then
@@ -2776,6 +2814,36 @@ HEADER
 }
 # <<< end embedded config template >>>
 
+# _create_config_emit_multi — emit a minimal config for a comma-separated multi-profile value.
+# Outputs only the header, PROFILE_NAME (uncommented), and any CLI overrides.
+_create_config_emit_multi() {
+  local profile="$1"
+
+  cat <<'HEADER'
+# muxm project config — generated by --create-config
+# Multi-profile: each encode runs both profiles sequentially.
+# Only explicit overrides are listed; profiles handle all other settings.
+# CLI flags always override these values.
+HEADER
+  printf '# Generated: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+  echo ""
+  printf 'PROFILE_NAME="%s"\n' "$profile"
+
+  if (( ${#_CC_OVERRIDES[@]} > 0 )); then
+    echo ""
+    local _ovr_var _ovr_val
+    for _ovr_var in "${!_CC_OVERRIDES[@]}"; do
+      _ovr_val="${_CC_OVERRIDES[$_ovr_var]}"
+      # Numeric values unquoted; everything else double-quoted
+      if [[ "$_ovr_val" =~ ^[0-9]+$ ]]; then
+        printf '%s=%s\n' "$_ovr_var" "$_ovr_val"
+      else
+        printf '%s="%s"\n' "$_ovr_var" "$_ovr_val"
+      fi
+    done
+  fi
+}
+
 _create_config() {
   local scope="$1"
   local profile="${2:-atv-directplay-hq}"
@@ -2888,11 +2956,26 @@ _create_config() {
       ;;
   esac
 
-  # Validate profile
-  if ! _is_valid_profile "$profile"; then
-    printf '❌ ERROR: Unknown profile: %s\n' "$profile" >&2
-    printf '   Valid profiles: %s\n' "$(_valid_profiles_display)" >&2
-    exit 11
+  # Detect multi-profile (comma-separated) and validate accordingly
+  local _cc_is_multi=0
+  if [[ "$profile" == *,* ]]; then
+    _cc_is_multi=1
+    local _cc_mp _cc_mp_list=()
+    IFS=',' read -ra _cc_mp_list <<< "$profile"
+    for _cc_mp in "${_cc_mp_list[@]}"; do
+      [[ -z "$_cc_mp" ]] && { printf '❌ ERROR: Empty profile name in list: %s\n' "$profile" >&2; exit 11; }
+      if ! _is_valid_profile "$_cc_mp"; then
+        printf '❌ ERROR: Unknown profile: %s\n' "$_cc_mp" >&2
+        printf '   Valid profiles: %s\n' "$(_valid_profiles_display)" >&2
+        exit 11
+      fi
+    done
+  else
+    if ! _is_valid_profile "$profile"; then
+      printf '❌ ERROR: Unknown profile: %s\n' "$profile" >&2
+      printf '   Valid profiles: %s\n' "$(_valid_profiles_display)" >&2
+      exit 11
+    fi
   fi
 
   # Check for existing file (refuse unless --force-create-config)
@@ -2915,7 +2998,11 @@ _create_config() {
   fi
 
   # Generate the config file
-  _create_config_emit "$profile" > "$target_path"
+  if (( _cc_is_multi )); then
+    _create_config_emit_multi "$profile" > "$target_path"
+  else
+    _create_config_emit "$profile" > "$target_path"
+  fi
 
   printf '✅ Created %s config → %s\n' "$profile" "$target_path"
   if (( ${#_CC_OVERRIDES[@]} > 0 )); then
@@ -2924,22 +3011,29 @@ _create_config() {
   printf '   Profile: %s\n' "$profile"
   printf '   Scope:   %s\n' "$scope"
   printf '\n'
-  printf '   Profile-specific variables are uncommented and active.\n'
-  printf '   All other variables are commented — uncomment to customize.\n'
-  printf '   CLI flags always override config-file values.\n'
-  printf '\n'
 
-  # Report detected subtitle OCR tools
-  local _det_ocr=""
-  if command -v pgsrip >/dev/null 2>&1; then _det_ocr="pgsrip"; fi
-  if command -v sub2srt >/dev/null 2>&1; then _det_ocr="${_det_ocr:+$_det_ocr, }sub2srt"; fi
-  if [[ -n "$_det_ocr" ]]; then
-    printf '   🔍 Detected OCR tools: %s\n' "$_det_ocr"
-    printf '      SUB_ENABLE_OCR and SUB_OCR_TOOL set automatically.\n'
+  if (( _cc_is_multi )); then
+    printf '   Multi-profile config — only PROFILE_NAME and explicit overrides written.\n'
+    printf '   Each encode will run all listed profiles sequentially.\n'
+    printf '   CLI flags always override config-file values.\n'
   else
-    printf '   ⚠️  No subtitle OCR tools detected (pgsrip, sub2srt).\n'
-    printf '      PGS/bitmap subtitles will be dropped unless you install one.\n'
-    printf '      Run: muxm --install-dependencies\n'
+    printf '   Profile-specific variables are uncommented and active.\n'
+    printf '   All other variables are commented — uncomment to customize.\n'
+    printf '   CLI flags always override config-file values.\n'
+    printf '\n'
+
+    # Report detected subtitle OCR tools
+    local _det_ocr=""
+    if command -v pgsrip >/dev/null 2>&1; then _det_ocr="pgsrip"; fi
+    if command -v sub2srt >/dev/null 2>&1; then _det_ocr="${_det_ocr:+$_det_ocr, }sub2srt"; fi
+    if [[ -n "$_det_ocr" ]]; then
+      printf '   🔍 Detected OCR tools: %s\n' "$_det_ocr"
+      printf '      SUB_ENABLE_OCR and SUB_OCR_TOOL set automatically.\n'
+    else
+      printf '   ⚠️  No subtitle OCR tools detected (pgsrip, sub2srt).\n'
+      printf '      PGS/bitmap subtitles will be dropped unless you install one.\n'
+      printf '      Run: muxm --install-dependencies\n'
+    fi
   fi
   exit 0
 }
@@ -3439,6 +3533,10 @@ _run_multi_profiles() {
     _user_dir="$(dirname "$_user_out")"
     _user_base="$(basename "$_user_out")"
     _user_stem="${_user_base%.*}"
+    local _user_ext="${_user_base##*.}"
+    # Normalise and keep only recognised container extensions
+    _user_ext="${_user_ext,,}"
+    [[ "$_user_ext" =~ ^(mp4|m4v|mov|mkv)$ ]] || _user_ext=""
     _out_stem_full="${_user_dir}/${_user_stem}"
     _user_provided=1
   else
@@ -3461,8 +3559,16 @@ _run_multi_profiles() {
   local _mp _prof_ext
   for _mp in "${_MULTI_PROFILES[@]}"; do
     _prof_ext="$(_probe_profile_ext "$_mp")"
-    # Passthrough profiles set OUTPUT_EXT="" — fall back to source extension
-    [[ -z "$_prof_ext" ]] && _prof_ext="$_src_ext"
+    # Passthrough profiles set OUTPUT_EXT="" — fall back to user extension (if
+    # the user specified an explicit output filename with a recognised container
+    # extension) or the source extension.
+    if [[ -z "$_prof_ext" ]]; then
+      if (( _user_provided )) && [[ -n "${_user_ext:-}" ]]; then
+        _prof_ext="$_user_ext"
+      else
+        _prof_ext="$_src_ext"
+      fi
+    fi
     _prof_ext="${_prof_ext,,}"
     _prof_exts+=("$_prof_ext")
     _child_outs+=("${_out_stem_full}.${_mp}.${_prof_ext}")
@@ -3597,9 +3703,9 @@ while [[ $# -gt 0 ]]; do
       shift 2 ;;
     --threads) THREADS="${2:-}"; shift 2 ;;
 
-    --crf) CRF_VALUE="${2:-}"; shift 2 ;;
+    --crf) CRF_VALUE="${2:-}"; _CLI_CRF_EXPLICIT=1; shift 2 ;;
     -p|--preset)
-      PRESET_VALUE="${2:-}"
+      PRESET_VALUE="${2:-}"; _CLI_PRESET_EXPLICIT=1
       is_valid_preset "$PRESET_VALUE" || die 11 "Invalid preset: $PRESET_VALUE"
       shift 2
       ;;
@@ -4764,6 +4870,16 @@ check_skip_if_ideal() {
     ideal=0; reason="${#EXT_SUB_PATHS[@]} external subtitle(s) need to be muxed in"
   fi
 
+  # ---- CLI quality override checks ----
+  # If the user explicitly requested a different CRF or preset on the CLI, the source
+  # cannot be considered ideal — skip-if-ideal must not suppress a quality override.
+  if (( ideal )) && (( _CLI_CRF_EXPLICIT )); then
+    ideal=0; reason="CRF explicitly set on CLI (--crf ${CRF_VALUE})"
+  fi
+  if (( ideal )) && (( _CLI_PRESET_EXPLICIT )); then
+    ideal=0; reason="preset explicitly set on CLI (--preset ${PRESET_VALUE})"
+  fi
+
   if (( ideal )); then
     # ---- Build validated stream keep-lists for the remux ----
     # Multi-track profiles reuse their existing filter functions (which already
@@ -5344,6 +5460,16 @@ _video_is_copy_compliant() {
   local src_codec src_pix
   src_codec="$(_lower "$(_probe_field codec_name)")"
   src_pix="$(_lower "$(_probe_field pix_fmt)")"
+
+  # CLI overrides: explicit --crf or --preset forces a re-encode regardless of compliance
+  if (( _CLI_CRF_EXPLICIT )); then
+    _COPY_REJECT_REASON="CRF explicitly set on CLI (--crf ${CRF_VALUE})"
+    return 1
+  fi
+  if (( _CLI_PRESET_EXPLICIT )); then
+    _COPY_REJECT_REASON="preset explicitly set on CLI (--preset ${PRESET_VALUE})"
+    return 1
+  fi
 
   # Check codec match
   if [[ "$VIDEO_CODEC" == "libx265" && "$src_codec" != "hevc" ]]; then
@@ -8415,7 +8541,6 @@ mux_final() {
     _pcomment="$(_profile_comment)"
     if [[ -n "$_pcomment" ]]; then
       ff_codec+=( -metadata "comment=$_pcomment" )
-      note "Metadata comment: $_pcomment"
       report_add "comment" "$_pcomment"
     fi
   fi
@@ -8563,6 +8688,18 @@ main() {
     # Extract detailed DV source info (profile, compat_id, layer flags)
     detect_dv_info
 
+    # Validate output container supports DV muxing before starting any encode.
+    # ffmpeg can read DV from MOV but cannot reliably write DV signalling back
+    # into MOV. Only MP4 and MKV are supported.
+    case "${OUTPUT_EXT,,}" in
+      mp4|m4v|mkv) ;;
+      *)
+        die 11 "Dolby Vision detected but output container .${OUTPUT_EXT} is not supported for DV muxing by ffmpeg.
+   Either switch to a supported container (--output-ext mkv or --output-ext mp4)
+   or disable DV handling (--no-dv) to proceed without DV metadata."
+        ;;
+    esac
+
     # Warn if hdr10-hq profile will strip DV from a source without HDR10 fallback metadata.
     # DV-only sources (especially P5 and some P7) may lack mastering display / MaxCLL data,
     # which causes dim or washed-out playback when DV is stripped and only HDR10 remains.
@@ -8586,6 +8723,46 @@ main() {
     IS_DV=0
     note "No Dolby Vision detected."
     report_add "dv_detected" "false"
+  fi
+
+  # Warn: ASS/SSA subtitles + MP4 container + SUB_PRESERVE_TEXT_FORMAT=1
+  # ASS/SSA native format cannot be carried by MP4; subtitles will be flattened to mov_text.
+  if (( SUB_PRESERVE_TEXT_FORMAT )) && [[ "${OUTPUT_EXT,,}" == "mp4" || "${OUTPUT_EXT,,}" == "m4v" ]]; then
+    local _has_ass_sub=0
+    local _acs_i
+    for _acs_i in "${!ALL_SUB_CODECS[@]}"; do
+      case "${ALL_SUB_CODECS[$_acs_i]}" in
+        ass|ssa) _has_ass_sub=1; break ;;
+      esac
+    done
+    if (( _has_ass_sub )); then
+      warn "ASS/SSA subtitle preservation requested (SUB_PRESERVE_TEXT_FORMAT=1) but output container .${OUTPUT_EXT,,} cannot carry native ASS. Subtitles will be converted to mov_text (plain text — formatting, positioning, and styling will be lost)."
+    fi
+  fi
+
+  # Warn: lossless audio passthrough + MP4 container with codecs that have limited MP4 support
+  # TrueHD/DTS-HD MA cannot be muxed into MP4; FLAC can be muxed but has limited device playback support.
+  if (( AUDIO_LOSSLESS_PASSTHROUGH )) && [[ "${OUTPUT_EXT,,}" == "mp4" || "${OUTPUT_EXT,,}" == "m4v" ]]; then
+    local _has_problematic_lossless=0
+    local _alp_n _alp_i _alp_codec _alp_profile
+    _alp_n="$(_audio_stream_count)"
+    for (( _alp_i=0; _alp_i<_alp_n; _alp_i++ )); do
+      _alp_codec="$(_audio_field "$_alp_i" codec_name)"
+      _alp_codec="${_alp_codec,,}"
+      case "$_alp_codec" in
+        truehd|mlp|flac)
+          _has_problematic_lossless=1; break ;;
+        dts|dca)
+          _alp_profile="$(_audio_field "$_alp_i" profile)"
+          if [[ "${_alp_profile,,}" == *"hd ma"* ]]; then
+            _has_problematic_lossless=1; break
+          fi
+          ;;
+      esac
+    done
+    if (( _has_problematic_lossless )); then
+      warn "Lossless audio passthrough enabled but output container .${OUTPUT_EXT,,} has limited lossless playback support. TrueHD/FLAC tracks may not play on most devices. Consider --output-ext mkv for full lossless compatibility."
+    fi
   fi
 
   # Decide color space and build x265 params
