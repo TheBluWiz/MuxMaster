@@ -1,6 +1,6 @@
 # MuxMaster (muxm) Testing Plan
 
-**Version:** v1.2.0
+**Version:** v1.3.0
 **Date:** 2026-03-29
 **Scope:** Comprehensive feature coverage — automated test harness + manual testing checklist
 
@@ -8,13 +8,13 @@
 
 ## Overview
 
-muxm has grown to include 6 format profiles, 70+ CLI flags, layered configuration precedence, and pipelines for video (including DV/HDR), audio (scoring, multi-track, transcoding, stereo fallback), subtitles (selection, burn-in, OCR, multi-track, external export), and output (chapters, metadata, checksum, JSON reports, source replacement). This plan covers every testable surface.
+muxm has grown to include 8 format profiles, 70+ CLI flags, layered configuration precedence, and pipelines for video (including DV/HDR), audio (scoring, multi-track, transcoding, stereo fallback), subtitles (selection, burn-in, OCR, multi-track, external export), and output (chapters, metadata, checksum, JSON reports, source replacement). This plan covers every testable surface.
 
 ### Testing Artifacts
 
 | File | Purpose |
 |------|---------|
-| `test_muxm.sh` | Automated test harness v2.0 — generates synthetic media, runs ~600 assertions across 19 suites |
+| `test_muxm.sh` | Automated test harness v2.0 — generates synthetic media, runs ~750 assertions across 22 suites |
 | This document | Manual testing procedures for features that require real media or subjective verification; identifies ~100 additional test cases for new features |
 
 ### Running the Automated Tests
@@ -32,8 +32,9 @@ muxm has grown to include 6 format profiles, 70+ CLI flags, layered configuratio
 ./test_muxm.sh --muxm ./muxm --verbose
 
 # Available suites: all, cli, toggles, unit, completions, setup, config, profiles,
-#                   conflicts, collision, dryrun, video, hdr, audio, subs, output,
-#                   containers, metadata, edge, e2e
+#                   conflicts, collision, dryrun, video, hdr, audio, subs, ext_subs,
+#                   output, containers, metadata, edge, e2e, disk_preflight,
+#                   multi_profile
 ```
 
 ### Prerequisites

@@ -8,6 +8,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com), and this 
 
 ### Added
 
+### Changed
+
+### Fixed
+
+## [1.3.0] - 2026-03-29
+
+### Added
+
 - **New profile `youtube-upload`** — H.264 high-profile master-quality encode for YouTube ingestion. CRF 16, preset `slow`, x264 params `profile=high:rc-lookahead=60:aq-mode=2:aq-strength=1.0`. Forces AAC stereo at 256 k, burns forced subtitles, exports full subtitles as external SRT sidecars, strips non-essential metadata, keeps chapters. No tone-mapping (YouTube processes HDR natively); HDR10 metadata is preserved as-is. Container: MP4. DV layer disabled. Registered in `--help`, embedded and installed man pages, tab completions, `--create-config`, and conflict warnings (warns on `--audio-lossless-passthrough` and `--output-ext mkv`).
 - **`X264_PARAMS_BASE`** — New configuration variable (default empty) for advanced x264 parameter tuning, analogous to `X265_PARAMS_BASE`. The `youtube-upload` profile sets it to `profile=high:rc-lookahead=60:aq-mode=2:aq-strength=1.0`. Passed to ffmpeg via `-x264-params` when non-empty. Registered in `--print-effective-config`, `--create-config` template, and the new `--x264-params` CLI flag.
 - **`--x264-params STR`** — CLI flag to override `X264_PARAMS_BASE` at the command line, matching the existing `--x265-params` flag. Registered in the man page.
