@@ -1345,9 +1345,12 @@ _test_config_create_overrides() {
 
   # No overrides: profile-set variables should be uncommented; vars the profile
   # doesn't touch should remain commented.
+  # Use isolated HOME to prevent the real ~/.muxmrc from pre-setting variables to
+  # the same values the profile uses — which would make the snapshot diff invisible.
   local cfg_nooverride_dir="$TESTDIR/config_create_no_override"
-  mkdir -p "$cfg_nooverride_dir"
-  run_muxm_in "$cfg_nooverride_dir" --create-config project atv-directplay-hq >/dev/null 2>&1
+  local cfg_nooverride_home="$TESTDIR/config_create_no_override_home"
+  mkdir -p "$cfg_nooverride_dir" "$cfg_nooverride_home"
+  MUXM_HOME="$cfg_nooverride_home" run_muxm_in "$cfg_nooverride_dir" --create-config project atv-directplay-hq >/dev/null 2>&1
   if [[ -f "$cfg_nooverride_dir/.muxmrc" ]]; then
     content="$(cat "$cfg_nooverride_dir/.muxmrc")"
     # atv-directplay-hq sets CRF_VALUE=17 — should be uncommented with no CLI override

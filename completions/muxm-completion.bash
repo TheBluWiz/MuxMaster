@@ -13,7 +13,7 @@ _muxm_completions() {
             COMPREPLY=( $(compgen -W "archive hdr10-hq atv-directplay-hq atv-directplay-animation streaming animation universal" -- "$cur") )
             return ;;
         --video-codec)
-            COMPREPLY=( $(compgen -W "libx265 libx264" -- "$cur") )
+            COMPREPLY=( $(compgen -W "libx265 libx264 libsvt-av1 libaom-av1" -- "$cur") )
             return ;;
         --output-ext)
             COMPREPLY=( $(compgen -W "mp4 mkv m4v mov" -- "$cur") )
@@ -33,6 +33,7 @@ _muxm_completions() {
 
         # Flags that take a free-form value — offer no completion, fall through to files
         --crf|--stereo-bitrate|--threads|-l|--level|--x265-params|\
+        --av1-params|--av1-maxrate|--av1-bufsize|\
         --audio-track|--audio-lang-pref|--audio-force-codec|\
         --max-copy-bitrate|--sub-lang-pref|--ocr-lang|--ext-subs-dir)
             COMPREPLY=()
@@ -59,6 +60,7 @@ _muxm_completions() {
             --create-config --force-create-config
 
             --crf -p --preset --x265-params -l --level
+            --av1-params --av1-maxrate --av1-bufsize
             --video-codec --tonemap --no-tonemap
             --sdr-force-10bit --no-sdr-force-10bit
             --conservative-vbv --no-conservative-vbv
@@ -76,6 +78,7 @@ _muxm_completions() {
             --sub-burn-forced --no-sub-burn-forced
             --sub-export-external --no-sub-export-external
             --sub-preserve-format --no-sub-preserve-format
+            --sub-preserve-bitmap --no-sub-preserve-bitmap
             --sub-lang-pref --no-sub-sdh --no-subtitles
             --ocr-lang --no-ocr --ocr-tool
             --ext-subs --no-ext-subs --ext-subs-dir

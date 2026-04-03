@@ -167,11 +167,13 @@ Video quality CRF (lower = higher quality). Typical: 16\(en22.
 .BR \-p ", " \-\-preset " " \fINAME\fR
 Encoder preset: ultrafast \fIto\fR placebo. Default: slower.
 .TP
-.BR \-\-video\-codec " " libx265|libx264
-Video encoder. Default: libx265.
+.BR \-\-video\-codec " " libx265|libx264|libsvt\-av1|libaom\-av1
+Video encoder. Default: libx265 (HEVC). Use \fBlibsvt\-av1\fR for SVT\-AV1
+or \fBlibaom\-av1\fR for libaom AV1.
 .TP
 .BR \-l ", " \-\-level " " \fIN\fR
-x265 level\-idc (e.g., 5.1).
+x265 level\-idc (e.g., 5.1). Not applied for AV1 codecs — AV1 level
+selection is handled by the encoder automatically.
 .TP
 .BR \-\-x265\-params " " \fISTR\fR
 Advanced x265 parameter string.
@@ -181,6 +183,19 @@ Advanced x264 parameter string (used by
 .B youtube\-upload
 profile; e.g.,
 .BR "profile=high:rc-lookahead=60:aq-mode=2:aq-strength=1.0" ).
+.TP
+.BR \-\-av1\-params " " \fISTR\fR
+SVT\-AV1 parameter string passed via \fB\-svtav1\-params\fR. Colon\-separated
+key=value pairs (e.g., \fBfilm\-grain=0:enable\-overlays=1:scd=1\fR).
+Only used when \fB\-\-video\-codec libsvt\-av1\fR is selected.
+.TP
+.BR \-\-av1\-maxrate " " \fIRATE\fR
+Optional peak bitrate cap for AV1 encodes (e.g., \fB20000k\fR). Passed
+as \fB\-maxrate\fR to ffmpeg. Leave empty (default) for unconstrained CRF.
+.TP
+.BR \-\-av1\-bufsize " " \fISIZE\fR
+VBV buffer size for AV1 rate control (e.g., \fB40000k\fR). Passed as
+\fB\-bufsize\fR to ffmpeg. Typically set together with \fB\-\-av1\-maxrate\fR.
 .TP
 .BR \-\-tonemap " , " \-\-no\-tonemap
 Enable/disable HDR/HLG to SDR tone\-mapping.
@@ -331,6 +346,21 @@ ASS/SSA subtitles are converted to plain\-text SRT.
 The
 .B animation
 profile enables this by default.
+.TP
+.BR \-\-sub\-preserve\-bitmap " , " \-\-no\-sub\-preserve\-bitmap
+Preserve/discard PGS bitmap subtitles via stream\-copy when the output
+container supports them (MKV).
+When enabled (the default), PGS tracks are stream\-copied as\-is into
+MKV output with no OCR; the
+.B copy
+codec is used for the subtitle stream.
+When disabled, PGS tracks follow the normal OCR pipeline
+.RB ( \-\-no\-ocr
+or missing OCR tool will skip them entirely).
+Has no effect for MP4/MOV output (PGS cannot be carried in those
+containers) and is ignored when
+.B \-\-sub\-burn\-forced
+is active.
 .TP
 .BR \-\-ocr\-tool " " \fITOOL\fR
 OCR backend: pgsrip or sub2srt.
@@ -742,6 +772,7 @@ Major variable groups:
 .BR SUB_LANG_PREF ", " SUB_INCLUDE_FORCED ", " SUB_INCLUDE_FULL ", "
 .BR SUB_INCLUDE_SDH ", " SUB_MAX_TRACKS ", " SUB_BURN_FORCED ", "
 .BR SUB_EXPORT_EXTERNAL ", " SUB_PRESERVE_TEXT_FORMAT ", "
+.BR SUB_PRESERVE_BITMAP ", "
 .BR SUB_ENABLE_OCR ", " SUB_OCR_TOOL ", "
 .BR SUB_OCR_LANG .
 .TP
