@@ -203,6 +203,7 @@ declare -i INCLUDE_AUDIO_TITLES=1  # Generate descriptive titles for audio strea
 
 # ---- Operational defaults
 declare -i CHECKSUM=0
+CHECKSUM_ALGO="sha256"  # Checksum algorithm: sha256 | blake2b | auto (auto prefers b2sum, falls back to sha256)
 declare -i DRY_RUN=0
 declare -i KEEP_TEMP=0
 declare -i KEEP_TEMP_ALWAYS=0
@@ -604,17 +605,43 @@ filesize_pretty(){
 write_checksum(){
   local p="$1"
   local -a cmd=()
-  if command -v sha256sum >/dev/null 2>&1; then
-    cmd=(sha256sum)
-  elif command -v shasum >/dev/null 2>&1; then
-    cmd=(shasum -a 256)
-  else
-    warn "Checksum tool not found"; return 0
-  fi
-  note "Writing checksum → ${p}.sha256"
-  "${cmd[@]}" "$p" > "${p}.sha256" &
+  local ext spinner_msg
+
+  case "${CHECKSUM_ALGO:-sha256}" in
+    blake2b)
+      if command -v b2sum >/dev/null 2>&1; then
+        cmd=(b2sum); ext="b2"; spinner_msg="Computing BLAKE2b checksum"
+      else
+        warn "b2sum not found; cannot write BLAKE2b checksum"; return 0
+      fi
+      ;;
+    auto)
+      if command -v b2sum >/dev/null 2>&1; then
+        cmd=(b2sum); ext="b2"; spinner_msg="Computing BLAKE2b checksum"
+      elif command -v sha256sum >/dev/null 2>&1; then
+        cmd=(sha256sum); ext="sha256"; spinner_msg="Computing SHA-256 checksum"
+      elif command -v shasum >/dev/null 2>&1; then
+        cmd=(shasum -a 256); ext="sha256"; spinner_msg="Computing SHA-256 checksum"
+      else
+        warn "Checksum tool not found"; return 0
+      fi
+      ;;
+    sha256|*)
+      if command -v sha256sum >/dev/null 2>&1; then
+        cmd=(sha256sum)
+      elif command -v shasum >/dev/null 2>&1; then
+        cmd=(shasum -a 256)
+      else
+        warn "Checksum tool not found"; return 0
+      fi
+      ext="sha256"; spinner_msg="Computing SHA-256 checksum"
+      ;;
+  esac
+
+  note "Writing checksum → ${p}.${ext}"
+  "${cmd[@]}" "$p" > "${p}.${ext}" &
   local _cksum_pid=$!
-  spinner "$_cksum_pid" "Computing SHA-256 checksum"
+  spinner "$_cksum_pid" "$spinner_msg"
   wait "$_cksum_pid" 2>/dev/null
 }
 
@@ -687,7 +714,7 @@ for _pcd_v in \
   SUB_BURN_FORCED SUB_EXPORT_EXTERNAL SUB_PRESERVE_TEXT_FORMAT \
   SUB_MULTI_TRACK \
   OUTPUT_EXT KEEP_CHAPTERS STRIP_METADATA PROFILE_COMMENT INCLUDE_AUDIO_TITLES \
-  CHECKSUM SKIP_IF_IDEAL REPORT_JSON \
+  CHECKSUM CHECKSUM_ALGO SKIP_IF_IDEAL REPORT_JSON \
   FFMPEG_LOGLEVEL; do
   _MUXM_PRE_CONFIG[$_pcd_v]="${!_pcd_v}"
 done
@@ -2087,6 +2114,9 @@ _muxm_completions() {
         --create-config|--force-create-config)
             COMPREPLY=( $(compgen -W "system user project" -- "$cur") )
             return ;;
+        --checksum-algo)
+            COMPREPLY=( $(compgen -W "sha256 blake2b auto" -- "$cur") )
+            return ;;
 
         # Flags that take a free-form value — offer no completion, fall through to files
         --crf|--stereo-bitrate|--threads|-l|--level|--x265-params|\
@@ -2149,7 +2179,7 @@ _muxm_completions() {
             --profile-comment --no-profile-comment
             --skip-if-ideal --no-skip-if-ideal
             --report-json --no-report-json
-            --checksum --no-checksum
+            --checksum --no-checksum --checksum-algo
             --disk-check --no-disk-check
             --no-overwrite
             --replace-source --force-replace-source
@@ -2429,7 +2459,7 @@ _create_config_emit() {
     SUB_BURN_FORCED SUB_EXPORT_EXTERNAL SUB_PRESERVE_TEXT_FORMAT
     SUB_MULTI_TRACK
     OUTPUT_EXT KEEP_CHAPTERS STRIP_METADATA PROFILE_COMMENT INCLUDE_AUDIO_TITLES
-    CHECKSUM SKIP_IF_IDEAL REPORT_JSON
+    CHECKSUM CHECKSUM_ALGO SKIP_IF_IDEAL REPORT_JSON
     FFMPEG_LOGLEVEL
   )
   local _sv
@@ -2840,8 +2870,11 @@ HEADER
   echo "# Operational controls"
   echo "# ========================="
   echo ""
-  echo "# Write a SHA-256 checksum next to final output"
+  echo "# Write a checksum next to final output (algorithm set by CHECKSUM_ALGO)"
   _V CHECKSUM
+  echo ""
+  echo "# Checksum algorithm: sha256 | blake2b | auto (auto prefers b2sum, falls back to sha256)"
+  _V CHECKSUM_ALGO
   echo ""
   echo "# Dry-run: plan the steps without generating real outputs"
   printf '#DRY_RUN=0\n'
@@ -2955,6 +2988,7 @@ _create_config() {
       --no-disk-check)              _CC_OVERRIDES[DISK_CHECK]=0;                                                                       _cc_oi=$((_cc_oi+1)) ;;
       --checksum)                   _CC_OVERRIDES[CHECKSUM]=1;                                                                         _cc_oi=$((_cc_oi+1)) ;;
       --no-checksum)                _CC_OVERRIDES[CHECKSUM]=0;                                                                         _cc_oi=$((_cc_oi+1)) ;;
+      --checksum-algo)              _CC_OVERRIDES[CHECKSUM_ALGO]="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[CHECKSUM]=1;      _cc_oi=$((_cc_oi+2)) ;;
       # Encoding params
       --x265-params)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[X265_PARAMS_BASE]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
       --x264-params)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[X264_PARAMS_BASE]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
@@ -3771,6 +3805,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1; shift ;;
     --checksum) CHECKSUM=1; shift ;;
     --no-checksum) CHECKSUM=0; shift ;;
+    --checksum-algo) CHECKSUM_ALGO="${2:-}"; CHECKSUM=1; shift 2 ;;
     --disk-check) DISK_CHECK=1; shift ;;
     --no-disk-check) DISK_CHECK=0; shift ;;
 
@@ -3888,6 +3923,12 @@ while [[ $# -gt 0 ]]; do
     *) POSITIONALS+=("$1"); shift ;;
   esac
 done
+
+# Validate CHECKSUM_ALGO
+case "${CHECKSUM_ALGO:-sha256}" in
+  sha256|blake2b|auto) ;;
+  *) die 11 "Invalid CHECKSUM_ALGO: \"$CHECKSUM_ALGO\". Valid values: sha256, blake2b, auto" ;;
+esac
 
 # ===== Section 13: Profile + flag conflict warnings ==========================================
 # These are warnings, not errors — the user's explicit CLI flags always win.
@@ -4280,6 +4321,7 @@ Effective config (post config-files + profile + CLI):
   DRY_RUN                   = $DRY_RUN
   DISK_CHECK                = $DISK_CHECK
   CHECKSUM                  = $CHECKSUM
+  CHECKSUM_ALGO             = $CHECKSUM_ALGO
   KEEP_TEMP                 = $KEEP_TEMP
   KEEP_TEMP_ALWAYS          = $KEEP_TEMP_ALWAYS
   REPLACE_SOURCE            = $REPLACE_SOURCE

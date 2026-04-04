@@ -549,7 +549,34 @@ sidecar files that need muxing in.
 Generate/suppress JSON report alongside output.
 .TP
 .BR \-\-checksum " , " \-\-no\-checksum
-Write/suppress SHA\-256 checksum for final output.
+Write/suppress a checksum sidecar for the final output.
+The algorithm is controlled by
+.BR \-\-checksum\-algo .
+.TP
+.BR \-\-checksum\-algo " \fIalgo\fR"
+Select the checksum algorithm.
+Allowed values:
+.BR sha256
+(default — writes a
+.I .sha256
+sidecar using
+.B sha256sum
+or
+.BR "shasum \-a 256" ),
+.BR blake2b
+(writes a
+.I .b2
+sidecar using
+.BR b2sum ),
+and
+.BR auto
+(prefers
+.B b2sum
+if available, falls back to sha256).
+Specifying
+.B \-\-checksum\-algo
+implies
+.BR \-\-checksum .
 .TP
 .BR \-\-disk\-check " , " \-\-no\-disk\-check
 Enable/disable the smart disk\-space preflight (default: on).

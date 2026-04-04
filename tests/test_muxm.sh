@@ -1061,6 +1061,15 @@ test_toggles() {
   out="$(run_muxm --max-copy-bitrate 30000k --print-effective-config)"
   assert_contains "MAX_COPY_BITRATE          = 30000k" "--max-copy-bitrate sets value" "$out"
 
+  out="$(run_muxm --checksum-algo blake2b --print-effective-config)"
+  assert_contains "CHECKSUM_ALGO             = blake2b" "--checksum-algo blake2b: registered" "$out"
+
+  out="$(run_muxm --checksum-algo sha256 --print-effective-config)"
+  assert_contains "CHECKSUM_ALGO             = sha256" "--checksum-algo sha256: registered" "$out"
+
+  out="$(run_muxm --checksum-algo auto --print-effective-config)"
+  assert_contains "CHECKSUM_ALGO             = auto" "--checksum-algo auto: registered" "$out"
+
   # ---- Default DISK_CHECK = 1 ----
   out="$(run_muxm --print-effective-config)"
   assert_contains "DISK_CHECK                = 1" "DISK_CHECK defaults to 1" "$out"
@@ -3133,6 +3142,28 @@ test_output() {
     else
       skip "--checksum: SHA-256 sidecar not found at $sha_file (check naming convention)"
     fi
+  fi
+
+  # BLAKE2b checksum (only if b2sum is available)
+  if command -v b2sum >/dev/null 2>&1; then
+    outfile="$TESTDIR/out_checksum_b2.mp4"
+    log "Testing --checksum --checksum-algo blake2b..."
+    if assert_encode "BLAKE2b checksum test encode" "$outfile" \
+         --checksum --checksum-algo blake2b --crf 28 --preset ultrafast "$TESTDIR/basic_sdr_subs.mkv"; then
+      local b2_file="${outfile}.b2"
+      if [[ -f "$b2_file" ]]; then
+        pass "--checksum-algo blake2b: .b2 sidecar created"
+        if b2sum -c "$b2_file" >/dev/null 2>&1; then
+          pass "--checksum-algo blake2b: BLAKE2b validates correctly"
+        else
+          fail "--checksum-algo blake2b: BLAKE2b does not match output file"
+        fi
+      else
+        skip "--checksum-algo blake2b: .b2 sidecar not found at $b2_file"
+      fi
+    fi
+  else
+    skip "--checksum-algo blake2b: b2sum not available on this system"
   fi
 
   # JSON report + content validation (#52)

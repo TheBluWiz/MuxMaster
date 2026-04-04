@@ -30,6 +30,9 @@ _muxm_completions() {
         --create-config|--force-create-config)
             COMPREPLY=( $(compgen -W "system user project" -- "$cur") )
             return ;;
+        --checksum-algo)
+            COMPREPLY=( $(compgen -W "sha256 blake2b auto" -- "$cur") )
+            return ;;
 
         # Flags that take a free-form value — offer no completion, fall through to files
         --crf|--stereo-bitrate|--threads|-l|--level|--x265-params|\
@@ -92,7 +95,7 @@ _muxm_completions() {
             --profile-comment --no-profile-comment
             --skip-if-ideal --no-skip-if-ideal
             --report-json --no-report-json
-            --checksum --no-checksum
+            --checksum --no-checksum --checksum-algo
             --disk-check --no-disk-check
             --no-overwrite
             --replace-source --force-replace-source

@@ -74,7 +74,7 @@ muxm --profile <name> input.mkv
 
 ### `archive` — Lossless Archival
 
-For collectors who want bit-perfect preservation. Copies video without re-encoding, keeps all matching audio and subtitle tracks via lossless stream-copy, and generates a JSON report with SHA-256 checksum. Always outputs MKV. Commentary and descriptive audio tracks are dropped by default. Language filtering is controlled by `AUDIO_LANG_PREF` and `SUB_LANG_PREF` — when empty (the default), all languages pass. Skips processing entirely if the source already matches.
+For collectors who want bit-perfect preservation. Copies video without re-encoding, keeps all matching audio and subtitle tracks via lossless stream-copy, and generates a JSON report with a checksum (SHA-256 by default; use `--checksum-algo blake2b` for BLAKE2b via `b2sum`). Always outputs MKV. Commentary and descriptive audio tracks are dropped by default. Language filtering is controlled by `AUDIO_LANG_PREF` and `SUB_LANG_PREF` — when empty (the default), all languages pass. Skips processing entirely if the source already matches.
 
 > Formerly `dv-archival`, which is still accepted as a deprecated alias.
 
@@ -178,7 +178,7 @@ When you run `muxm`, the script executes a multi-stage pipeline that inspects th
 
 **6. Final Mux.** All processed streams are assembled into the target container (MP4, MKV, M4V, or MOV) with correct codec tagging, chapter markers, subtitle disposition flags, and metadata. For Dolby Vision in MP4, `muxm` verifies that the `dvcC`/`dvvC` container signaling record is present via `MP4Box`.
 
-**7. Verification.** The output file is validated with ffprobe to confirm it's non-empty and parseable. Optionally, a SHA-256 checksum is written and a JSON report is generated documenting every decision, warning, and stream mapping from the run.
+**7. Verification.** The output file is validated with ffprobe to confirm it's non-empty and parseable. Optionally, a checksum is written (SHA-256 via `.sha256`, or BLAKE2b via `.b2` when `--checksum-algo blake2b` is used) and a JSON report is generated documenting every decision, warning, and stream mapping from the run.
 
 If any stage fails, `muxm` logs the failure, cleans up incomplete temp files, and exits with a descriptive error code. The `--dry-run` flag executes the entire decision pipeline without writing real output, so you can preview exactly what `muxm` would do before committing to an encode.
 
@@ -322,7 +322,8 @@ muxm [options] <source> [target.mp4]
 | `--sub-preserve-format` | Keep ASS/SSA subtitles in native format (MKV only; use `--no-sub-preserve-format` to force SRT conversion) |
 | `--output-ext mp4\|mkv\|m4v\|mov` | Output container |
 | `--report-json` | Generate a JSON report alongside the output file |
-| `--checksum` | Write a SHA-256 checksum file for the output |
+| `--checksum` | Write a checksum sidecar for the output (SHA-256 by default) |
+| `--checksum-algo sha256\|blake2b\|auto` | Checksum algorithm (`auto` prefers `b2sum`, falls back to sha256) |
 | `--strip-metadata` | Strip non-essential metadata |
 | `--skip-if-ideal` | Skip processing if source matches target |
 | `--replace-source` | Replace the original source file (interactive confirmation) |
@@ -416,7 +417,7 @@ Beyond profiles and the core encoding pipeline, `muxm` ships with a set of opera
 - **Conflict Warnings** – Running `--profile archive --no-dv` doesn't error out — it warns you that the combination is contradictory and proceeds with your explicit flags taking precedence. Flags that are incompatible with multi-track modes (e.g., `--audio-track`, `--audio-force-codec`, `--sub-burn-forced`) trigger a graceful demotion: multi-track mode drops to single-track mode with an informational note, and the explicit CLI flag wins. The tool trusts you but lets you know when something looks wrong.
 - **Dry-Run Mode** – `--dry-run` executes the entire decision pipeline (profile resolution, codec detection, DV identification, audio selection) and prints what it would do, without writing any output files.
 - **JSON Reporting** – `--report-json` generates a machine-readable JSON report alongside the output file, documenting every decision, warning, codec mapping, and stream disposition from the run.
-- **Checksum Verification** – Writes a SHA-256 checksum file for the output to verify integrity after transfer or archival. Enabled by default for `archive`; available for other profiles via `--checksum`.
+- **Checksum Verification** – Writes a checksum sidecar for the output to verify integrity after transfer or archival. Defaults to SHA-256 (`.sha256`); use `--checksum-algo blake2b` for BLAKE2b (`.b2`, requires `b2sum`), or `--checksum-algo auto` to prefer BLAKE2b when available. Enabled by default for `archive`; available for other profiles via `--checksum`.
 - **External Subtitle Discovery** – At startup, `muxm` automatically scans for sidecar subtitle files alongside the source: `.srt`, `.ass`, `.ssa`, `.vtt`, `.sup`, and `.idx`. Common filename conventions are recognized — `movie.en.srt`, `movie.forced.en.srt`, and similar patterns — and discovered tracks are fed into the subtitle pipeline alongside embedded streams, subject to the same language and type filters already in effect. Enabled by default; use `--no-ext-subs` to opt out, or `--ext-subs-dir` to point at a different search directory. See `man muxm` for the full filename convention reference.
 - **Man Page** – A full `muxm(1)` manual page with complete flag reference, profile documentation, and examples, accessible via `man muxm`. See [Installation → Setup Helpers](#installation) for setup commands.
 - **Tab Completion** – bash/zsh tab completion for all flags, profiles, presets, and config scopes. Completes media file extensions when providing input files. See [Installation → Setup Helpers](#installation) for setup commands.
