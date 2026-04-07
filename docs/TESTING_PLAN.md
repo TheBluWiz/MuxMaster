@@ -8,13 +8,13 @@
 
 ## Overview
 
-muxm has grown to include 8 format profiles, 70+ CLI flags, layered configuration precedence, and pipelines for video (including DV/HDR), audio (scoring, multi-track, transcoding, stereo fallback), subtitles (selection, burn-in, OCR, multi-track, external export), and output (chapters, metadata, checksum, JSON reports, source replacement). This plan covers every testable surface.
+muxm has grown to include 10 format profiles, 70+ CLI flags, layered configuration precedence, and pipelines for video (including DV/HDR/AV1), audio (scoring, multi-track, transcoding, stereo fallback), subtitles (selection, burn-in, OCR, multi-track, external export), and output (chapters, metadata, checksum, JSON reports, source replacement). This plan covers every testable surface.
 
 ### Testing Artifacts
 
 | File | Purpose |
 |------|---------|
-| `test_muxm.sh` | Automated test harness v2.0 — generates synthetic media, runs ~750 assertions across 22 suites |
+| `test_muxm.sh` | Automated test harness v2.0 — generates synthetic media, runs ~780 assertions across 22 suites |
 | This document | Manual testing procedures for features that require real media or subjective verification; identifies ~100 additional test cases for new features |
 
 ### Running the Automated Tests
@@ -175,16 +175,21 @@ Validates `--setup` runs all three sub-installers and standalone installer/unins
 | 69 | Invalid `FFPROBE_LOGLEVEL` in config | `.muxmrc` with `FFPROBE_LOGLEVEL=nonsense` → exit 11, error names variable | ✅ |
 | 70 | Deprecated `AUDIO_SCORE_LANG_BONUS_ENG` migration | Warning emitted, value propagated to `AUDIO_SCORE_LANG_BONUS` | ✅ |
 | 71 | `--ocr-tool` sets config | `--ocr-tool pgsrip` → SUB_OCR_TOOL = pgsrip in effective config | ✅ |
+| 71a | `--create-config user av1-hq` | `SVT_AV1_PARAMS_BASE` line uncommented in generated `.muxmrc` | ✅ |
+| 71b | `--create-config user streaming-av1` | Creates valid `.muxmrc` with `streaming-av1` profile name | ✅ |
 
 ### 1.6 Profile Variable Assignment (suite: `profiles`)
 
 | # | Test | Assertion | Auto |
 |---|------|-----------|------|
-| 72 | All 6 profiles accepted | Each shows in effective config | ✅ |
+| 72 | All 10 profiles accepted | Each shows in effective config | ✅ |
 | 73 | `dv-archival` defaults | VIDEO_COPY=1, SKIP_IF_IDEAL=1, REPORT_JSON=1, LOSSLESS_PASSTHROUGH=1, MKV | ✅ |
 | 74 | `hdr10-hq` defaults | DISABLE_DV=1, CRF=17, MKV | ✅ |
+| 74a | `av1-hq` defaults | VIDEO_CODEC=libsvt-av1, CRF=20, PRESET=6, MKV, LOSSLESS_PASSTHROUGH=1, CHECKSUM=1, DISABLE_DV=1 | ✅ |
 | 75 | `atv-directplay-hq` defaults | MP4, SUB_BURN_FORCED=1, SKIP_IF_IDEAL=1 | ✅ |
-| 76 | `streaming` defaults | CRF=20, preset=medium | ✅ |
+| 76 | `streaming-hevc` defaults | CRF=20, preset=medium | ✅ |
+| 76a | `streaming` deprecated alias | Same config as `streaming-hevc`; deprecation warning emitted | ✅ |
+| 76b | `streaming-av1` defaults | VIDEO_CODEC=libsvt-av1, CRF=30, MP4, DISABLE_DV=1 | ✅ |
 | 77 | `animation` defaults | CRF=16, MKV, LOSSLESS_PASSTHROUGH=1 | ✅ |
 | 78 | `universal` defaults | libx264, TONEMAP=1, KEEP_CHAPTERS=0, STRIP_METADATA=1, MP4 | ✅ |
 
@@ -230,6 +235,9 @@ Validates `--setup` runs all three sub-installers and standalone installer/unins
 | 101m | `universal` + `--dv` (DV enabled with SDR) | ⚠️ warning DV contradictory for universal | ✅ |
 | 101n | Cross: `--profile streaming --tonemap` + `--video-codec libx265` | ⚠️ SDR in HEVC is unusual (requires an active profile to trigger) | ✅ |
 | 101o | Cross: `--sub-burn-forced` + `--no-subtitles` | ⚠️ SUB_BURN_FORCED with no subs | ✅ |
+| 101p2 | `av1-hq` + DV source | Informational note: DV auto-disabled for AV1 pipeline | ✅ |
+| 101p3 | `av1-hq` profile sets DISABLE_DV | DISABLE_DV = 1 in effective config | ✅ |
+| 101p4 | `--video-codec libsvt-av1` + DV source | Note emitted that DV is auto-disabled | ✅ |
 
 ### 1.8 Collision Handling (suite: `collision`)
 

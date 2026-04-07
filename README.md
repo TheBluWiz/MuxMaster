@@ -66,7 +66,9 @@ muxm --profile <name> input.mkv
 | `archive` | Lossless preservation | Copy (no re-encode) | All tracks, lossless passthrough | Multi-track stream-copy (all types, up to 99) | Preserve |
 | `hdr10-hq` | Max HDR10 quality | HEVC CRF 17 | Lossless + stereo fallback | Single-track per type, soft subs | Strip |
 | `atv-directplay-hq` | Apple TV Direct Play | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | Burn forced; others as mov_text; PGS→OCR | P8.1 auto |
-| `streaming` | Modern HEVC streaming | HEVC CRF 20 | E-AC-3 448k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
+| `av1-hq` | High-quality AV1 archive | AV1 CRF 20, preset 6 | Lossless passthrough | Single-track per type, soft subs | Disabled (AV1 pipeline) |
+| `streaming-hevc` | Modern HEVC streaming | HEVC CRF 20 | E-AC-3 448k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
+| `streaming-av1` | AV1 streaming | AV1 CRF 30, preset 6 | Opus 192k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
 | `animation` | Anime/cartoon optimized | HEVC CRF 16, 10-bit | Lossless + stereo fallback | Multi-track stream-copy (up to 6); preserve ASS/SSA | Strip |
 | `atv-directplay-animation` | Anime for Apple TV Direct Play | HEVC CRF 16, slower, animation psy params | E-AC-3 (lossless transcoded for ATV) | Multi-track; native ASS/SSA; soft forced (MKV) | Strip |
 | `universal` | Play anywhere | H.264 SDR (tone-map HDR) | AAC stereo | Burn forced; export others as external SRT | Strip |
@@ -98,12 +100,30 @@ Targets true Direct Play on Apple TV 4K via Plex: MP4 container, HEVC Main10 wit
 muxm --profile atv-directplay-hq movie.mkv
 ```
 
-### `streaming` — Modern HEVC Streaming
+### `av1-hq` — High-Quality AV1
+
+High-fidelity AV1 encode via SVT-AV1. CRF 20, preset 6, lossless audio passthrough, MKV container, and SHA-256 checksum enabled by default. Dolby Vision is automatically disabled — the AV1 encode pipeline does not support DV muxing. Intended as a modern space-efficient alternative to `hdr10-hq` for clients with AV1 decode support.
+
+```bash
+muxm --profile av1-hq movie.mkv
+```
+
+### `streaming-hevc` — Modern HEVC Streaming
 
 Optimized for Plex, Jellyfin, and Emby on modern clients: Shield, Fire TV, Roku Ultra, smart TVs, and web browsers. HEVC CRF 20 with E-AC-3 surround at streaming-friendly bitrates, AAC stereo fallback, and soft subtitles. Always outputs MP4. Strips DV and keeps HDR10. Balances quality with file size.
 
+> Formerly `streaming`, which is still accepted as a deprecated alias.
+
 ```bash
-muxm --profile streaming movie.mkv
+muxm --profile streaming-hevc movie.mkv
+```
+
+### `streaming-av1` — AV1 Streaming
+
+AV1 streaming encode for modern clients with AV1 decode support (Fire TV Stick 4K Max, Chromecast with Google TV, web browsers). AV1 CRF 30, preset 6, Opus audio at 192k, AAC stereo fallback, soft subtitles. Always outputs MP4. Strips DV; HDR10 preserved. Delivers smaller files than `streaming-hevc` at equivalent perceptual quality on supported hardware.
+
+```bash
+muxm --profile streaming-av1 movie.mkv
 ```
 
 ### `animation` — Anime & Cartoon Optimized
@@ -307,7 +327,7 @@ muxm [options] <source> [target.mp4]
 
 | Flag | Description |
 | --- | --- |
-| `--profile NAME` | Apply a format profile (`archive`, `hdr10-hq`, `atv-directplay-hq`, `atv-directplay-animation`, `streaming`, `animation`, `universal`, `youtube-upload`) |
+| `--profile NAME` | Apply a format profile (`archive`, `hdr10-hq`, `atv-directplay-hq`, `atv-directplay-animation`, `av1-hq`, `streaming-hevc`, `streaming-av1`, `animation`, `universal`, `youtube-upload`) |
 | `--dry-run` | Simulate without writing output |
 | `--crf N` | Set video CRF value |
 | `-p, --preset NAME` | x265 encoder preset (e.g., `slow`, `medium`) |
@@ -442,13 +462,13 @@ DV processing requires `dovi_tool` and, for MP4 container signaling, `MP4Box` (g
 Probably not. If the source already matches the target profile (correct codec, container, color space, and audio layout), `muxm` skips the encode and copies/links the file. This is the Skip-if-Ideal feature — it saves time and avoids generation loss. You'll see a message indicating the skip. To force a re-encode, pass `--no-skip-if-ideal` or override a setting (e.g., `--crf 18`) so the source no longer matches.
 
 **Which profile should I use?**
-If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you want broad device compatibility across Plex/Jellyfin/Emby clients: `streaming`. If you're archiving a disc rip and want all audio and subtitle tracks preserved losslessly: `archive`. If you need it to play on everything including old hardware and phones: `universal`. For anime or cartoons: `animation`. For anime or cartoons that need to direct-play on an Apple TV: `atv-directplay-animation`. For clean HDR10 without DV complexity: `hdr10-hq`. If you're uploading to YouTube and want to give YouTube's encoder the cleanest possible source to re-encode from: `youtube-upload`. When in doubt, start with `--dry-run` to preview what a profile will do to your file.
+If you're playing through Plex on an Apple TV 4K: `atv-directplay-hq`. If you want broad device compatibility across Plex/Jellyfin/Emby clients: `streaming-hevc`. If your clients support AV1 decode (Fire TV Stick 4K Max, Chromecast with Google TV, modern browsers) and you want smaller files: `streaming-av1`. For a high-quality AV1 archive on AV1-capable hardware: `av1-hq`. If you're archiving a disc rip and want all audio and subtitle tracks preserved losslessly: `archive`. If you need it to play on everything including old hardware and phones: `universal`. For anime or cartoons: `animation`. For anime or cartoons that need to direct-play on an Apple TV: `atv-directplay-animation`. For clean HDR10 without DV complexity: `hdr10-hq`. If you're uploading to YouTube and want to give YouTube's encoder the cleanest possible source to re-encode from: `youtube-upload`. When in doubt, start with `--dry-run` to preview what a profile will do to your file.
 
 **Can I process a batch of files?**
 `muxm` is a per-file tool by design. For a batch, a simple shell loop works:
 
 ```bash
-for f in *.mkv; do muxm --profile streaming "$f"; done
+for f in *.mkv; do muxm --profile streaming-hevc "$f"; done
 ```
 
 For library-scale automation, consider pairing `muxm` with `find`, `xargs`, or a job runner like GNU Parallel.

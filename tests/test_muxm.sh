@@ -1616,6 +1616,41 @@ _test_config_create_overrides() {
   fi
   rm -f "$cfg_combo_dir/.muxmrc"
 
+  # ---- AV1 profiles ----
+
+  # --create-config user av1-hq: SVT_AV1_PARAMS_BASE should appear uncommented
+  # (av1-hq is an AV1 profile so SVT_AV1_PARAMS_BASE is a profile-owned variable)
+  local cfg_av1hq_dir="$TESTDIR/config_create_av1hq"
+  mkdir -p "$cfg_av1hq_dir"
+  MUXM_HOME="$cfg_av1hq_dir" run_muxm_in "$cfg_av1hq_dir" --create-config project av1-hq >/dev/null 2>&1
+  if [[ -f "$cfg_av1hq_dir/.muxmrc" ]]; then
+    local av1hq_content
+    av1hq_content="$(cat "$cfg_av1hq_dir/.muxmrc")"
+    assert_contains "av1-hq" "--create-config av1-hq: profile name in generated config" "$av1hq_content"
+    if echo "$av1hq_content" | grep -qE '^SVT_AV1_PARAMS_BASE'; then
+      pass "--create-config av1-hq: SVT_AV1_PARAMS_BASE uncommented (profile-owned)"
+    else
+      fail "--create-config av1-hq: SVT_AV1_PARAMS_BASE not found uncommented (got: $(echo "$av1hq_content" | grep SVT_AV1_PARAMS_BASE || echo '<not present>'))"
+    fi
+  else
+    fail "--create-config av1-hq: did not create .muxmrc"
+  fi
+  rm -f "$cfg_av1hq_dir/.muxmrc"
+
+  # --create-config project streaming-av1: should create a valid .muxmrc
+  local cfg_streamav1_dir="$TESTDIR/config_create_streaming_av1"
+  mkdir -p "$cfg_streamav1_dir"
+  run_muxm_in "$cfg_streamav1_dir" --create-config project streaming-av1 >/dev/null 2>&1
+  if [[ -f "$cfg_streamav1_dir/.muxmrc" ]]; then
+    local streamav1_content
+    streamav1_content="$(cat "$cfg_streamav1_dir/.muxmrc")"
+    assert_contains "streaming-av1" "--create-config streaming-av1: profile name in generated config" "$streamav1_content"
+    assert_contains "PROFILE_NAME" "--create-config streaming-av1: PROFILE_NAME present in config" "$streamav1_content"
+  else
+    fail "--create-config streaming-av1: did not create .muxmrc"
+  fi
+  rm -f "$cfg_streamav1_dir/.muxmrc"
+
   # --create-config with comma-separated multi-profile: should produce a minimal
   # config containing only PROFILE_NAME set to the full comma-separated string.
   local cfg_mp_dir="$TESTDIR/config_create_multiprofile"
@@ -1653,7 +1688,7 @@ test_config() {
 test_profiles() {
   section "Profile Variable Assignment"
 
-  local profiles=("archive" "hdr10-hq" "atv-directplay-hq" "atv-directplay-animation" "streaming" "animation" "universal" "youtube-upload")
+  local profiles=("archive" "hdr10-hq" "atv-directplay-hq" "atv-directplay-animation" "av1-hq" "streaming-hevc" "streaming-av1" "animation" "universal" "youtube-upload")
   local out
 
   for p in "${profiles[@]}"; do
@@ -1762,6 +1797,36 @@ test_profiles() {
   assert_contains "KEEP_CHAPTERS             = 1"           "youtube-upload: keep chapters" "$out"
   assert_contains "SKIP_IF_IDEAL             = 0"           "youtube-upload: skip-if-ideal off" "$out"
   assert_contains "profile=high"                            "youtube-upload: x264 high-profile params" "$out"
+
+  # av1-hq specifics
+  out="$(run_muxm --profile av1-hq --print-effective-config)"
+  assert_contains "VIDEO_CODEC               = libsvt-av1"  "av1-hq: SVT-AV1 codec" "$out"
+  assert_contains "CRF_VALUE                 = 20"          "av1-hq: CRF 20" "$out"
+  assert_contains "PRESET_VALUE              = 6"           "av1-hq: preset 6" "$out"
+  assert_contains "CHECKSUM                  = 1"           "av1-hq: checksum on by default" "$out"
+  assert_contains "OUTPUT_EXT                = mkv"         "av1-hq: MKV container" "$out"
+  assert_contains "DISABLE_DV                = 1"           "av1-hq: DV disabled (AV1 pipeline)" "$out"
+  assert_contains "AUDIO_LOSSLESS_PASSTHROUGH = 1"          "av1-hq: lossless audio passthrough" "$out"
+
+  # streaming-hevc specifics (canonical name for the old 'streaming' profile)
+  out="$(run_muxm --profile streaming-hevc --print-effective-config)"
+  assert_contains "streaming-hevc"                          "streaming-hevc: profile name in effective config" "$out"
+  assert_contains "CRF_VALUE                 = 20"         "streaming-hevc: CRF 20" "$out"
+  assert_contains "PRESET_VALUE              = medium"     "streaming-hevc: preset medium" "$out"
+
+  # streaming (deprecated alias): same config as streaming-hevc, deprecation notice emitted
+  out="$(run_muxm --profile streaming --print-effective-config 2>&1)"
+  assert_contains "deprecated"                              "streaming alias: emits deprecation warning" "$out"
+  assert_contains "streaming-hevc"                         "streaming alias: output mentions streaming-hevc as canonical name" "$out"
+  assert_contains "CRF_VALUE                 = 20"         "streaming alias: same CRF as streaming-hevc" "$out"
+  assert_contains "PRESET_VALUE              = medium"     "streaming alias: same preset as streaming-hevc" "$out"
+
+  # streaming-av1 specifics
+  out="$(run_muxm --profile streaming-av1 --print-effective-config)"
+  assert_contains "VIDEO_CODEC               = libsvt-av1" "streaming-av1: SVT-AV1 codec" "$out"
+  assert_contains "CRF_VALUE                 = 30"         "streaming-av1: CRF 30" "$out"
+  assert_contains "OUTPUT_EXT                = mp4"        "streaming-av1: MP4 container" "$out"
+  assert_contains "DISABLE_DV                = 1"          "streaming-av1: DV disabled" "$out"
 
   # --- Container passthrough: CLI --output-ext overrides passthrough ---
   # Passthrough profiles (archive, atv-directplay-hq, atv-directplay-animation) set OUTPUT_EXT="" by default.
@@ -1969,6 +2034,16 @@ test_conflicts() {
   # --sub-burn-forced with --no-subtitles which sets SUB_INCLUDE_FORCED=0.
   out="$(run_muxm --sub-burn-forced --no-subtitles --print-effective-config 2>&1)" || true
   assert_contains "SUB_BURN_FORCED" "cross: --sub-burn-forced + --no-subtitles warns (101o)" "$out"
+
+  # --- AV1 conflicts ---
+
+  # av1-hq profile forces DISABLE_DV=1 (AV1 pipeline does not support DV muxing)
+  out="$(run_muxm --profile av1-hq --print-effective-config)"
+  assert_contains "DISABLE_DV                = 1" "av1-hq: DISABLE_DV forced to 1" "$out"
+
+  # --video-codec libsvt-av1 with --dv should emit an informational note about DV being disabled
+  out="$(run_muxm --video-codec libsvt-av1 --dv --print-effective-config 2>&1)"
+  assert_contains "AV1" "libsvt-av1 + --dv: note mentions AV1" "$out"
 
   # --- Container passthrough: atv passthrough mode does NOT warn about MKV container ---
   # atv-directplay-hq sets OUTPUT_EXT="" (passthrough); without explicit --output-ext,

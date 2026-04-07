@@ -10,7 +10,7 @@ _muxm_completions() {
     # ---- Flags that take a specific set of values ----
     case "$prev" in
         --profile)
-            COMPREPLY=( $(compgen -W "archive hdr10-hq atv-directplay-hq atv-directplay-animation streaming animation universal" -- "$cur") )
+            COMPREPLY=( $(compgen -W "archive hdr10-hq atv-directplay-hq atv-directplay-animation streaming-hevc av1-hq streaming-av1 animation universal youtube-upload" -- "$cur") )
             return ;;
         --video-codec)
             COMPREPLY=( $(compgen -W "libx265 libx264 libsvt-av1 libaom-av1" -- "$cur") )
@@ -47,7 +47,7 @@ _muxm_completions() {
     if (( COMP_CWORD >= 3 )); then
         local pprev="${COMP_WORDS[COMP_CWORD-2]}"
         if [[ "$pprev" == "--create-config" || "$pprev" == "--force-create-config" ]]; then
-            COMPREPLY=( $(compgen -W "archive hdr10-hq atv-directplay-hq atv-directplay-animation streaming animation universal" -- "$cur") )
+            COMPREPLY=( $(compgen -W "archive hdr10-hq atv-directplay-hq atv-directplay-animation streaming-hevc av1-hq streaming-av1 animation universal youtube-upload" -- "$cur") )
             return
         fi
     fi

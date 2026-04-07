@@ -8,9 +8,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com), and this 
 
 ### Added
 
+- **AV1 (SVT-AV1) codec support** — `--video-codec libsvt-av1` enables full AV1 pipeline integration: CRF, preset, encoder params, conflict detection, disk space estimation, and config generation. Companion CLI flags: `--av1-params STR`, `--av1-maxrate KBPS`, `--av1-bufsize KBPS`.
+- **`--checksum-algo` flag** — Selects the checksum algorithm: `sha256`, `blake2b`, or `auto`. Specifying an algorithm implies `--checksum`; `auto` prefers `b2sum` and falls back to `sha256`.
+- **BLAKE2b checksum support** — `write_checksum()` now dispatches to `b2sum` when selected, writing `.b2` sidecar files alongside the output. `auto` mode uses BLAKE2b when available.
+- **`SUB_PRESERVE_BITMAP` flag** (default `1`) — Stream-copies PGS bitmap subtitles in MKV output instead of OCR'ing to text. Controlled via `--sub-preserve-bitmap` / `--no-sub-preserve-bitmap`. Backed by a new `_container_supports_bitmap_subs()` helper for container-aware subtitle handling.
+- **`tools/av1_compare.sh`** — HEVC vs AV1 quality/size benchmarking script with optional VMAF scoring.
+- **`docs/AV1_CALIBRATION.md`** — Documents the encode comparison methodology and CRF equivalence findings.
+- **`av1-hq` profile** — High-quality AV1 encode via SVT-AV1: CRF 20, preset 6, MKV container, lossless audio passthrough, SHA-256 checksum enabled by default. Dolby Vision is auto-disabled (AV1 pipeline does not support DV muxing). `SVT_AV1_PARAMS_BASE` is emitted uncommented by `--create-config`.
+- **`streaming-av1` profile** — AV1 streaming encode via SVT-AV1: CRF 30, preset 6, MP4 container, Opus audio at 192k with AAC stereo fallback. Targets modern clients with AV1 decode support (Fire TV Stick 4K Max, Chromecast with Google TV, web browsers). Strips DV; HDR10 preserved.
+
 ### Changed
 
+- **`streaming` renamed to `streaming-hevc`** — The existing HEVC streaming profile is now canonically named `streaming-hevc`. The old name `streaming` is retained as a deprecated backwards-compatible alias — existing scripts and `.muxmrc` files will continue to work but will log a deprecation notice.
+- **Single-track subtitle mode preserves PGS bitmap subs** — When the output container supports bitmap subtitles (MKV), PGS tracks are stream-copied rather than OCR'd. OCR is used only when the container requires text subtitles (MP4) or the user explicitly disables preservation via `--no-sub-preserve-bitmap`.
+- **`write_checksum()` rewritten with algorithm dispatch** — Supports BLAKE2b, SHA-256, and auto-detection in a unified function replacing the previous single-algorithm implementation.
+
 ### Fixed
+
+- **`--create-config` profile variable detection** — Snapshot baseline now captures script defaults before config file loading, preventing values set in `.muxmrc` from masking profile-owned variables in the generated config.
+- **`--checksum-algo` test assertions** — Moved from the boolean toggle array to explicit value-flag tests.
 
 ## [1.3.0] - 2026-03-29
 

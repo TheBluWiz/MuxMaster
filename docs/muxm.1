@@ -72,9 +72,25 @@ Passthrough container. HEVC 10\-bit (even SDR), animation\-tuned x265,
 multi\-track subs. Lossless audio transcoded to E\-AC\-3 (ATV cannot Direct Play TrueHD/DTS\-HD MA).
 Forced subs burned for MP4; soft with native ASS preservation for MKV.
 .TP
-.B streaming
+.B streaming\-hevc
 HEVC CRF 20 for Plex/Jellyfin. HDR10, E\-AC\-3. MP4. Preset medium,
 AAC stereo. Targets Shield, Fire TV, Roku, smart TVs, web.
+The former name
+.B streaming
+is accepted as a backwards\-compatible alias and emits a deprecation notice.
+.TP
+.B av1\-hq
+High\-quality AV1 archival via SVT\-AV1. CRF 20, preset 6. HDR10 preserved,
+DV disabled. MKV. Lossless audio passthrough with AAC stereo fallback.
+SHA\-256 checksum. VMAF 93.48 at 4K HDR (parity with HEVC CRF 18).
+See
+.I docs/AV1_CALIBRATION.md
+for methodology.
+.TP
+.B streaming\-av1
+AV1 streaming. CRF 30, preset 6. Opus audio, MP4 container.
+Optimized for platforms that accept AV1 (YouTube, Netflix ingest).
+VMAF 97.70 at 1080p SDR, 90.65 at 4K HDR.
 .TP
 .B animation
 Anime/cartoon. CRF 16, lossless audio, ASS subs. MKV. HEVC 10\-bit (even SDR),
