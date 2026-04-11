@@ -56,14 +56,14 @@ readonly VERSION="1.3.0"
 # Canonical list of valid profile names (space-separated for compgen/iteration).
 # All profile validation, error messages, completions, and config generators
 # should reference this constant — never hardcode the list elsewhere.
-readonly VALID_PROFILES="archive hdr10-hq atv-directplay-hq atv-directplay-animation streaming animation universal youtube-upload"
+readonly VALID_PROFILES="archive hdr10-hq atv-directplay-hq atv-directplay-animation streaming-hevc av1-hq streaming-av1 animation universal youtube-upload"
 
 # _valid_profiles_display — return the profile list comma-separated for user-facing messages.
 _valid_profiles_display(){ echo "${VALID_PROFILES// /, }"; }
 
 # _is_valid_profile — return 0 if $1 is a recognised profile name, 1 otherwise.
-# Also accepts the deprecated alias 'dv-archival' (maps to 'archive').
-_is_valid_profile(){ [[ " $VALID_PROFILES " == *" $1 "* ]] || [[ "$1" == "dv-archival" ]]; }
+# Also accepts deprecated aliases: 'dv-archival' (maps to 'archive'), 'streaming' (maps to 'streaming-hevc').
+_is_valid_profile(){ [[ " $VALID_PROFILES " == *" $1 "* ]] || [[ "$1" == "dv-archival" ]] || [[ "$1" == "streaming" ]]; }
 
 # ===== Section 3: Globals =====================================================================
 declare -a COMPLETED_STEPS=()
@@ -123,7 +123,7 @@ declare -i CRF_VALUE=18
 PRESET_VALUE="slower"
 X265_PARAMS_BASE='profile=main10:repeat-headers=1:hdr-opt=1:aq-mode=3:aq-strength=1.3:psy-rd=2.0:psy-rdoq=1.0:rc-lookahead=60'
 X264_PARAMS_BASE=""   # Advanced x264 parameter string (e.g., youtube-upload profile)
-SVT_AV1_PARAMS_BASE='film-grain=0:enable-overlays=1:scd=1'
+SVT_AV1_PARAMS_BASE=""
 AV1_MAXRATE=""
 AV1_BUFSIZE=""
 LEVEL_VALUE=""                 # e.g., 5.1 (blank = encoder decides)
@@ -248,6 +248,7 @@ declare -i TONEMAP_HDR_TO_SDR=0
 TONEMAP_FILTER='zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p'
 # Force all audio to a specific codec (e.g., "aac" for universal; "" = auto)
 AUDIO_FORCE_CODEC=""
+AUDIO_FORCE_BITRATE=""    # Override multichannel audio bitrate when AUDIO_FORCE_CODEC is set
 # Allow lossless audio codecs (TrueHD, DTS-HD MA, FLAC) to pass through untouched
 declare -i AUDIO_LOSSLESS_PASSTHROUGH=0
 # Burn forced subtitles into the video stream
@@ -2454,7 +2455,7 @@ _create_config_emit() {
     AUDIO_LANG_PREF AUDIO_CODEC_PREFERENCE
     AUDIO_MULTI_TRACK AUDIO_KEEP_COMMENTARY
     STEREO_BITRATE MAX_AUDIO_CHANNELS ADD_STEREO_IF_MULTICH
-    EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 AUDIO_FORCE_CODEC AUDIO_LOSSLESS_PASSTHROUGH
+    EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 AUDIO_FORCE_CODEC AUDIO_FORCE_BITRATE AUDIO_LOSSLESS_PASSTHROUGH
     SUB_LANG_PREF SUB_INCLUDE_FORCED SUB_INCLUDE_FULL SUB_INCLUDE_SDH SUB_MAX_TRACKS
     SUB_BURN_FORCED SUB_EXPORT_EXTERNAL SUB_PRESERVE_TEXT_FORMAT
     SUB_MULTI_TRACK
@@ -2728,6 +2729,8 @@ HEADER
   echo ""
   echo "# Force all audio to a specific codec (e.g., \"aac\" for universal playback)"
   _V AUDIO_FORCE_CODEC
+  echo "# Override multichannel audio bitrate when AUDIO_FORCE_CODEC is set (e.g., \"256k\")"
+  _V AUDIO_FORCE_BITRATE
   echo ""
   echo "# Allow lossless audio codecs (TrueHD, DTS-HD MA, FLAC) to pass through"
   echo "#   1 = copy lossless  |  0 = transcode to lossy"
@@ -3016,6 +3019,7 @@ _create_config() {
       --stereo-fallback)            _CC_OVERRIDES[ADD_STEREO_IF_MULTICH]=1;                                                             _cc_oi=$((_cc_oi+1)) ;;
       --no-stereo-fallback)         _CC_OVERRIDES[ADD_STEREO_IF_MULTICH]=0;                                                             _cc_oi=$((_cc_oi+1)) ;;
       --audio-force-codec)          _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AUDIO_FORCE_CODEC]="$_cc_val";         _cc_oi=$((_cc_oi+2)) ;;
+      --audio-force-bitrate)        _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AUDIO_FORCE_BITRATE]="$_cc_val";       _cc_oi=$((_cc_oi+2)) ;;
       --audio-titles)               _CC_OVERRIDES[INCLUDE_AUDIO_TITLES]=1;                                                              _cc_oi=$((_cc_oi+1)) ;;
       --no-audio-titles)            _CC_OVERRIDES[INCLUDE_AUDIO_TITLES]=0;                                                              _cc_oi=$((_cc_oi+1)) ;;
       # Subtitles
@@ -3417,7 +3421,7 @@ apply_profile_universal() {
   STRIP_METADATA=1
 }
 
-apply_profile_streaming() {
+apply_profile_streaming_hevc() {
   # Goal: Smaller files, broad modern-device support, good quality.
   DISABLE_DV=1
   ALLOW_DV_FALLBACK=0
@@ -3445,6 +3449,63 @@ apply_profile_streaming() {
   SUB_BURN_FORCED=0
   SUB_EXPORT_EXTERNAL=0
   # Chapters/metadata: keep
+  KEEP_CHAPTERS=1
+  STRIP_METADATA=0
+}
+
+apply_profile_av1_hq() {
+  # High-quality AV1 archival encode via SVT-AV1. HDR10 preserved; DV auto-disabled.
+  # CRF 20 achieves VMAF 93.48 at 4K HDR (parity with HEVC CRF 18).
+  # CRF 28 achieves VMAF 97.91 at 1080p SDR.
+  # See docs/AV1_CALIBRATION.md for methodology.
+  DISABLE_DV=1
+  ALLOW_DV_FALLBACK=0
+  DV_CONVERT_TO_P81_IF_FAIL=0
+  OUTPUT_EXT="mkv"
+  VIDEO_CODEC="libsvt-av1"
+  VIDEO_COPY_IF_COMPLIANT=0
+  CRF_VALUE=20
+  PRESET_VALUE=6
+  SVT_AV1_PARAMS_BASE='film-grain=0:enable-overlays=1:scd=1'
+  HDR_TARGET_PIXFMT="yuv420p10le"
+  FORCE_CHROMA_420=1
+  AUDIO_LOSSLESS_PASSTHROUGH=1
+  ADD_STEREO_IF_MULTICH=1
+  STEREO_BITRATE="256k"
+  SUB_INCLUDE_FORCED=1
+  SUB_INCLUDE_FULL=1
+  SUB_INCLUDE_SDH=1
+  SUB_BURN_FORCED=0
+  KEEP_CHAPTERS=1
+  STRIP_METADATA=0
+  CHECKSUM=1
+}
+
+apply_profile_streaming_av1() {
+  # AV1 streaming profile. Opus audio, MP4 container, CRF 30.
+  # Optimized for platforms that accept AV1 (YouTube, Netflix ingest).
+  # VMAF 97.70 at 1080p SDR, 90.65 at 4K HDR.
+  DISABLE_DV=1
+  ALLOW_DV_FALLBACK=0
+  DV_CONVERT_TO_P81_IF_FAIL=0
+  OUTPUT_EXT="mp4"
+  VIDEO_CODEC="libsvt-av1"
+  VIDEO_COPY_IF_COMPLIANT=0
+  CRF_VALUE=30
+  PRESET_VALUE=6
+  SVT_AV1_PARAMS_BASE='film-grain=0:enable-overlays=1:scd=1'
+  HDR_TARGET_PIXFMT="yuv420p10le"
+  FORCE_CHROMA_420=1
+  AUDIO_LOSSLESS_PASSTHROUGH=0
+  AUDIO_FORCE_CODEC="libopus"
+  # Multichannel bitrate controlled via AUDIO_FORCE_BITRATE
+  AUDIO_FORCE_BITRATE="256k"
+  ADD_STEREO_IF_MULTICH=1
+  STEREO_BITRATE="192k"
+  SUB_INCLUDE_FORCED=1
+  SUB_INCLUDE_FULL=1
+  SUB_INCLUDE_SDH=0
+  SUB_BURN_FORCED=0
   KEEP_CHAPTERS=1
   STRIP_METADATA=0
 }
@@ -3528,7 +3589,9 @@ _profile_comment() {
     hdr10-hq)                   echo "All the nits, none of the drama." ;;
     atv-directplay-hq)          echo "Shaped to please the most demanding rectangle in your living room." ;;
     atv-directplay-animation)   echo "Studio Ghibli didn't suffer for mov_text." ;;
-    streaming)                  echo "Lean, mean, streaming machine." ;;
+    streaming-hevc)             echo "Lean, mean, streaming machine." ;;
+    av1-hq)                     echo "Fewer bits, same nits." ;;
+    streaming-av1)              echo "Stream smarter, not larger." ;;
     animation)                  echo "psy-rd turned down, sakuga turned up." ;;
     universal)                  echo "Lowest common denominator, highest common decency." ;;
     youtube-upload)             echo "Your master, YouTube's problem." ;;
@@ -3549,7 +3612,14 @@ apply_profile() {
     hdr10-hq)                    apply_profile_hdr10_hq ;;
     atv-directplay-hq)           apply_profile_atv_directplay_hq ;;
     atv-directplay-animation)    apply_profile_atv_directplay_animation ;;
-    streaming)                   apply_profile_streaming ;;
+    streaming-hevc)              apply_profile_streaming_hevc ;;
+    streaming)
+      # Deprecated alias: normalise PROFILE_NAME so all downstream code sees 'streaming-hevc'.
+      warn "Profile 'streaming' is deprecated. Use '--profile streaming-hevc' instead."
+      PROFILE_NAME="streaming-hevc"
+      apply_profile_streaming_hevc ;;
+    av1-hq)                      apply_profile_av1_hq ;;
+    streaming-av1)               apply_profile_streaming_av1 ;;
     animation)                   apply_profile_animation ;;
     universal)                   apply_profile_universal ;;
     youtube-upload)              apply_profile_youtube_upload ;;
@@ -3757,7 +3827,9 @@ Profiles (--profile NAME):
   hdr10-hq                   Strip DV, keep HDR10. CRF 17, lossless audio. MKV.
   atv-directplay-hq          Apple TV Direct Play. DV-aware, E-AC-3. Passthrough container.
   atv-directplay-animation   ATV Direct Play, animation quality. CRF 16, E-AC-3, ASS subs. Passthrough container.
-  streaming                  HEVC CRF 20 for Plex/Jellyfin. HDR10, E-AC-3. MP4.
+  streaming-hevc             HEVC CRF 20 for Plex/Jellyfin. HDR10, E-AC-3. MP4.
+  av1-hq                     AV1 CRF 20, lossless audio. HDR10, MKV.
+  streaming-av1              AV1 CRF 30, Opus audio. Optimized for AV1-capable platforms. MP4.
   animation                  Anime/cartoon. CRF 16, lossless audio, ASS subs. MKV.
   universal                  H.264 SDR, AAC stereo. Lean, play anywhere. MP4.
   youtube-upload             H.264 high-profile CRF 16. AAC stereo, burn forced subs. MP4.
@@ -3863,6 +3935,7 @@ while [[ $# -gt 0 ]]; do
     --stereo-fallback) ADD_STEREO_IF_MULTICH=1; shift ;;
     --no-stereo-fallback) ADD_STEREO_IF_MULTICH=0; shift ;;
     --audio-force-codec) AUDIO_FORCE_CODEC="${2:-}"; shift 2 ;;
+    --audio-force-bitrate) AUDIO_FORCE_BITRATE="${2:-}"; shift 2 ;;
     --audio-lossless-passthrough) AUDIO_LOSSLESS_PASSTHROUGH=1; shift ;;
     --no-audio-lossless-passthrough) AUDIO_LOSSLESS_PASSTHROUGH=0; shift ;;
     --audio-titles) INCLUDE_AUDIO_TITLES=1; shift ;;
@@ -4088,7 +4161,7 @@ if [[ -n "${PROFILE_NAME:-}" ]]; then
       fi
       ;;
 
-    streaming)
+    streaming-hevc)
       # MKV is unusual for streaming targets
       [[ "$OUTPUT_EXT" == "mkv" ]] && \
         _warn_conflict "$PROFILE_NAME" "--output-ext mkv" \
@@ -4288,6 +4361,7 @@ Effective config (post config-files + profile + CLI):
   EAC3_BITRATE_7_1          = $EAC3_BITRATE_7_1
   MAX_AUDIO_CHANNELS        = $MAX_AUDIO_CHANNELS
   AUDIO_FORCE_CODEC         = ${AUDIO_FORCE_CODEC:-<auto>}
+  AUDIO_FORCE_BITRATE       = ${AUDIO_FORCE_BITRATE:-<auto>}
   AUDIO_LOSSLESS_PASSTHROUGH = $AUDIO_LOSSLESS_PASSTHROUGH
 
   [Subtitles]
@@ -5904,11 +5978,22 @@ run_video_pipeline() {
     encode_args=(
       -c:v "$VIDEO_CODEC"
       -crf "$CRF_VALUE"
-      -preset "$av1_preset"
       -pix_fmt "$TARGET_PIXFMT"
       "${COLOR_ARGS[@]}"
     )
-    [[ -n "$SVT_AV1_PARAMS" ]] && encode_args+=( -svtav1-params "$SVT_AV1_PARAMS" )
+    if [[ "$VIDEO_CODEC" == "libsvt-av1" ]]; then
+      encode_args+=( -preset "$av1_preset" )
+    else
+      encode_args+=( -cpu-used "$av1_preset" )
+    fi
+    # SVT_AV1_PARAMS_BASE is shared between libsvt-av1 and libaom-av1; flag name differs per encoder
+    if [[ -n "${SVT_AV1_PARAMS:-}" ]]; then
+      if [[ "$VIDEO_CODEC" == "libsvt-av1" ]]; then
+        encode_args+=( -svtav1-params "$SVT_AV1_PARAMS" )
+      else
+        encode_args+=( -aom-params "$SVT_AV1_PARAMS" )
+      fi
+    fi
     [[ -n "$AV1_MAXRATE" ]] && encode_args+=( -maxrate "$AV1_MAXRATE" )
     [[ -n "$AV1_BUFSIZE" ]] && encode_args+=( -bufsize "$AV1_BUFSIZE" )
     report_add "video_codec" "av1"
@@ -6696,6 +6781,20 @@ _audio_copy_ext(){
   esac
 }
 
+# Map ffmpeg encoder name to file extension
+_audio_codec_ext() {
+  case "$1" in
+    libopus)    echo "opus" ;;
+    libmp3lame) echo "mp3" ;;
+    libvorbis)  echo "ogg" ;;
+    aac)        echo "aac" ;;
+    ac3)        echo "ac3" ;;
+    eac3)       echo "eac3" ;;
+    flac)       echo "flac" ;;
+    *)          echo "$1" ;;  # fallback: use codec name as-is
+  esac
+}
+
 # Determine target codec and bitrate for audio transcode based on channel count.
 # Outputs: "codec bitrate" (space-separated, suitable for `read`)
 # Channel thresholds are centralized here to avoid divergence.
@@ -7014,6 +7113,7 @@ run_audio_pipeline(){
       if [[ "$tgt_codec" == "aac" ]]; then
         tgt_br="256k"
       fi
+      [[ -n "${AUDIO_FORCE_BITRATE:-}" ]] && tgt_br="$AUDIO_FORCE_BITRATE"
       note "Force transcoding audio: $codec → $tgt_codec (${effective_ch}ch, ${tgt_br})"
       report_add "audio_action" "transcode to $tgt_codec"
     fi
@@ -7074,7 +7174,7 @@ run_audio_pipeline(){
       die 43 "Audio copy failed. See: $WORKDIR/audio_primary.err"
     fi
   else
-    A_PRIMARY="$WORKDIR/audio_primary.${tgt_codec}"
+    A_PRIMARY="$WORKDIR/audio_primary.$(_audio_codec_ext "$tgt_codec")"
     local -a transcode_args=("${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map "0:a:$idx")
 
     if [[ "$tgt_codec" == "eac3" ]]; then
