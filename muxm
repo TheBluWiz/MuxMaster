@@ -710,7 +710,7 @@ for _pcd_v in \
   AUDIO_LANG_PREF AUDIO_CODEC_PREFERENCE \
   AUDIO_MULTI_TRACK AUDIO_KEEP_COMMENTARY \
   STEREO_BITRATE MAX_AUDIO_CHANNELS ADD_STEREO_IF_MULTICH \
-  EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 AUDIO_FORCE_CODEC AUDIO_LOSSLESS_PASSTHROUGH \
+  EAC3_BITRATE_5_1 EAC3_BITRATE_7_1 AUDIO_FORCE_CODEC AUDIO_FORCE_BITRATE AUDIO_LOSSLESS_PASSTHROUGH \
   SUB_LANG_PREF SUB_INCLUDE_FORCED SUB_INCLUDE_FULL SUB_INCLUDE_SDH SUB_MAX_TRACKS \
   SUB_BURN_FORCED SUB_EXPORT_EXTERNAL SUB_PRESERVE_TEXT_FORMAT \
   SUB_MULTI_TRACK \
@@ -3055,10 +3055,13 @@ _create_config() {
     esac
   done
 
-  # Normalize deprecated alias
+  # Normalize deprecated aliases
   if [[ "$profile" == "dv-archival" ]]; then
     warn "Profile 'dv-archival' is deprecated. Using 'archive' instead."
     profile="archive"
+  elif [[ "$profile" == "streaming" ]]; then
+    warn "Profile 'streaming' is deprecated. Use 'streaming-hevc' instead."
+    profile="streaming-hevc"
   fi
 
   # Validate scope → target path
@@ -3589,7 +3592,7 @@ _profile_comment() {
     hdr10-hq)                   echo "All the nits, none of the drama." ;;
     atv-directplay-hq)          echo "Shaped to please the most demanding rectangle in your living room." ;;
     atv-directplay-animation)   echo "Studio Ghibli didn't suffer for mov_text." ;;
-    streaming-hevc)             echo "Lean, mean, streaming machine." ;;
+    streaming|streaming-hevc)   echo "Lean, mean, streaming machine." ;;
     av1-hq)                     echo "Fewer bits, same nits." ;;
     streaming-av1)              echo "Stream smarter, not larger." ;;
     animation)                  echo "psy-rd turned down, sakuga turned up." ;;
