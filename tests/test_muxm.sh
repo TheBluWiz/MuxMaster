@@ -2280,6 +2280,77 @@ EOF
   assert_contains "limited lossless playback support" \
     "container-compat: FLAC + MP4 emits lossless incompatibility warning" "$out"
 
+  # ---- AV1 profile dry-run: verify profile settings are applied ----
+
+  # av1-hq dry-run: CRF 20, libsvt-av1, MKV output, DV disabled, lossless audio passthrough.
+  out="$(run_muxm --dry-run --profile av1-hq "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
+  assert_contains "DRY-RUN" "dry-run av1-hq: announces DRY-RUN" "$out"
+  # Effective-config check: confirm profile set the expected video codec and CRF.
+  local av1hq_cfg
+  av1hq_cfg="$(run_muxm --profile av1-hq --print-effective-config 2>&1)"
+  assert_contains "libsvt-av1"  "av1-hq effective-config: VIDEO_CODEC=libsvt-av1" "$av1hq_cfg"
+  assert_contains "CRF_VALUE                 = 20" "av1-hq effective-config: CRF_VALUE=20" "$av1hq_cfg"
+  assert_contains "DISABLE_DV                = 1"  "av1-hq effective-config: DISABLE_DV=1" "$av1hq_cfg"
+
+  # streaming-av1 dry-run: CRF 30, libsvt-av1, MP4 output, Opus audio.
+  out="$(run_muxm --dry-run --profile streaming-av1 "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
+  assert_contains "DRY-RUN" "dry-run streaming-av1: announces DRY-RUN" "$out"
+  local sav1_cfg
+  sav1_cfg="$(run_muxm --profile streaming-av1 --print-effective-config 2>&1)"
+  assert_contains "libsvt-av1"  "streaming-av1 effective-config: VIDEO_CODEC=libsvt-av1" "$sav1_cfg"
+  assert_contains "CRF_VALUE                 = 30" "streaming-av1 effective-config: CRF_VALUE=30" "$sav1_cfg"
+  assert_contains "libopus"     "streaming-av1 effective-config: AUDIO_FORCE_CODEC=libopus" "$sav1_cfg"
+
+  # ---- libaom-av1 vs libsvt-av1 flag selection (effective-config) ----
+  # libsvt-av1 uses -preset; libaom-av1 uses -cpu-used.  Both share SVT_AV1_PARAMS_BASE
+  # but the flag name differs.  Verify effective-config reflects the right codec when
+  # --video-codec libaom-av1 is supplied.
+  local libaom_cfg
+  libaom_cfg="$(run_muxm --video-codec libaom-av1 --print-effective-config 2>&1)"
+  assert_contains "libaom-av1" "libaom-av1 effective-config: VIDEO_CODEC=libaom-av1" "$libaom_cfg"
+
+  # ---- AV1 CLI flag passthrough (--av1-params, --av1-maxrate, --av1-bufsize) ----
+  # SVT_AV1_PARAMS_BASE, AV1_MAXRATE, AV1_BUFSIZE are not exposed by
+  # --print-effective-config.  Test that the flags parse without error (no exit 11)
+  # and that a dry-run with them in place announces DRY-RUN normally.
+  # The propagation of SVT_AV1_PARAMS_BASE is covered by the build_av1_params unit test.
+  out="$(run_muxm --dry-run --video-codec libsvt-av1 \
+    --av1-params "film-grain=8:tune=0" \
+    "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
+  assert_contains "DRY-RUN" \
+    "--av1-params: accepted without error (dry-run completes)" "$out"
+  if echo "$out" | grep -qiF "Invalid"; then
+    fail "--av1-params: unexpected 'Invalid' in output (flag may have been rejected)"
+  else
+    pass "--av1-params: no validation error in dry-run output"
+  fi
+
+  out="$(run_muxm --dry-run --video-codec libsvt-av1 \
+    --av1-maxrate 8000k --av1-bufsize 16000k \
+    "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
+  assert_contains "DRY-RUN" \
+    "--av1-maxrate/--av1-bufsize: accepted without error (dry-run completes)" "$out"
+  if echo "$out" | grep -qiF "Invalid"; then
+    fail "--av1-maxrate/--av1-bufsize: unexpected 'Invalid' in output"
+  else
+    pass "--av1-maxrate/--av1-bufsize: no validation error in dry-run output"
+  fi
+
+  # ---- AV1 copy-compliant check: hevc source must be rejected for AV1 target ----
+  # _video_is_copy_compliant() rejects non-av1 sources when VIDEO_CODEC is libsvt-av1.
+  # With --skip-if-ideal and a hevc source, check_skip_if_ideal should log the rejection
+  # reason containing "need av1".
+  out="$(run_muxm --dry-run --video-codec libsvt-av1 --video-copy-if-compliant \
+    --skip-if-ideal "$TESTDIR/hevc_sdr_51.mkv" 2>&1)"
+  assert_contains "need av1" \
+    "AV1 copy-compliant: hevc source rejected with 'need av1' reason" "$out"
+
+  # h264 source should also be rejected for AV1 target
+  out="$(run_muxm --dry-run --video-codec libsvt-av1 --video-copy-if-compliant \
+    --skip-if-ideal "$TESTDIR/basic_sdr_subs.mkv" 2>&1)"
+  assert_contains "need av1" \
+    "AV1 copy-compliant: h264 source rejected with 'need av1' reason" "$out"
+
   # ---- Output filename extension inference ----
   # When the user supplies an explicit output filename, muxm infers the container
   # from the file's extension rather than using the profile default.
@@ -4597,6 +4668,68 @@ note() { :; }'
   if echo "$out" | grep -qF "level-idc=5.1"; then pass "apply_level_vbv(5.1, CONSERVATIVE_VBV=0): level-idc still injected"; else fail "apply_level_vbv(5.1, CONSERVATIVE_VBV=0): expected level-idc=5.1, got '$out'"; fi
 }
 
+_test_unit_av1_helpers() {
+  # ---- _av1_preset_multiplier ----
+  # AV1 uses numeric presets (0=slowest/best, 13=fastest/worst).
+  # Five buckets: 0-1 → 900, 2-4 → 950, 5-7 → 1000, 8-10 → 1050, 11-13 → 1200.
+  # A regression here silently breaks disk-space estimation for AV1 encodes.
+  assert_muxm_fn_stdout "_av1_preset_multiplier(0)=900"   "900"  _av1_preset_multiplier "" "0"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(1)=900"   "900"  _av1_preset_multiplier "" "1"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(2)=950"   "950"  _av1_preset_multiplier "" "2"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(3)=950"   "950"  _av1_preset_multiplier "" "3"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(4)=950"   "950"  _av1_preset_multiplier "" "4"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(5)=1000"  "1000" _av1_preset_multiplier "" "5"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(6)=1000"  "1000" _av1_preset_multiplier "" "6"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(7)=1000"  "1000" _av1_preset_multiplier "" "7"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(8)=1050"  "1050" _av1_preset_multiplier "" "8"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(9)=1050"  "1050" _av1_preset_multiplier "" "9"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(10)=1050" "1050" _av1_preset_multiplier "" "10"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(11)=1200" "1200" _av1_preset_multiplier "" "11"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(12)=1200" "1200" _av1_preset_multiplier "" "12"
+  assert_muxm_fn_stdout "_av1_preset_multiplier(13)=1200" "1200" _av1_preset_multiplier "" "13"
+  # Default (no arg) falls through to 5-7 bucket
+  assert_muxm_fn_stdout "_av1_preset_multiplier(default)=1000" "1000" _av1_preset_multiplier "" ""
+
+  # ---- build_av1_params ----
+  # build_av1_params() copies SVT_AV1_PARAMS_BASE → SVT_AV1_PARAMS.
+  # Verify that after a call SVT_AV1_PARAMS equals SVT_AV1_PARAMS_BASE.
+  local bap_body result
+  bap_body="$(awk '/^build_av1_params\(\)[[:space:]]*\{/,/^\}/' "$MUXM")"
+  if [[ -z "$bap_body" ]]; then
+    skip "build_av1_params not found in muxm"
+  else
+    # Default base value
+    result="$(bash -c 'SVT_AV1_PARAMS_BASE="film-grain=0:enable-overlays=1:scd=1"; SVT_AV1_PARAMS=""'"
+$bap_body"'
+build_av1_params; echo "$SVT_AV1_PARAMS"')"
+    if [[ "$result" == "film-grain=0:enable-overlays=1:scd=1" ]]; then
+      pass "build_av1_params: SVT_AV1_PARAMS equals SVT_AV1_PARAMS_BASE (default)"
+    else
+      fail "build_av1_params: expected 'film-grain=0:enable-overlays=1:scd=1', got '$result'"
+    fi
+
+    # Custom base value
+    result="$(bash -c 'SVT_AV1_PARAMS_BASE="film-grain=8:tune=0"; SVT_AV1_PARAMS=""'"
+$bap_body"'
+build_av1_params; echo "$SVT_AV1_PARAMS"')"
+    if [[ "$result" == "film-grain=8:tune=0" ]]; then
+      pass "build_av1_params: SVT_AV1_PARAMS equals custom SVT_AV1_PARAMS_BASE"
+    else
+      fail "build_av1_params: expected 'film-grain=8:tune=0', got '$result'"
+    fi
+
+    # Empty base value → SVT_AV1_PARAMS is empty
+    result="$(bash -c 'SVT_AV1_PARAMS_BASE=""; SVT_AV1_PARAMS="stale"'"
+$bap_body"'
+build_av1_params; echo "$SVT_AV1_PARAMS"')"
+    if [[ "$result" == "" ]]; then
+      pass "build_av1_params: empty SVT_AV1_PARAMS_BASE → empty SVT_AV1_PARAMS"
+    else
+      fail "build_av1_params: expected empty SVT_AV1_PARAMS, got '$result'"
+    fi
+  fi
+}
+
 test_unit() {
   section "Pure-Function Unit Tests"
   _test_unit_audio_helpers
@@ -4610,6 +4743,7 @@ test_unit() {
   _test_unit_codec_max_channels
   _test_unit_realpath_fallback
   _test_unit_apply_level_vbv
+  _test_unit_av1_helpers
 }
 
 # === Suite: Profile End-to-End (real encodes with profiles) ===
@@ -4677,6 +4811,97 @@ test_profile_e2e() {
       esac
     fi
   done
+
+  # ---- AV1 profile end-to-end encodes ----
+  # AV1 profiles require the libsvtav1 encoder.  Probe actual encode capability first
+  # (not just encoder availability in ffmpeg -encoders, since the codec alias used by
+  # muxm must be accepted by the installed ffmpeg build).  Skip gracefully if not usable.
+  # Note: AV1 CLI presets are numeric (0-13); named presets like "ultrafast" are x265-only.
+  # Use the profile's built-in default preset (PRESET_VALUE=6 for av1-hq / streaming-av1).
+  local _av1_probe_out="$TESTDIR/_av1_probe.mkv"
+  local _av1_probe_ok=0
+  # Probe by running muxm itself: if the av1-hq dry-run exits 0 and an actual tiny encode
+  # at the profile's own preset does not produce exit 10 (encoder not found), we proceed.
+  if (cd "$TESTDIR" && "$MUXM" --profile av1-hq --dry-run \
+        basic_sdr_subs.mkv "$_av1_probe_out" >/dev/null 2>&1); then
+    # Dry-run succeeded (encoder probe passed in muxm); attempt a real encode.
+    (cd "$TESTDIR" && "$MUXM" -K --profile av1-hq --crf 50 \
+        basic_sdr_subs.mkv "$_av1_probe_out" >/dev/null 2>&1) \
+      && _av1_probe_ok=1 || _av1_probe_ok=0
+  fi
+
+  if (( _av1_probe_ok )); then
+    rm -f "$_av1_probe_out"
+
+    # av1-hq: CRF 20, MKV, lossless audio passthrough
+    local av1hq_e2e_out="$TESTDIR/e2e_av1hq.mkv"
+    log "Full encode: av1-hq profile..."
+    if assert_encode "av1-hq profile: output produced" "$av1hq_e2e_out" \
+         --profile av1-hq --crf 50 "$TESTDIR/basic_sdr_subs.mkv"; then
+      local av1hq_ext="${av1hq_e2e_out##*.}"
+      if [[ "$av1hq_ext" == "mkv" ]]; then
+        pass "av1-hq: correct extension (.mkv)"
+      else
+        fail "av1-hq: expected .mkv, got .$av1hq_ext"
+      fi
+      assert_probe "av1-hq: video codec is av1" "$av1hq_e2e_out" codec_name av1
+      assert_stream_count "av1-hq: audio present" "$av1hq_e2e_out" a 1
+    fi
+
+    # streaming-av1: CRF 30, MP4, Opus audio
+    local sav1_e2e_out="$TESTDIR/e2e_streaming_av1.mp4"
+    log "Full encode: streaming-av1 profile..."
+    if assert_encode "streaming-av1 profile: output produced" "$sav1_e2e_out" \
+         --profile streaming-av1 --crf 50 "$TESTDIR/basic_sdr_subs.mkv"; then
+      local sav1_ext="${sav1_e2e_out##*.}"
+      if [[ "$sav1_ext" == "mp4" ]]; then
+        pass "streaming-av1: correct extension (.mp4)"
+      else
+        fail "streaming-av1: expected .mp4, got .$sav1_ext"
+      fi
+      assert_probe "streaming-av1: video codec is av1" "$sav1_e2e_out" codec_name av1
+      local sav1_acodec
+      sav1_acodec="$(probe_audio "$sav1_e2e_out" codec_name)"
+      if [[ "$sav1_acodec" == "opus" ]]; then
+        pass "streaming-av1: audio codec is opus"
+      else
+        fail "streaming-av1: expected opus audio, got '$sav1_acodec'"
+      fi
+    fi
+
+  else
+    skip "av1-hq e2e: AV1 encode probe failed (encoder not functional) — skipping AV1 profile encodes"
+    skip "streaming-av1 e2e: AV1 encode probe failed (encoder not functional) — skipping AV1 profile encodes"
+  fi
+
+  # ---- Encoder unavailability: libsvtav1 missing → exit code 10 ----
+  # When libsvt-av1 is requested but the encoder is absent, muxm must die with
+  # exit code 10 ("encoder not available").  Simulate by prepending a mock ffmpeg
+  # that reports no encoders to PATH so the availability probe fails.
+  local mock_ffmpeg_dir="$TESTDIR/mock_no_svtav1"
+  mkdir -p "$mock_ffmpeg_dir"
+  cat > "$mock_ffmpeg_dir/ffmpeg" <<'MOCK_EOF'
+#!/bin/bash
+# Mock ffmpeg: lists no encoders so libsvtav1 probe fails.
+# All other invocations are forwarded to the real ffmpeg.
+for arg in "$@"; do
+  if [[ "$arg" == "-encoders" ]]; then
+    echo "Encoders:"
+    exit 0
+  fi
+done
+exec ffmpeg "$@"
+MOCK_EOF
+  chmod +x "$mock_ffmpeg_dir/ffmpeg"
+  local mock_code
+  (cd "$TESTDIR" && PATH="$mock_ffmpeg_dir:$PATH" "$MUXM" -K \
+    --video-codec libsvt-av1 "$TESTDIR/basic_sdr_subs.mkv" 2>&1) \
+    && mock_code=$? || mock_code=$?
+  if [[ "$mock_code" -eq 10 ]]; then
+    pass "encoder-unavailability: libsvtav1 missing → exit code 10"
+  else
+    fail "encoder-unavailability: expected exit 10, got $mock_code"
+  fi
 
   # ---- animation profile + ASS source: verify subtitle format preserved ----
   # Isolate HOME to prevent user config from affecting subtitle pipeline.
