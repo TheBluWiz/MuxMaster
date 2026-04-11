@@ -1,6 +1,6 @@
 .TH MUXM 1 "2026-04-11" "MuxMaster v1.4.0" "User Commands"
 .SH NAME
-muxm \- Universal DV/HLG/HDR10/SDR video encoder/muxer with format profiles
+muxm \- Universal AV1/DV/HLG/HDR10/SDR video encoder/muxer with format profiles
 .SH SYNOPSIS
 .B muxm
 [\fIoptions\fR] [\fB\-\-\fR] \fIsource\fR [\fItarget\fR]
@@ -32,11 +32,11 @@ with CLI flags.
 .B \-\-profile \fINAME\fR[,\fINAME\fR,...]
 Select one or more encoding profiles. When a single name is given, the pipeline
 runs once with that profile's settings. When multiple names are separated by
-commas (e.g. \fB\-\-profile youtube\-upload,streaming\fR), each profile runs as
+commas (e.g. \fB\-\-profile youtube\-upload,streaming\-hevc\fR), each profile runs as
 a separate sequential pass from the same source.
 .PP
 In multi\-profile mode, output files are auto\-suffixed with the profile name
-(e.g. \fIsource.youtube\-upload.mp4\fR, \fIsource.streaming.mp4\fR). If an
+(e.g. \fIsource.youtube\-upload.mp4\fR, \fIsource.streaming\-hevc.mp4\fR). If an
 explicit output filename is provided, its stem and directory are used as the
 base; its extension is ignored (each profile determines its own container). A
 warning listing all output paths is printed before encoding starts.
@@ -711,7 +711,7 @@ derived from input. Use \fB\-\-profile\fR for device\-optimized settings.
 Encode for Apple TV direct play with Dolby Vision P8.1, E\-AC\-3 surround,
 AAC stereo fallback, and burned forced subtitles.
 .TP
-.B muxm \-\-profile streaming \-\-audio\-lang\-pref spa,eng Movie.mkv
+.B muxm \-\-profile streaming\-hevc \-\-audio\-lang\-pref spa,eng Movie.mkv
 Encode for Plex/Jellyfin streaming, preferring Spanish audio over English.
 .TP
 .B muxm \-\-profile archive Movie.mkv
@@ -742,7 +742,15 @@ ignore any .srt/.ass/.sup files in the same directory.
 HDR10 encode keeping lossless audio (TrueHD/DTS\-HD MA) passed through
 instead of transcoding.
 .TP
-.B muxm \-\-dry\-run \-\-profile streaming Movie.mkv
+.B muxm \-\-profile av1\-hq Movie.mkv
+High\-quality AV1 encode via SVT\-AV1. CRF 20, lossless audio, HDR10
+preserved. MKV output. Requires ffmpeg built with SVT\-AV1 support.
+.TP
+.B muxm \-\-profile streaming\-av1 Movie.mkv
+AV1 streaming encode. CRF 30, Opus surround, MP4.
+Smaller files than streaming\-hevc on AV1\-capable clients.
+.TP
+.B muxm \-\-dry\-run \-\-profile streaming\-hevc Movie.mkv
 Preview what muxm would do without actually encoding. Creates placeholder
 files and prints the planned pipeline.
 .TP
@@ -750,8 +758,8 @@ files and prints the planned pipeline.
 Show every resolved setting after config files and profile merge, then exit.
 Useful for debugging config precedence.
 .TP
-.B muxm \-\-create\-config user streaming
-Generate a ~/.muxmrc pre\-filled with streaming profile defaults. Edit to
+.B muxm \-\-create\-config user streaming\-hevc
+Generate a ~/.muxmrc pre\-filled with streaming\-hevc profile defaults. Edit to
 taste; CLI flags still override everything.
 .TP
 .B muxm \-\-setup
@@ -937,7 +945,7 @@ Use
 to mark the end of options. This is necessary when the source filename
 begins with a hyphen:
 .IP
-.B muxm \-\-profile streaming \-\- \-unusual\-name.mkv
+.B muxm \-\-profile streaming\-hevc \-\- \-unusual\-name.mkv
 .SH DEPENDENCIES
 .TP
 .B Required
