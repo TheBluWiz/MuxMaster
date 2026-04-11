@@ -23,7 +23,7 @@ muxm --profile <name> --print-effective-config
 | `atv-directplay-hq` | source ext | HEVC | E-AC-3 + stereo | Plex → Apple TV 4K and you never want transcoding. |
 | `atv-directplay-animation` | source ext | HEVC | E-AC-3 | Anime/cartoons for Apple TV Direct Play. |
 | `streaming-hevc` | MP4 | HEVC | E-AC-3 + stereo | Plex/Jellyfin on mixed modern clients; file size matters. |
-| `streaming-av1` | MP4 | AV1 (SVT) | Opus + stereo | Modern clients with AV1 decode; smaller than HEVC. |
+| `streaming-av1` | MP4 | AV1 (SVT) | Opus 256k + stereo | Modern clients with AV1 decode; smaller than HEVC. |
 | `animation` | MKV | HEVC | lossless + stereo | Anime or cartoons where banding and styled subs matter. |
 | `universal` | MP4 | H.264 | AAC stereo | It has to play everywhere, including old Rokus and phones. |
 | `youtube-upload` | MP4 | H.264 | AAC stereo 256k | Uploading to YouTube; give the re-encoder the cleanest source. |
@@ -195,7 +195,7 @@ and AV1-capable smart TVs. Delivers smaller files than `streaming-hevc` at
 equivalent perceptual quality on supported hardware.
 
 **Goal:** Efficient AV1 encode for streaming. SVT-AV1 CRF 30 / preset 6,
-HDR10 preserved, DV stripped, Opus audio at 192k, AAC stereo fallback.
+HDR10 preserved, DV stripped, Opus audio at 256k, AAC stereo fallback.
 Always outputs MP4.
 
 **Key behaviors:**
@@ -203,8 +203,9 @@ Always outputs MP4.
 - Video codec is `libsvt-av1`; Dolby Vision is unconditionally disabled (the
   AV1 pipeline does not support DV muxing).
 - HDR10 static metadata is preserved through the encode.
-- Audio is encoded to Opus at 192k surround; a 192k AAC stereo fallback track
-  is added.
+- Audio is encoded to Opus at 256k surround (`AUDIO_FORCE_BITRATE="256k"`);
+  a 192k AAC stereo fallback track is added. `AUDIO_FORCE_BITRATE` takes
+  precedence over `EAC3_BITRATE_5_1` / `EAC3_BITRATE_7_1` when set.
 - Subtitles are soft-embedded (forced + full, no SDH, no burn).
 - Chapters and metadata are preserved.
 

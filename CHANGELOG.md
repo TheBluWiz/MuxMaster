@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com), and this 
 
 ### Added
 
+- **`AUDIO_FORCE_BITRATE` variable and `--audio-force-bitrate` flag** — Sets a fixed bitrate for all non-lossless audio output (e.g., `AUDIO_FORCE_BITRATE="256k"`). Overrides codec-specific bitrate variables (`EAC3_BITRATE_5_1`, `EAC3_BITRATE_7_1`, `STEREO_BITRATE`) when set. Used by `streaming-av1` to pin Opus surround at 256k.
 - **AV1 (SVT-AV1) codec support** — `--video-codec libsvt-av1` enables full AV1 pipeline integration: CRF, preset, encoder params, conflict detection, disk space estimation, and config generation. Companion CLI flags: `--av1-params STR`, `--av1-maxrate KBPS`, `--av1-bufsize KBPS`.
 - **`--checksum-algo` flag** — Selects the checksum algorithm: `sha256`, `blake2b`, or `auto`. Specifying an algorithm implies `--checksum`; `auto` prefers `b2sum` and falls back to `sha256`.
 - **BLAKE2b checksum support** — `write_checksum()` now dispatches to `b2sum` when selected, writing `.b2` sidecar files alongside the output. `auto` mode uses BLAKE2b when available.
@@ -25,6 +26,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com), and this 
 
 ### Fixed
 
+- **`libaom-av1` receiving wrong ffmpeg flags** — The encoder flag dispatch was passing `-svtav1-params` and `-preset` to `libaom-av1` encodes. `libaom-av1` uses `-aom-params` and `-cpu-used` instead; the dispatch now routes each flag set to the correct encoder.
+- **Opus multichannel bitrate using EAC3 values in `streaming-av1`** — The surround audio pass for `streaming-av1` was pulling `EAC3_BITRATE_5_1` / `EAC3_BITRATE_7_1` instead of an Opus-appropriate bitrate. `streaming-av1` now sets `AUDIO_FORCE_BITRATE="256k"`, which the audio pipeline prefers over codec-specific variables when set.
+- **Working file extension derived from encoder name instead of format** — Intermediate audio copy files were using the codec/encoder name (e.g., `libopus`) as the file extension instead of the container-appropriate format extension (e.g., `ogg`). The new `_audio_codec_ext()` helper maps encoder names to correct extensions, preventing "Unable to choose output format" errors for Opus and similar non-obvious codec/extension pairs.
 - **`--create-config` profile variable detection** — Snapshot baseline now captures script defaults before config file loading, preventing values set in `.muxmrc` from masking profile-owned variables in the generated config.
 - **`--checksum-algo` test assertions** — Moved from the boolean toggle array to explicit value-flag tests.
 

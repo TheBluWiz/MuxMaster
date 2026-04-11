@@ -189,7 +189,7 @@ Validates `--setup` runs all three sub-installers and standalone installer/unins
 | 75 | `atv-directplay-hq` defaults | MP4, SUB_BURN_FORCED=1, SKIP_IF_IDEAL=1 | ✅ |
 | 76 | `streaming-hevc` defaults | CRF=20, preset=medium | ✅ |
 | 76a | `streaming` deprecated alias | Same config as `streaming-hevc`; deprecation warning emitted | ✅ |
-| 76b | `streaming-av1` defaults | VIDEO_CODEC=libsvt-av1, CRF=30, MP4, DISABLE_DV=1 | ✅ |
+| 76b | `streaming-av1` defaults | VIDEO_CODEC=libsvt-av1, CRF=30, MP4, DISABLE_DV=1, AUDIO_FORCE_BITRATE=256k | ✅ |
 | 77 | `animation` defaults | CRF=16, MKV, LOSSLESS_PASSTHROUGH=1 | ✅ |
 | 78 | `universal` defaults | libx264, TONEMAP=1, KEEP_CHAPTERS=0, STRIP_METADATA=1, MP4 | ✅ |
 
@@ -299,6 +299,8 @@ Validates filename collision auto-versioning and source replacement flags. Uses 
 | 124 | `--audio-track 0` override | Specific track selected regardless of scoring | ✅ |
 | 125 | `--audio-lang-pref spa` | Spanish audio track selected | ✅ |
 | 126 | `--audio-force-codec aac` | Audio transcoded to AAC | ✅ |
+| 126a | `--audio-force-bitrate 256k` | `AUDIO_FORCE_BITRATE = 256k` in effective config | ✅ |
+| 126b | `AUDIO_FORCE_BITRATE` overrides EAC3 bitrate variables | `streaming-av1` with `EAC3_BITRATE_5_1` set; output audio bitrate matches `AUDIO_FORCE_BITRATE` not EAC3 variable | ✅ |
 | 127 | `--stereo-bitrate 192k` | Config shows 192k in effective config | ✅ |
 | 128 | `--audio-lossless-passthrough` | AUDIO_LOSSLESS_PASSTHROUGH = 1 in config | ✅ |
 | 129 | `--no-audio-lossless-passthrough` | AUDIO_LOSSLESS_PASSTHROUGH = 0 in config | ✅ |
@@ -468,6 +470,16 @@ Direct tests for deterministic helper functions extracted from muxm and run in i
 | 218d | `_audio_copy_ext(dca)` | Returns "dts" | ✅ |
 | 218e | `_audio_copy_ext(ac3)` | Returns "ac3" (passthrough) | ✅ |
 | 218f | `_audio_copy_ext(aac)` | Returns "aac" (passthrough) | ✅ |
+
+#### Audio Codec Format Extension Mapping
+
+| # | Test | Assertion | Auto |
+|---|------|-----------|------|
+| 218fa | `_audio_codec_ext(libopus)` | Returns "ogg" | ✅ |
+| 218fb | `_audio_codec_ext(libvorbis)` | Returns "ogg" | ✅ |
+| 218fc | `_audio_codec_ext(aac)` | Returns "aac" | ✅ |
+| 218fd | `_audio_codec_ext(libfdk_aac)` | Returns "aac" | ✅ |
+| 218fe | `_audio_codec_ext(unknown_codec)` | Returns "mka" (safe fallback) | ✅ |
 
 #### Codec Channel Limits
 
@@ -824,7 +836,7 @@ whether the failing `tr`/`grep`/`sed`/`sort` call needs a `LC_ALL=C` prefix.
 |------|-----------|-----------------|-------|
 | CLI parsing | ✅ Full | — | Includes --no-overwrite, short aliases (-h, -V, -p, -l, -k, -K), control char rejection, enhanced error messages |
 | Toggle flags | ⚠️ Partial | — | 15 toggle pairs validated; 20+ toggles missing (sdr-force-10bit, sub-preserve-format, dv, tonemap, replace-source, and positive sides of existing negatives) |
-| Pure-function unit tests | ⚠️ Partial | — | Audio helpers, subtitle helpers, validation helpers, filesize utility tested; missing: `_audio_copy_ext`, `_codec_max_channels`, `_sii_audio_is_container_safe`, `realpath_fallback`, `apply_level_vbv` per-level, VBV level mapping |
+| Pure-function unit tests | ⚠️ Partial | — | Audio helpers, subtitle helpers, validation helpers, filesize utility tested; missing: `_audio_copy_ext` (lossless copy exts), `_audio_codec_ext` (encoder→format exts), `_codec_max_channels`, `_sii_audio_is_container_safe`, `realpath_fallback`, `apply_level_vbv` per-level, VBV level mapping |
 | Completions installer | ✅ Full | — | Install, idempotency, uninstall, safe-when-absent |
 | Setup combined installer | ✅ Full | — | All three sub-installers + standalone deps/man |
 | Config precedence | ✅ Full | — | Single-layer, multi-layer (user+project+CLI), all --create-config profiles, loglevel validation, deprecated variable migration |
@@ -883,7 +895,7 @@ The following areas are present in muxm but have no or incomplete automated test
 
 **High Priority:**
 
-5. **`_audio_copy_ext()` unit tests** — Maps codec names to ffmpeg-compatible file extensions for intermediate copy files. truehd→thd, alac→m4a, pcm→wav, dca→dts. Incorrect mapping causes "Unable to choose output format" errors.
+5. **`_audio_copy_ext()` / `_audio_codec_ext()` unit tests** — Maps codec/encoder names to ffmpeg-compatible file extensions for intermediate files. `_audio_copy_ext` handles lossless copy codecs (truehd→thd, alac→m4a, pcm→wav, dca→dts); `_audio_codec_ext` handles encoder-to-format mapping for transcode targets (libopus→ogg, libfdk_aac→aac). Incorrect mapping causes "Unable to choose output format" errors.
 
 6. **`_codec_max_channels()` unit tests** — Returns encoder channel limits (eac3→6, ac3→6). If this returns wrong values, ffmpeg fatally errors with "channel layout not supported."
 

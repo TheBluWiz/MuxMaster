@@ -88,7 +88,9 @@ See
 for methodology.
 .TP
 .B streaming\-av1
-AV1 streaming. CRF 30, preset 6. Opus audio, MP4 container.
+AV1 streaming. CRF 30, preset 6. Opus 256k surround
+.RB ( AUDIO_FORCE_BITRATE=256k ),
+AAC stereo fallback. MP4 container.
 Optimized for platforms that accept AV1 (YouTube, Netflix ingest).
 VMAF 97.70 at 1080p SDR, 90.65 at 4K HDR.
 .TP
@@ -261,6 +263,14 @@ Preferred audio languages (comma\-separated, e.g., eng,spa).
 .TP
 .BR \-\-audio\-force\-codec " " \fICODEC\fR
 Force all audio to a specific codec (e.g., aac).
+.TP
+.BR \-\-audio\-force\-bitrate " " \fIRATE\fR
+Override the bitrate for all non\-lossless audio output (e.g., 256k).
+Takes precedence over codec\-specific bitrate variables
+.RB ( EAC3_BITRATE_5_1 ", " EAC3_BITRATE_7_1 ", " STEREO_BITRATE )
+when set. The
+.B streaming\-av1
+profile sets this to 256k to pin Opus surround at an appropriate bitrate.
 .TP
 .BR \-\-audio\-lossless\-passthrough " , " \-\-no\-audio\-lossless\-passthrough
 Allow/disallow lossless codecs (TrueHD, DTS\-HD MA, FLAC) to copy through.
@@ -799,7 +809,7 @@ Major variable groups:
 .TP
 .B Audio
 .BR AUDIO_LANG_PREF ", " AUDIO_CODEC_PREFERENCE ", "
-.BR AUDIO_TRACK_OVERRIDE ", " AUDIO_FORCE_CODEC ", "
+.BR AUDIO_TRACK_OVERRIDE ", " AUDIO_FORCE_CODEC ", " AUDIO_FORCE_BITRATE ", "
 .BR MAX_AUDIO_CHANNELS ", " ADD_STEREO_IF_MULTICH ", "
 .BR STEREO_BITRATE ", " EAC3_BITRATE_5_1 ", " EAC3_BITRATE_7_1 ", "
 .BR AUDIO_LOSSLESS_PASSTHROUGH ", " INCLUDE_AUDIO_TITLES .

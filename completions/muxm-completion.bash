@@ -37,7 +37,7 @@ _muxm_completions() {
         # Flags that take a free-form value — offer no completion, fall through to files
         --crf|--stereo-bitrate|--threads|-l|--level|--x265-params|\
         --av1-params|--av1-maxrate|--av1-bufsize|\
-        --audio-track|--audio-lang-pref|--audio-force-codec|\
+        --audio-track|--audio-lang-pref|--audio-force-codec|--audio-force-bitrate|\
         --max-copy-bitrate|--sub-lang-pref|--ocr-lang|--ext-subs-dir)
             COMPREPLY=()
             return ;;
@@ -74,7 +74,7 @@ _muxm_completions() {
 
             --audio-track --audio-lang-pref
             --stereo-fallback --no-stereo-fallback --stereo-bitrate
-            --audio-force-codec
+            --audio-force-codec --audio-force-bitrate
             --audio-lossless-passthrough --no-audio-lossless-passthrough
             --audio-titles --no-audio-titles
 

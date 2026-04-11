@@ -68,7 +68,7 @@ muxm --profile <name> input.mkv
 | `atv-directplay-hq` | Apple TV Direct Play | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | Burn forced; others as mov_text; PGS→OCR | P8.1 auto |
 | `av1-hq` | High-quality AV1 archive | AV1 CRF 20, preset 6 | Lossless passthrough | Single-track per type, soft subs | Disabled (AV1 pipeline) |
 | `streaming-hevc` | Modern HEVC streaming | HEVC CRF 20 | E-AC-3 448k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
-| `streaming-av1` | AV1 streaming | AV1 CRF 30, preset 6 | Opus 192k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
+| `streaming-av1` | AV1 streaming | AV1 CRF 30, preset 6 | Opus 256k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
 | `animation` | Anime/cartoon optimized | HEVC CRF 16, 10-bit | Lossless + stereo fallback | Multi-track stream-copy (up to 6); preserve ASS/SSA | Strip |
 | `atv-directplay-animation` | Anime for Apple TV Direct Play | HEVC CRF 16, slower, animation psy params | E-AC-3 (lossless transcoded for ATV) | Multi-track; native ASS/SSA; soft forced (MKV) | Strip |
 | `universal` | Play anywhere | H.264 SDR (tone-map HDR) | AAC stereo | Burn forced; export others as external SRT | Strip |
@@ -120,7 +120,7 @@ muxm --profile streaming-hevc movie.mkv
 
 ### `streaming-av1` — AV1 Streaming
 
-AV1 streaming encode for modern clients with AV1 decode support (Fire TV Stick 4K Max, Chromecast with Google TV, web browsers). AV1 CRF 30, preset 6, Opus audio at 192k, AAC stereo fallback, soft subtitles. Always outputs MP4. Strips DV; HDR10 preserved. Delivers smaller files than `streaming-hevc` at equivalent perceptual quality on supported hardware.
+AV1 streaming encode for modern clients with AV1 decode support (Fire TV Stick 4K Max, Chromecast with Google TV, web browsers). AV1 CRF 30, preset 6, Opus audio at 256k (`AUDIO_FORCE_BITRATE="256k"`), AAC stereo fallback, soft subtitles. Always outputs MP4. Strips DV; HDR10 preserved. Delivers smaller files than `streaming-hevc` at equivalent perceptual quality on supported hardware.
 
 ```bash
 muxm --profile streaming-av1 movie.mkv
@@ -336,6 +336,7 @@ muxm [options] <source> [target.mp4]
 | `--dv` / `--no-dv` | Enable or disable Dolby Vision handling (overrides profile) |
 | `--audio-lang-pref LANGS` | Audio language preference (comma-separated, e.g., `eng,jpn`) |
 | `--audio-force-codec CODEC` | Force all audio to a specific codec |
+| `--audio-force-bitrate RATE` | Override bitrate for all non-lossless audio output (e.g., `256k`); overrides codec-specific bitrate variables |
 | `--audio-lossless-passthrough` | Allow lossless codecs to pass through |
 | `--sub-lang-pref LANGS` | Subtitle language preference (comma-separated) |
 | `--sub-burn-forced` | Burn forced subtitles into video |
