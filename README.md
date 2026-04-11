@@ -65,7 +65,7 @@ muxm --profile <name> input.mkv
 | --- | --- | --- | --- | --- | --- |
 | `archive` | Lossless preservation | Copy (no re-encode) | All tracks, lossless passthrough | Multi-track stream-copy (all types, up to 99) | Preserve |
 | `hdr10-hq` | Max HDR10 quality | HEVC CRF 17 | Lossless + stereo fallback | Single-track per type, soft subs | Strip |
-| `atv-directplay-hq` | Apple TV Direct Play | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | Burn forced; others as mov_text; PGS→OCR | P8.1 auto |
+| `atv-directplay-hq` | Apple TV Direct Play | HEVC Main10 (copy if compliant) | E-AC-3 + AAC stereo | Burn forced; others as mov_text; PGS→OCR | Convert to P8.1 (auto, if possible) |
 | `av1-hq` | High-quality AV1 archive | AV1 CRF 20, preset 6 | Lossless passthrough | Single-track per type, soft subs | Disabled (AV1 pipeline) |
 | `streaming-hevc` | Modern HEVC streaming | HEVC CRF 20 | E-AC-3 448k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
 | `streaming-av1` | AV1 streaming | AV1 CRF 30, preset 6 | Opus 256k + AAC stereo | Soft forced + full (no SDH); PGS→OCR | Strip |
@@ -156,7 +156,7 @@ muxm --profile universal movie.mkv
 
 ### `youtube-upload` — YouTube Upload Prep
 
-Optimized for uploading to YouTube. Encodes to H.264 High profile at CRF 16 with the `slow` preset and AAC stereo at 256k in an MP4 container. Forced subtitles are burned into the video stream; all other dialogue subtitles (excluding SDH) are exported as an external `.srt` file for upload to YouTube Studio. Dolby Vision is disabled; HDR10 metadata is preserved so YouTube can use it during its own re-encode. Strips non-essential metadata and chapters.
+Optimized for uploading to YouTube. Encodes to H.264 High profile at CRF 16 with the `slow` preset and AAC stereo at 256k in an MP4 container. Forced subtitles are burned into the video stream; all other dialogue subtitles (excluding SDH) are exported as an external `.srt` file for upload to YouTube Studio. Dolby Vision is disabled; HDR10 metadata is preserved so YouTube can use it during its own re-encode. Strips non-essential metadata; chapter markers are preserved.
 
 Because YouTube re-encodes every upload regardless, the goal is to give YouTube's encoder the cleanest, highest-quality source possible — not to minimize file size. CRF 16 with `slow` delivers near-transparent quality that survives YouTube's compression with noticeably less artifacting than a smaller source would.
 
@@ -341,6 +341,7 @@ muxm [options] <source> [target.mp4]
 | `--video-codec libx265\|libx264` | Video encoder |
 | `--tonemap` | Tone-map HDR to SDR |
 | `--dv` / `--no-dv` | Enable or disable Dolby Vision handling (overrides profile) |
+| `--dv-convert-p81` / `--no-dv-convert-p81` | Convert DV to Profile 8.1 when native injection fails (default: on) |
 | `--audio-lang-pref LANGS` | Audio language preference (comma-separated, e.g., `eng,jpn`) |
 | `--audio-force-codec CODEC` | Force all audio to a specific codec |
 | `--audio-force-bitrate RATE` | Override bitrate for all non-lossless audio output (e.g., `256k`); overrides codec-specific bitrate variables |
@@ -348,6 +349,7 @@ muxm [options] <source> [target.mp4]
 | `--sub-lang-pref LANGS` | Subtitle language preference (comma-separated) |
 | `--sub-burn-forced` | Burn forced subtitles into video |
 | `--sub-preserve-format` | Keep ASS/SSA subtitles in native format (MKV only; use `--no-sub-preserve-format` to force SRT conversion) |
+| `--sub-preserve-bitmap` / `--no-sub-preserve-bitmap` | Stream-copy PGS bitmap subtitles to MKV without OCR (default: on; no effect for MP4/MOV) |
 | `--output-ext mp4\|mkv\|m4v\|mov` | Output container |
 | `--report-json` | Generate a JSON report alongside the output file |
 | `--checksum` | Write a checksum sidecar for the output (SHA-256 by default) |

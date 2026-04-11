@@ -246,6 +246,43 @@ If DV handling fails, fall back to non\-DV output (default) or hard\-fail.
 .BR \-\-dv\-convert\-p81 " , " \-\-no\-dv\-convert\-p81
 Enable/disable automatic conversion to DV Profile 8.1 when native DV
 injection fails. Default: enabled.
+.SS Dolby Vision Fallback Chain
+When DV handling is active, muxm attempts each step in order and advances
+to the next only on failure:
+.IP 1. 4n
+Extract the RPU from the source and inject it into the encoded base layer
+as\-is (native profile preserved).
+.IP 2.
+If step 1 fails and
+.B \-\-dv\-convert\-p81
+is enabled (default): convert the RPU to DV Profile 8.1 and retry
+injection. Profile\ 5 and dual\-layer Profile\ 7 sources are the primary
+targets for this conversion.
+.IP 3.
+If step 2 also fails (or
+.B \-\-no\-dv\-convert\-p81
+was given) and
+.B \-\-allow\-dv\-fallback
+is enabled (default): produce non\-DV output. The base\-layer encode is
+kept; DV metadata is silently discarded. A warning is printed.
+.IP 4.
+If
+.B \-\-no\-allow\-dv\-fallback
+is set: exit with status\ 40. Use this in automated pipelines where
+silent DV loss would be unacceptable.
+.PP
+Summary of the controlling flags:
+.RS
+.TP
+.B \-\-no\-dv
+Skip DV handling entirely from the start (step 1 never runs).
+.TP
+.B \-\-no\-dv\-convert\-p81
+Disable the P8.1 conversion attempt (step 2 skipped).
+.TP
+.B \-\-no\-allow\-dv\-fallback
+Treat any DV failure as fatal rather than producing non\-DV output.
+.RE
 .TP
 .BR \-\-conservative\-vbv " , " \-\-no\-conservative\-vbv
 Enable/disable VBV guardrails that cap bitrate and buffer size per x265

@@ -1404,9 +1404,27 @@ Passthrough container. HEVC 10\-bit (even SDR), animation\-tuned x265,
 multi\-track subs. Lossless audio transcoded to E\-AC\-3 (ATV cannot Direct Play TrueHD/DTS\-HD MA).
 Forced subs burned for MP4; soft with native ASS preservation for MKV.
 .TP
-.B streaming
+.B streaming\-hevc
 HEVC CRF 20 for Plex/Jellyfin. HDR10, E\-AC\-3. MP4. Preset medium,
 AAC stereo. Targets Shield, Fire TV, Roku, smart TVs, web.
+The former name
+.B streaming
+is accepted as a backwards\-compatible alias and emits a deprecation notice.
+.TP
+.B av1\-hq
+High\-quality AV1 archival via SVT\-AV1. CRF 20, preset 6. HDR10 preserved,
+DV disabled. MKV. Lossless audio passthrough with AAC stereo fallback.
+SHA\-256 checksum. VMAF 93.48 at 4K HDR (parity with HEVC CRF 18).
+See
+.I docs/AV1_CALIBRATION.md
+for methodology.
+.TP
+.B streaming\-av1
+AV1 streaming. CRF 30, preset 6. Opus 256k surround
+.RB ( AUDIO_FORCE_BITRATE=256k ),
+AAC stereo fallback. MP4 container.
+Optimized for platforms that accept AV1 (YouTube, Netflix ingest).
+VMAF 97.70 at 1080p SDR, 90.65 at 4K HDR.
 .TP
 .B animation
 Anime/cartoon. CRF 16, lossless audio, ASS subs. MKV. HEVC 10\-bit (even SDR),
@@ -1555,6 +1573,43 @@ If DV handling fails, fall back to non\-DV output (default) or hard\-fail.
 .BR \-\-dv\-convert\-p81 " , " \-\-no\-dv\-convert\-p81
 Enable/disable automatic conversion to DV Profile 8.1 when native DV
 injection fails. Default: enabled.
+.SS Dolby Vision Fallback Chain
+When DV handling is active, muxm attempts each step in order and advances
+to the next only on failure:
+.IP 1. 4n
+Extract the RPU from the source and inject it into the encoded base layer
+as\-is (native profile preserved).
+.IP 2.
+If step 1 fails and
+.B \-\-dv\-convert\-p81
+is enabled (default): convert the RPU to DV Profile 8.1 and retry
+injection. Profile\ 5 and dual\-layer Profile\ 7 sources are the primary
+targets for this conversion.
+.IP 3.
+If step 2 also fails (or
+.B \-\-no\-dv\-convert\-p81
+was given) and
+.B \-\-allow\-dv\-fallback
+is enabled (default): produce non\-DV output. The base\-layer encode is
+kept; DV metadata is silently discarded. A warning is printed.
+.IP 4.
+If
+.B \-\-no\-allow\-dv\-fallback
+is set: exit with status\ 40. Use this in automated pipelines where
+silent DV loss would be unacceptable.
+.PP
+Summary of the controlling flags:
+.RS
+.TP
+.B \-\-no\-dv
+Skip DV handling entirely from the start (step 1 never runs).
+.TP
+.B \-\-no\-dv\-convert\-p81
+Disable the P8.1 conversion attempt (step 2 skipped).
+.TP
+.B \-\-no\-allow\-dv\-fallback
+Treat any DV failure as fatal rather than producing non\-DV output.
+.RE
 .TP
 .BR \-\-conservative\-vbv " , " \-\-no\-conservative\-vbv
 Enable/disable VBV guardrails that cap bitrate and buffer size per x265
@@ -1572,6 +1627,14 @@ Preferred audio languages (comma\-separated, e.g., eng,spa).
 .TP
 .BR \-\-audio\-force\-codec " " \fICODEC\fR
 Force all audio to a specific codec (e.g., aac).
+.TP
+.BR \-\-audio\-force\-bitrate " " \fIRATE\fR
+Override the bitrate for all non\-lossless audio output (e.g., 256k).
+Takes precedence over codec\-specific bitrate variables
+.RB ( EAC3_BITRATE_5_1 ", " EAC3_BITRATE_7_1 ", " STEREO_BITRATE )
+when set. The
+.B streaming\-av1
+profile sets this to 256k to pin Opus surround at an appropriate bitrate.
 .TP
 .BR \-\-audio\-lossless\-passthrough " , " \-\-no\-audio\-lossless\-passthrough
 Allow/disallow lossless codecs (TrueHD, DTS\-HD MA, FLAC) to copy through.
