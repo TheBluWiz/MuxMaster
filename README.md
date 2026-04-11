@@ -1,6 +1,6 @@
 # ![muxm](assets/muxm_header_small.png) MuxMaster
 
-[![Version](https://img.shields.io/badge/version-1.3.0-blue)](https://github.com/TheBluWiz/MuxMaster/releases)
+[![Version](https://img.shields.io/badge/version-1.4.0-blue)](https://github.com/TheBluWiz/MuxMaster/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)](#compatibility)
 [![License](https://img.shields.io/badge/license-freeware-green)](#license)
 
@@ -8,7 +8,7 @@
 
 ```bash
 # Install via Homebrew (macOS)
-brew install TheBluWiz/muxm/muxm
+brew install TheBluWiz/taps/muxm
 
 # Encode for Apple TV Direct Play — that's it
 muxm --profile atv-directplay-hq movie.mkv
@@ -219,7 +219,7 @@ If any stage fails, `muxm` logs the failure, cleans up incomplete temp files, an
 ### Homebrew (recommended — macOS)
 
 ```bash
-brew install TheBluWiz/muxm/muxm
+brew install TheBluWiz/taps/muxm
 muxm --install-completions      # bash/zsh tab completion
 ```
 
@@ -454,7 +454,7 @@ Beyond profiles and the core encoding pipeline, `muxm` ships with a set of opera
 ## ❓ FAQ
 
 **`muxm` says it requires Bash 4.3+ but I'm on macOS.**
-macOS ships Bash 3.2 (2007) due to licensing. If you installed via Homebrew (`brew install TheBluWiz/muxm/muxm`), this is handled automatically — the formula rewrites the shebang to use Homebrew's bash. For manual installs, run `brew install bash` and make sure `/opt/homebrew/bin/bash` (Apple Silicon) or `/usr/local/bin/bash` (Intel) appears before `/bin/bash` in your `$PATH`.
+macOS ships Bash 3.2 (2007) due to licensing. If you installed via Homebrew (`brew install TheBluWiz/taps/muxm`), this is handled automatically — the formula rewrites the shebang to use Homebrew's bash. For manual installs, run `brew install bash` and make sure `/opt/homebrew/bin/bash` (Apple Silicon) or `/usr/local/bin/bash` (Intel) appears before `/bin/bash` in your `$PATH`.
 
 **Dolby Vision handling seems to be disabled / I don't see DV in my output.**
 DV processing requires `dovi_tool` and, for MP4 container signaling, `MP4Box` (gpac). If either is missing, `muxm` silently disables DV features rather than failing. Run `muxm --install-dependencies` to install them, or check with `muxm --dry-run` — the output will show whether DV was detected and what the pipeline plans to do with it.

@@ -1658,8 +1658,8 @@ _test_config_create_overrides() {
   out="$(run_muxm_in "$cfg_mp_dir" --create-config project youtube-upload,streaming 2>&1)"
   if [[ -f "$cfg_mp_dir/.muxmrc" ]]; then
     content="$(cat "$cfg_mp_dir/.muxmrc")"
-    if echo "$content" | grep -qE '^PROFILE_NAME="youtube-upload,streaming"'; then
-      pass "--create-config multi-profile: PROFILE_NAME=\"youtube-upload,streaming\" in .muxmrc"
+    if echo "$content" | grep -qE '^PROFILE_NAME="youtube-upload,streaming-hevc"'; then
+      pass "--create-config multi-profile: PROFILE_NAME=\"youtube-upload,streaming-hevc\" in .muxmrc (deprecated alias normalized)"
     else
       fail "--create-config multi-profile: PROFILE_NAME not set correctly (got: $(echo "$content" | grep PROFILE_NAME || echo '<not present>'))"
     fi

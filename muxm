@@ -21,6 +21,42 @@
 #     is often missing).
 # =============================================================================
 
+# =============================================================================
+#  Table of Contents
+# =============================================================================
+#  §  1  Strict mode & bash version guard ...............................  line    60
+#  §  2  Branding / CLI constants ......................................  line    87
+#  §  3  Globals ........................................................  line   104
+#  §  4  Opinionated defaults ..........................................  line   156
+#  §  5  Basic helpers ..................................................  line   308
+#  §  6  Config chain: Defaults → /etc → ~ → project ...................  line   859
+#  §  7  Dependency installer ..........................................  line   925
+#  §  8  Man page installer ............................................  line  1278
+#  §  9  Completion installer ..........................................  line  2263
+#  §  9b Full setup (--setup) ..........................................  line  2536
+#  § 10  Config generator ..............................................  line  2604
+#  § 11  Profiles & application ........................................  line  3364
+#  § 12  CLI parsing ...................................................  line  4016
+#  § 13  Profile + flag conflict warnings ..............................  line  4209
+#  § 14  Tool validation ...............................................  line  4616
+#  § 15  Input validation & security checks ............................  line  4667
+#  § 16  Build ffmpeg/ffprobe flags ....................................  line  4835
+#  § 17  Workdir & logging .............................................  line  4853
+#  § 18  Traps .........................................................  line  4884
+#  § 19  Disk space preflight ..........................................  line  4986
+#  § 20  Metadata caching & ffprobe helpers ............................  line  5183
+#  § 21  Report helpers & skip-if-ideal ................................  line  5203
+#  § 22  Color space & pixel format decision ...........................  line  5419
+#  § 23  x265 params & Level/VBV guardrails ............................  line  5503
+#  § 24  Dolby Vision detection ........................................  line  5561
+#  § 25  Temp paths ....................................................  line  5842
+#  § 26  Video pipeline ................................................  line  5921
+#  § 27  Audio selection & pipeline ....................................  line  6619
+#  § 28  Subtitle helpers (planner + OCR) ..............................  line  7502
+#  § 29  Final mux .....................................................  line  8645
+#  § 30  Main ..........................................................  line  9100
+# =============================================================================
+
 # ===== Section 1: Strict mode & bash version guard =============================================
 set -eEuo pipefail
 if shopt -q inherit_errexit 2>/dev/null; then shopt -s inherit_errexit; fi
@@ -37,7 +73,7 @@ if shopt -q inherit_errexit 2>/dev/null; then shopt -s inherit_errexit; fi
 #   - The [a-zA-Z0-9] range in OCR tool sanitization is a security reject-list
 #     (conservative direction under exotic locales)
 #   - No sort, no locale-sensitive printf formatting
-#   Validated by: LANG=C LC_ALL=C ./test_muxm.sh --suite all
+#   Validated by: LANG=C LC_ALL=C tests/test_muxm.sh --suite all
 
 # ---- Bash version guard ----
 # Namerefs (local -n), declare -i arrays, and other features require bash 4.3+.
@@ -51,7 +87,7 @@ fi
 # ===== Section 2: Branding / CLI constants =====================================================
 readonly APP_NAME="MuxMaster"
 readonly CLI_NAME="muxm"
-readonly VERSION="1.3.0"
+readonly VERSION="1.4.0"
 
 # Canonical list of valid profile names (space-separated for compgen/iteration).
 # All profile validation, error messages, completions, and config generators
@@ -70,7 +106,7 @@ declare -a COMPLETED_STEPS=()
 declare -a MUXM_CONFIG_LOADED=()
 WORKDIR=""
 LOGFILE=""
-_BURN_SRT_FILTER=""   # temp file for subtitle burn-in (outside WORKDIR; cleaned in on_exit)
+_BURN_SRT_FILTER=""   # temp file for subtitle burn-in (inside WORKDIR; cleaned in on_exit)
 FAILED=0
 FAIL_MSG=""
 EXIT_CODE=1
@@ -144,12 +180,15 @@ THREADS=""
 
 # ---- Dolby Vision policy
 declare -i DISABLE_DV=0
+declare -i _HAS_DOVI_TOOL=0   # set once at section 14 after tool validation
 declare -i ALLOW_DV_FALLBACK=1
 declare -i DV_CONVERT_TO_P81_IF_FAIL=1
 
 # ---- Audio selection (preferences & weights)
 AUDIO_LANG_PREF="eng"                 # comma-separated list
 AUDIO_CODEC_PREFERENCE="eac3,ac3,aac,alac,other"
+declare -A _AUDIO_CODEC_RANK_CACHE=()  # populated lazily by _audio_codec_rank
+_AUDIO_CODEC_RANK_PREF=""              # tracks AUDIO_CODEC_PREFERENCE used to build cache
 declare -i AUDIO_SCORE_CHANNEL_MULTIPLIER=20
 declare -i AUDIO_SCORE_SURROUND_BONUS=30
 declare -i AUDIO_SCORE_LANG_BONUS=150
@@ -309,7 +348,7 @@ spinner() {
   [[ -t ${TERM_FD:-2} ]] || show=0
   while kill -0 "$pid" 2>/dev/null; do
     (( show )) && _term_print '\r  %s  [ %s ]' "$msg" "${sym[i]}" || true
-    i=$(( (i+1) % 4 ))
+    (( i = (i+1) % 4 ))
     sleep 0.2
   done
   (( show )) && _term_print '\r  %s  [ done ]\n' "$msg" || true
@@ -340,6 +379,11 @@ _make_progress_pipe() {
   warn "Could not create progress pipe ($pipe_path) — progress display unavailable."
   return 1
 }
+
+# _repeat_char — print a character n times using pure bash (no seq dependency).
+# Portable alternative to `printf '%0.s' $(seq 1 n)`.
+# Args: $1 — character to repeat, $2 — count (0 or negative prints nothing)
+_repeat_char() { local char="$1" n="${2:-0}" i; for (( i=0; i<n; i++ )); do printf '%s' "$char"; done; }
 
 # ---- Progress bar — percentage-based for ffmpeg encodes ----
 # Reads ffmpeg -progress output from a named pipe and renders a terminal bar.
@@ -383,8 +427,8 @@ ffmpeg_progress_bar() {
         local filled empty
         filled=$(( pct * cols / 100 ))
         empty=$(( cols - filled ))
-        bar="$(printf '%0.s█' $(seq 1 "$filled" 2>/dev/null) || true)"
-        bar+="$(printf '%0.s░' $(seq 1 "$empty" 2>/dev/null) || true)"
+        bar="$(_repeat_char '█' "$filled")"
+        bar+="$(_repeat_char '░' "$empty")"
         _term_print '\r  %s  [%s] %3d%%' "$label" "$bar" "$pct"
         ;;
       progress)
@@ -395,7 +439,7 @@ ffmpeg_progress_bar() {
   done < "$pipe"
 
   # Ensure the bar reaches 100% visually
-  bar="$(printf '%0.s█' $(seq 1 "$cols"))"
+  bar="$(_repeat_char '█' "$cols")"
   _term_print '\r  %s  [%s] 100%%\n' "$label" "$bar"
 
   wait "$pid" 2>/dev/null
@@ -500,8 +544,37 @@ _lower(){ printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]'; }
 # Usage: _jq_cache -r '.format.duration // empty'
 #        _jq_cache -e '[.streams[] | …] | length > 0'
 # Globals: METADATA_CACHE (read)
-_jq_cache(){ printf '%s\n' "$METADATA_CACHE" | jq "$@" 2>/dev/null; }
+# Debug mode (DEBUG=1): logs filter, exit code, result, and any jq stderr to help
+# diagnose probe failures. Uses a reusable temp file in WORKDIR to avoid per-call
+# mktemp overhead; acceptable in debug mode where performance is not the priority.
+_jq_cache() {
+  if [[ "${DEBUG:-0}" != "1" ]]; then
+    printf '%s\n' "$METADATA_CACHE" | jq "$@" 2>/dev/null
+    return
+  fi
+  # Debug mode: capture stderr and log inputs/outputs for probe-failure diagnosis
+  local _jq_out _jq_rc _jq_err
+  local _jq_err_file="${WORKDIR:-/tmp}/jq_debug_err.tmp"
+  _jq_out="$(printf '%s\n' "$METADATA_CACHE" | jq "$@" 2>"$_jq_err_file")"
+  _jq_rc=$?
+  _jq_err="$(<"$_jq_err_file" 2>/dev/null)"
+  log "[jq_cache] filter: $*"
+  log "[jq_cache] rc=${_jq_rc}  result=${_jq_out:0:300}"
+  [[ -n "$_jq_err" ]] && log "[jq_cache] jq stderr: ${_jq_err:0:300}"
+  printf '%s\n' "$_jq_out"
+  return $_jq_rc
+}
 
+# Error handling strategy:
+#   die()      — Called explicitly for expected failures (bad input, missing tool,
+#                validation error). Sets FAILED/EXIT_CODE/FAIL_MSG and exits
+#                immediately; the EXIT trap (on_exit) handles cleanup.
+#   on_error() — ERR trap, fires on any unexpected non-zero exit under set -eEuo pipefail.
+#                Sets the same globals but does NOT call exit; the shell exits
+#                automatically after the ERR trap returns (due to set -e), which
+#                then triggers on_exit for cleanup.
+#   on_exit()  — EXIT trap that always runs. Reads FAILED/EXIT_CODE/FAIL_MSG to
+#                decide whether to commit the output or clean up after failure.
 die()  {
   local code=1
   if [[ $# -gt 1 && "$1" =~ ^[0-9]+$ ]]; then code="$1"; shift; fi
@@ -526,6 +599,26 @@ mark_done(){ COMPLETED_STEPS+=("$1"); }
 need(){
   command -v "$1" >/dev/null 2>&1 || die 10 "Missing required tool: $1"
 }
+
+# Cross-platform tool detection pattern used throughout this section:
+# Several tools ship under different names or have different flag syntax on macOS
+# (typically via Homebrew) vs Linux. The general approach is:
+#   1. Try the macOS/Homebrew variant first (e.g., MP4Box, stat -f, sed -i '')
+#   2. Fall back to the GNU/Linux variant (e.g., mp4box, stat -c, sed -i)
+#   3. Fall back to POSIX-portable alternatives (e.g., wc -c instead of stat)
+# Functions that implement this pattern: _detect_mp4box, realpath_fallback,
+# filesize_pretty, write_checksum, _sed_inplace (Section 9).
+#
+# Audit notes (verified 2026-04-11):
+#   - stat:      handled via BSD (-f%z) / GNU (-c%s) / gstat / wc fallback chain
+#   - sed -i:    handled via _sed_inplace (BSD requires '', GNU does not)
+#   - sed (pipe):non-inplace sed uses only POSIX s-commands; no -E flag or
+#                GNU extensions — portable on both BSD/macOS and GNU/Linux
+#   - date:      all calls use POSIX-compatible format strings (+%Y%m%d, etc.)
+#   - mktemp:    template-argument form used (POSIX-compatible on BSD and GNU)
+#   - grep:      only -i, -E, -o, -q, -v flags used (all POSIX/BSD-compatible)
+#   - readlink:  not used; path resolution handled via realpath_fallback
+#   - seq:       eliminated; replaced with _repeat_char (pure bash, fully portable)
 
 # Detect mp4box binary (name varies: MP4Box on macOS Homebrew, mp4box on Linux).
 # Sets global MP4BOX_CMD to the found binary name, or empty string if not found.
@@ -604,7 +697,7 @@ filesize_pretty(){
 }
 
 write_checksum(){
-  local p="$1"
+  local file_path="$1"
   local -a cmd=()
   local ext spinner_msg
 
@@ -639,20 +732,55 @@ write_checksum(){
       ;;
   esac
 
-  note "Writing checksum → ${p}.${ext}"
-  "${cmd[@]}" "$p" > "${p}.${ext}" &
+  note "Writing checksum → ${file_path}.${ext}"
+  "${cmd[@]}" "$file_path" > "${file_path}.${ext}" &
   local _cksum_pid=$!
   spinner "$_cksum_pid" "$spinner_msg"
   wait "$_cksum_pid" 2>/dev/null
 }
 
 # Validate that a media file exists, is non-empty, and is parseable by ffprobe.
+# Two-step approach:
+#   Step 1 — file must exist and have non-zero size (catches disk-full / write failure)
+#   Step 2 — ffprobe must confirm a valid video stream is present (catches corrupt mux)
 # Args: $1 — file path, $2 — context label for error message
 # Dies on failure.
 _validate_media_file(){
   local file="$1" label="${2:-output}"
-  [[ -s "$file" ]] || die 41 "$label produced empty file"
-  ffprobe -v error "$file" >/dev/null 2>&1 || die 41 "$label produced corrupt file"
+  # Step 1: file exists and has non-zero size
+  if [[ ! -s "$file" ]]; then
+    _check_disk_full "$file"
+    die 41 "$label produced empty file"
+  fi
+  # Step 2: ffprobe confirms a video stream is present (not just that the file is parseable)
+  local _vcodec
+  _vcodec="$(ffprobe -v error -select_streams v:0 \
+    -show_entries stream=codec_name -of csv=p=0 "$file" 2>/dev/null)" \
+    || die 41 "$label produced unreadable file (ffprobe failed)"
+  [[ -n "$_vcodec" ]] || die 41 "$label produced file with no video stream (ffprobe found: none)"
+  log "[validate] $label: OK — video codec=${_vcodec}, size=$(filesize_pretty "$file")"
+}
+
+# _check_disk_full — inspect an ffmpeg error log (or a file path on a volume)
+# for ENOSPC ("No space left on device") and emit a specific warning if found.
+# Call this before die() when an ffmpeg command or file operation fails, so the
+# user gets an actionable message instead of a generic "encode failed".
+# Args: $1 — error log file path (or any file on the relevant volume)
+# Globals: WORKDIR (read, for volume fallback)
+_check_disk_full() {
+  local errfile="${1:-}"
+  # Check error log text first (most reliable — ffmpeg prints the OS error)
+  if [[ -f "$errfile" ]] && grep -q "No space left on device" "$errfile" 2>/dev/null; then
+    warn "Disk full: 'No space left on device' detected — free space on the output volume and retry."
+    return 0
+  fi
+  # Fallback: check available space on the workdir volume directly
+  local avail_kb=""
+  local check_dir="${WORKDIR:-${OUT_DIR:-.}}"
+  avail_kb="$(df -Pk "$check_dir" 2>/dev/null | awk 'NR==2{print $4}')"
+  if [[ -n "$avail_kb" ]] && (( avail_kb < 1024 )); then
+    warn "Disk full: less than 1 MB free on temp volume ($check_dir) — free space and retry."
+  fi
 }
 
 # Check if ffmpeg supports a given muxer (e.g., "vobsub" — missing on macOS Homebrew).
@@ -672,13 +800,69 @@ is_valid_loglevel(){
   esac
 }
 
+# _normalize_codec_lang — lowercase codec and lang in-place; default lang to
+# TAG_LANGUAGE_DEFAULT when empty. Uses namerefs so callers can pass any variable names.
+# Args: $1 — name of codec variable, $2 — name of lang variable
+# Globals: TAG_LANGUAGE_DEFAULT (read)
+_normalize_codec_lang() {
+  local -n _ncl_c=$1 _ncl_l=$2
+  _ncl_c="${_ncl_c,,}"
+  _ncl_l="${_ncl_l,,}"
+  if [[ -z "$_ncl_l" ]]; then _ncl_l="$TAG_LANGUAGE_DEFAULT"; fi
+}
+
+# _log_dropped_tracks — emit each entry in a dropped-reasons array to the log file.
+# Args: $1 — label string (e.g. "multi-track"), $2 — name of dropped_reasons array (nameref)
+_log_dropped_tracks() {
+  local _ldt_label="$1"
+  local -n _ldt_reasons=$2
+  if (( ${#_ldt_reasons[@]} > 0 )); then
+    local _ldt_r
+    for _ldt_r in "${_ldt_reasons[@]}"; do
+      log "  [$_ldt_label] Dropped $_ldt_r"
+    done
+  fi
+}
+
+# _source_label — human-readable label for a subtitle source entry.
+# Embedded streams produce "#N"; external files produce their basename.
+# Args: $1 — source string ("embedded:N" or "ext:/abs/path")
+_source_label() {
+  local _sl_src="$1"
+  if [[ "$_sl_src" == embedded:* ]]; then
+    echo "#${_sl_src#embedded:}"
+  else
+    basename -- "${_sl_src#ext:}"
+  fi
+}
+
+# _check_filter_ideality — call a keep-list builder and set ideal=0 if any tracks
+# are dropped. Used by check_skip_if_ideal to avoid duplicated counting logic.
+# Args: $1 — stream type label (e.g. "audio"), $2 — builder fn name,
+#        $3 — count fn name, $4 — nameref to ideal variable, $5 — nameref to reason variable
+_check_filter_ideality() {
+  local _cfi_label="$1" _cfi_builder="$2" _cfi_counter="$3"
+  local -n _cfi_ideal=$4 _cfi_reason=$5
+  local _cfi_keep
+  _cfi_keep="$("$_cfi_builder")"
+  local -a _cfi_keep_arr
+  read -r -a _cfi_keep_arr <<< "$_cfi_keep"
+  local _cfi_n_keep="${#_cfi_keep_arr[@]}"
+  local _cfi_n_total
+  _cfi_n_total="$("$_cfi_counter")"
+  if [[ "$_cfi_n_keep" != "$_cfi_n_total" ]]; then
+    _cfi_ideal=0
+    _cfi_reason="$_cfi_label filter would drop $(( _cfi_n_total - _cfi_n_keep )) of $_cfi_n_total tracks"
+  fi
+}
+
 # ===== Section 6: Config chain: Defaults → /etc → ~ → project =================================
 # Config files are sourced as shell scripts — they can execute arbitrary code.
-# Security note: The project-level ./.muxmrc is sourced from $PWD. A malicious
-# .muxmrc in a directory the user cd's into could execute arbitrary commands.
-# This is the same trust model as .envrc (direnv), Makefile, etc. — standard
-# for developer tooling, but documented here for awareness.
-# See config_profile.md for the full security analysis of .muxmrc.
+# Security note: The project-level ./.muxmrc is sourced from $PWD intentionally.
+# A malicious .muxmrc placed in a directory the user cd's into could execute
+# arbitrary commands. This is the same trust model as .envrc (direnv), Makefile,
+# etc. — standard for developer tooling. See README.md (Config Chain section)
+# and docs/config_profile.md for profile behavior details.
 # Source a config file if it exists and is readable. Tracks loaded files for diagnostics.
 # Args: $1 — file path
 # Globals: MUXM_CONFIG_LOADED (modified)
@@ -723,7 +907,7 @@ unset _pcd_v
 
 _muxm_try_source /etc/.muxmrc
 _muxm_try_source "$HOME/.muxmrc"
-_muxm_try_source "./.muxmrc"
+_muxm_try_source "./.muxmrc"   # Sources from $PWD — intentional project-level override (see section header)
 
 # Deprecation bridge: AUDIO_SCORE_LANG_BONUS_ENG → AUDIO_SCORE_LANG_BONUS (v1.1)
 if [[ -n "${AUDIO_SCORE_LANG_BONUS_ENG:-}" ]]; then
@@ -753,10 +937,10 @@ fi
 # Does NOT attempt to install anything — the user's package manager is unknown.
 _dep_check_only(){
   say "=== ${APP_NAME} v${VERSION} — Dependency Check (no package manager detected) ==="
-  echo ""
+  printf '\n'
   say "Homebrew not found — skipping automatic installation."
   say "Checking which tools are already available:"
-  echo ""
+  printf '\n'
 
   local -i total=0 found=0 missing=0
 
@@ -787,7 +971,7 @@ _dep_check_only(){
   _check_tool ffprobe
   _check_tool jq
   _check_tool bc
-  echo ""
+  printf '\n'
 
   say "Dolby Vision pipeline (recommended):"
   _check_tool dovi_tool
@@ -801,19 +985,19 @@ _dep_check_only(){
     printf "❌ not found\n"
     missing=$(( missing + 1 ))
   fi
-  echo ""
+  printf '\n'
 
   say "Subtitle OCR (recommended):"
   _check_tool tesseract
   _check_tool pgsrip
-  echo ""
+  printf '\n'
 
   say "Summary: $total checked, $found found, $missing missing"
-  echo ""
+  printf '\n'
 
   if (( missing > 0 )); then
     say "Install missing tools with your system package manager:"
-    echo ""
+    printf '\n'
     printf "  %-14s %-24s %-24s %s\n" "Tool" "apt (Debian/Ubuntu)" "dnf (Fedora/RHEL)" "brew (macOS)"
     printf "  %-14s %-24s %-24s %s\n" "──────────" "────────────────────" "────────────────────" "────────────────"
     printf "  %-14s %-24s %-24s %s\n" "ffmpeg"     "apt install ffmpeg"     "dnf install ffmpeg"     "brew install ffmpeg"
@@ -823,7 +1007,7 @@ _dep_check_only(){
     printf "  %-14s %-24s %-24s %s\n" "mp4box"     "apt install gpac"       "dnf install gpac"       "brew install gpac"
     printf "  %-14s %-24s %-24s %s\n" "tesseract"  "apt install tesseract-ocr" "dnf install tesseract" "brew install tesseract"
     printf "  %-14s %-24s %-24s %s\n" "pgsrip"     "pipx install pgsrip"    "pipx install pgsrip"    "pipx install pgsrip"
-    echo ""
+    printf '\n'
     say "After installing, re-run: ${CLI_NAME} --install-dependencies"
     exit 1
   fi
@@ -834,7 +1018,7 @@ _dep_check_only(){
 
 _dep_install_dependencies(){
   say "=== ${APP_NAME} v${VERSION} — Dependency Installer ==="
-  echo ""
+  printf '\n'
 
   # ---- Preflight: need Homebrew for auto-install; fall back to check-only mode
   if ! command -v brew >/dev/null 2>&1; then
@@ -971,19 +1155,7 @@ _dep_install_dependencies(){
     fi
 
     brew tap homebrew-ffmpeg/ffmpeg 2>&1 | sed 's/^/    /' || true
-    if brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libass 2>&1 | sed 's/^/    /'; then
-      if command -v ffmpeg >/dev/null 2>&1; then
-        if ffmpeg -version 2>/dev/null | grep -q -- "--enable-libass"; then
-          printf "  %-14s✅ installed with libass\n" "ffmpeg"
-        else
-          printf "  %-14s✅ installed (verify libass with: ffmpeg -version | grep enable-libass)\n" "ffmpeg"
-        fi
-        installed=$(( installed + 1 ))
-      else
-        printf "  %-14s⚠️  install succeeded but ffmpeg not found in PATH\n" "ffmpeg"
-        failed=$(( failed + 1 ))
-      fi
-    else
+    if ! brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libass 2>&1 | sed 's/^/    /'; then
       # Fallback: if the tap fails, install standard ffmpeg so the tool is at least usable
       printf "  %-14s⚠️  homebrew-ffmpeg tap failed — falling back to standard ffmpeg\n" ""
       if brew install ffmpeg 2>&1 | sed 's/^/    /'; then
@@ -993,7 +1165,19 @@ _dep_install_dependencies(){
         printf "  %-14s❌ ffmpeg install failed\n" ""
         failed=$(( failed + 1 ))
       fi
+      return
     fi
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+      printf "  %-14s⚠️  install succeeded but ffmpeg not found in PATH\n" "ffmpeg"
+      failed=$(( failed + 1 ))
+      return
+    fi
+    if ffmpeg -version 2>/dev/null | grep -q -- "--enable-libass"; then
+      printf "  %-14s✅ installed with libass\n" "ffmpeg"
+    else
+      printf "  %-14s✅ installed (verify libass with: ffmpeg -version | grep enable-libass)\n" "ffmpeg"
+    fi
+    installed=$(( installed + 1 ))
   }
 
   say "Core tools (required):"
@@ -1010,7 +1194,7 @@ _dep_install_dependencies(){
   fi
   _brew_ensure jq       jq
   _brew_ensure bc       bc
-  echo ""
+  printf '\n'
 
   say "Dolby Vision pipeline (recommended):"
   _brew_ensure dovi_tool dovi_tool
@@ -1035,13 +1219,13 @@ _dep_install_dependencies(){
       failed=$(( failed + 1 ))
     fi
   fi
-  echo ""
+  printf '\n'
 
   say "Subtitle OCR pipeline (recommended for PGS/Blu-ray subtitles):"
   _brew_ensure tesseract tesseract
   _tessdata_ensure eng
   _pipx_ensure pgsrip   pgsrip
-  echo ""
+  printf '\n'
 
   # TESSDATA_PREFIX check
   say "Environment:"
@@ -1070,7 +1254,7 @@ _dep_install_dependencies(){
   else
     printf "ℹ️  SUB_OCR_TOOL=%s (pgsrip not installed)\n" "${SUB_OCR_TOOL:-sub2srt}"
   fi
-  echo ""
+  printf '\n'
 
   # Summary
   say "Summary: $total checked, $installed installed, $skipped already present, $failed failed"
@@ -1108,7 +1292,7 @@ _man_target_dir(){
 # <<< embedded man page >>>
 _man_emit(){
   cat <<'MANPAGE_EOF'
-.TH MUXM 1 "2026-03-29" "MuxMaster v1.3.0" "User Commands"
+.TH MUXM 1 "2026-04-11" "MuxMaster v1.4.0" "User Commands"
 .SH NAME
 muxm \- Universal DV/HLG/HDR10/SDR video encoder/muxer with format profiles
 .SH SYNOPSIS
@@ -2004,7 +2188,7 @@ _install_man(){
   local target="${mandir}/${CLI_NAME}.1"
 
   say "=== ${APP_NAME} v${VERSION} — Manual Page Installer ==="
-  echo ""
+  printf '\n'
   printf '  Target: %s\n' "$target"
 
   # Create directory if needed
@@ -2026,7 +2210,7 @@ _install_man(){
   fi
 
   printf '  ✅ Installed %s\n' "$target"
-  echo ""
+  printf '\n'
 
   # Update man database if mandb/makewhatis available
   if command -v mandb >/dev/null 2>&1; then
@@ -2048,7 +2232,7 @@ _uninstall_man(){
   local target="${mandir}/${CLI_NAME}.1"
 
   say "=== ${APP_NAME} v${VERSION} — Manual Page Uninstaller ==="
-  echo ""
+  printf '\n'
 
   if [[ ! -f "$target" ]]; then
     printf '  ⚠️  Man page not found at %s — nothing to remove.\n' "$target"
@@ -2243,7 +2427,7 @@ _install_completions(){
   local comp_file="$comp_dir/muxm-completion.bash"
 
   say "=== ${APP_NAME} v${VERSION} — Completion Installer ==="
-  echo ""
+  printf '\n'
 
   # Create directory (handle stale file from earlier installs)
   if [[ -e "$comp_dir" && ! -d "$comp_dir" ]]; then
@@ -2259,7 +2443,7 @@ _install_completions(){
   _completions_emit > "$comp_file"
   chmod +x "$comp_file"
   printf '  ✅ Wrote %s\n' "$comp_file"
-  echo ""
+  printf '\n'
 
   # Detect and patch shell RC files
   local -a rc_files=()
@@ -2289,7 +2473,7 @@ _install_completions(){
       fi
     done
 
-    echo ""
+    printf '\n'
     if (( patched > 0 )); then
       printf '  Restart your shell or run:\n'
       printf '    source %s\n' "$comp_file"
@@ -2306,7 +2490,7 @@ _uninstall_completions(){
   local comp_file="$comp_dir/muxm-completion.bash"
 
   say "=== ${APP_NAME} v${VERSION} — Completion Uninstaller ==="
-  echo ""
+  printf '\n'
 
   # Remove completion file
   if [[ -f "$comp_file" ]]; then
@@ -2335,7 +2519,7 @@ _uninstall_completions(){
     printf '  ✅ Removed empty %s\n' "$comp_dir"
   fi
 
-  echo ""
+  printf '\n'
   printf '  Restart your shell to complete removal.\n'
   exit 0
 }
@@ -2356,47 +2540,47 @@ unset _arg
 
 _setup_all(){
   say "=== ${APP_NAME} v${VERSION} — Full Setup ==="
-  echo ""
+  printf '\n'
   say "Running all installers: dependencies, manual page, tab completion."
-  echo ""
+  printf '\n'
 
   local -i failures=0
 
   # ---- 1. Dependencies ----
   say "━━━ Step 1/3: Dependencies ━━━"
-  echo ""
+  printf '\n'
   if ( _dep_install_dependencies ); then
     : # success
   else
     (( failures++ )) || true
   fi
-  echo ""
+  printf '\n'
 
   # ---- 2. Manual page ----
   say "━━━ Step 2/3: Manual Page ━━━"
-  echo ""
+  printf '\n'
   if ( _install_man ); then
     : # success
   else
     (( failures++ )) || true
   fi
-  echo ""
+  printf '\n'
 
   # ---- 3. Tab completion ----
   say "━━━ Step 3/3: Tab Completion ━━━"
-  echo ""
+  printf '\n'
   if ( _install_completions ); then
     : # success
   else
     (( failures++ )) || true
   fi
-  echo ""
+  printf '\n'
 
   # ---- Summary ----
   say "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   if (( failures == 0 )); then
     say "✅ Setup complete — ${APP_NAME} v${VERSION} is ready."
-    echo ""
+    printf '\n'
     printf '  Verify with:\n'
     printf '    man %s            # manual page\n' "$CLI_NAME"
     printf '    %s --version      # version check\n' "$CLI_NAME"
@@ -2532,58 +2716,58 @@ HEADER
   printf '#\n'
   printf '# Variables set by this profile are uncommented below.\n'
   printf '# All other variables are commented with their defaults — uncomment to customize.\n'
-  echo ""
+  printf '\n'
 
   echo "# ========================="
   echo "# Profile (format presets)"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Default profile to apply. CLI --profile overrides this value."
   echo "# Valid profiles: $(_valid_profiles_display)"
   echo "# Profiles set many variables at once; CLI flags still override individual values."
   printf 'PROFILE_NAME="%s"\n' "$profile"
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Video (x265/x264) fundamentals"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Video encoder: libx265 (default, HEVC) or libx264 (H.264, universal compat)"
   _V VIDEO_CODEC
-  echo ""
+  printf '\n'
   echo "# CRF (Constant Rate Factor): 0–51 (lower = higher quality, larger files)"
   echo "#   14–18: visually transparent  |  19–22: good balance  |  23–28: smaller files"
   _V CRF_VALUE
-  echo ""
+  printf '\n'
   echo "# Preset: speed/efficiency trade-off (faster → bigger files, slower → smaller)"
   echo "# Options: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow, placebo"
   _V PRESET_VALUE quoted
-  echo ""
+  printf '\n'
   echo "# Base x265 params: advanced tuning as a single string"
   echo "# Keep values colon-separated. Override entirely if you know what you're doing."
   _V X265_PARAMS_BASE quoted
-  echo ""
+  printf '\n'
   echo "# Base x264 params: advanced tuning as a single string (used by youtube-upload profile)"
   echo "# Keep values colon-separated (e.g., profile=high:rc-lookahead=60:aq-mode=2:aq-strength=1.0)"
   _V X264_PARAMS_BASE quoted
-  echo ""
+  printf '\n'
   echo "# Base SVT-AV1 params: advanced AV1 parameter string (used with libsvt-av1 / libaom-av1)"
   echo "# Keep values colon-separated (e.g., film-grain=0:enable-overlays=1:scd=1)"
   _V SVT_AV1_PARAMS_BASE quoted
-  echo ""
+  printf '\n'
   echo "# AV1 maxrate / bufsize: optional VBV-style rate control for AV1 encodes"
   echo "#   Example: AV1_MAXRATE=20000k AV1_BUFSIZE=40000k"
   _V AV1_MAXRATE
   _V AV1_BUFSIZE
-  echo ""
+  printf '\n'
   echo "# Level/IDR constraint for compatibility (e.g., 5.1). Leave empty to let encoder decide."
   _V LEVEL_VALUE
-  echo ""
+  printf '\n'
   echo "# Conservative VBV guardrails (apply when LEVEL_VALUE is set)"
   echo "#   1 = apply cautious vbv-maxrate/bufsize  |  0 = don't apply additional limits"
   _V CONSERVATIVE_VBV
-  echo ""
+  printf '\n'
   echo "# VBV guardrails: per-level maxrate/bufsize caps (used when CONSERVATIVE_VBV=1)"
   echo "#   These enforce hardware-decode-safe bitrate ceilings per HEVC level."
   echo "#   Only active when LEVEL_VALUE is set AND CONSERVATIVE_VBV=1."
@@ -2595,88 +2779,88 @@ HEADER
   _V LEVEL_VBV_5_1_BUFSIZE
   _V LEVEL_VBV_5_2_MAXRATE
   _V LEVEL_VBV_5_2_BUFSIZE
-  echo ""
+  printf '\n'
   echo "# Skip encode if source video already matches profile requirements"
   echo "#   1 = copy video stream if compliant (much faster)  |  0 = always re-encode"
   _V VIDEO_COPY_IF_COMPLIANT
-  echo ""
+  printf '\n'
   echo "# Maximum average bitrate (in kbps) for copy-if-compliant to accept."
   echo "#   Sources exceeding this are re-encoded instead of copied."
   echo "#   Empty = no bitrate check. Example: 50000k for Apple TV 4K."
   _V MAX_COPY_BITRATE
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Pixel format / Chroma"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Force chroma subsampling 4:2:0 (most Direct Play targets require 4:2:0)"
   echo "#   1 = downsample 4:2:2/4:4:4 → 4:2:0  |  0 = keep source chroma"
   _V FORCE_CHROMA_420
-  echo ""
+  printf '\n'
   echo "# SDR 10-bit policy: 1 = keep 10-bit if source is 10-bit SDR  |  0 = force 8-bit"
   _V SDR_USE_10BIT_IF_SRC_10BIT
-  echo ""
+  printf '\n'
   echo "# Force 10-bit output for SDR sources regardless of source bit depth"
   echo "#   1 = always encode SDR to 10-bit (prevents banding in animation)  |  0 = follow source"
   _V SDR_FORCE_10BIT
-  echo ""
+  printf '\n'
   echo "# Target pixel format when HDR (HLG/HDR10/DV base) is detected"
   _V HDR_TARGET_PIXFMT
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Tone-mapping (HDR → SDR)"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Tone-map HDR to SDR (used by the universal profile for max compatibility)"
   echo "#   1 = convert HDR/HLG sources to SDR  |  0 = preserve HDR (default)"
   _V TONEMAP_HDR_TO_SDR
-  echo ""
+  printf '\n'
   echo "# Tone-map filter chain: advanced ffmpeg filter string for HDR→SDR conversion."
   printf "#TONEMAP_FILTER='zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv,format=yuv420p'\n"
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Threads / parallelism"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Threads for ffmpeg (empty = let ffmpeg decide)"
   _V THREADS
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Dolby Vision handling"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Disable DV handling entirely: 1 = ignore DV  |  0 = detect and process DV"
   _V DISABLE_DV
-  echo ""
+  printf '\n'
   echo "# Allow fallback if DV injection/conversion fails: 1 = continue  |  0 = fatal"
   _V ALLOW_DV_FALLBACK
-  echo ""
+  printf '\n'
   echo "# Try converting Profile 7 RPU → Profile 8.1 if direct inject fails"
   _V DV_CONVERT_TO_P81_IF_FAIL
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Audio selection strategy"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Language preference list (comma-separated, empty = keep all languages)"
   _V AUDIO_LANG_PREF quoted
-  echo ""
+  printf '\n'
   echo "# Codec preference order (leftmost best)"
   _V AUDIO_CODEC_PREFERENCE quoted
-  echo ""
+  printf '\n'
   echo "# Force a specific audio track by index (0-based). Leave empty for auto."
   printf '#AUDIO_TRACK_OVERRIDE=\n'
-  echo ""
+  printf '\n'
   echo "# Scoring weights (advanced):"
   echo "#   Language bonus is weighted higher than channel count because selecting"
   echo "#   the wrong language is a worse outcome than fewer channels."
@@ -2685,86 +2869,86 @@ HEADER
   printf '#AUDIO_SCORE_CHANNEL_MULTIPLIER=20\n'
   printf '#AUDIO_SCORE_SURROUND_BONUS=30\n'
   printf '#AUDIO_SCORE_LANG_BONUS=150\n'
-  echo ""
+  printf '\n'
   echo "# Penalty applied to commentary / audio-description tracks (detected by title tag)."
   echo "# Set to 0 to disable commentary detection."
   printf '#AUDIO_SCORE_COMMENTARY_PENALTY=200\n'
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Multi-track audio (archival)"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Keep ALL matching audio tracks instead of selecting one."
   echo "# All tracks are stream-copied from source (never transcoded)."
   echo "# Filtering is subtractive: everything passes unless excluded by"
   echo "# AUDIO_LANG_PREF or AUDIO_KEEP_COMMENTARY."
   echo "#   1 = multi-track (filter + copy all)  |  0 = single-track (score + select one)"
   _V AUDIO_MULTI_TRACK
-  echo ""
+  printf '\n'
   echo "# Include commentary / audio-description tracks in multi-track mode"
   echo "#   1 = keep commentary  |  0 = drop commentary"
   _V AUDIO_KEEP_COMMENTARY
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Audio transcode policy"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Stereo AAC bitrate (when transcoding or creating a fallback)"
   _V STEREO_BITRATE
-  echo ""
+  printf '\n'
   echo "# Maximum output channels (caps E-AC-3 downmix target)"
   echo "#   6 = 5.1, 8 = 7.1"
   _V MAX_AUDIO_CHANNELS
-  echo ""
+  printf '\n'
   echo "# Add a stereo AAC fallback track when primary >2ch"
   _V ADD_STEREO_IF_MULTICH
-  echo ""
+  printf '\n'
   echo "# E-AC-3 bitrates for multichannel transcode"
   _V EAC3_BITRATE_5_1
   _V EAC3_BITRATE_7_1
-  echo ""
+  printf '\n'
   echo "# Force all audio to a specific codec (e.g., \"aac\" for universal playback)"
   _V AUDIO_FORCE_CODEC
   echo "# Override multichannel audio bitrate when AUDIO_FORCE_CODEC is set (e.g., \"256k\")"
   _V AUDIO_FORCE_BITRATE
-  echo ""
+  printf '\n'
   echo "# Allow lossless audio codecs (TrueHD, DTS-HD MA, FLAC) to pass through"
   echo "#   1 = copy lossless  |  0 = transcode to lossy"
   _V AUDIO_LOSSLESS_PASSTHROUGH
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Subtitles"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Language preference for subtitle track selection (comma-separated, empty = keep all)"
   _V SUB_LANG_PREF quoted
-  echo ""
+  printf '\n'
   echo "# Include forced subtitles (foreign dialogue, signs)"
   _V SUB_INCLUDE_FORCED
-  echo ""
+  printf '\n'
   echo "# Include full (non-forced) subtitle tracks"
   _V SUB_INCLUDE_FULL
-  echo ""
+  printf '\n'
   echo "# Include SDH/HI (subtitles for the deaf and hard of hearing)"
   _V SUB_INCLUDE_SDH
-  echo ""
+  printf '\n'
   echo "# Maximum subtitle tracks to include in output"
   _V SUB_MAX_TRACKS
-  echo ""
+  printf '\n'
   echo "# Burn forced subtitles into the video stream (hardcoded, cannot be turned off)"
   _V SUB_BURN_FORCED
-  echo ""
+  printf '\n'
   echo "# Export non-forced subtitles as external .srt files alongside output"
   echo "#   Note: When combined with SUB_BURN_FORCED=1, players that auto-load .srt"
   echo "#   sidecars (VLC, some smart TVs) will show doubled subtitles for foreign"
   echo "#   dialogue. Use --no-sub-export-external if targeting these players."
   _V SUB_EXPORT_EXTERNAL
-  echo ""
+  printf '\n'
   # Detect available OCR tools on this machine
   local _detected_ocr_tool=""
   local _has_tesseract=0
@@ -2788,7 +2972,7 @@ HEADER
   else
     printf '#SUB_ENABLE_OCR=1\n'
   fi
-  echo ""
+  printf '\n'
   echo "# OCR tool for bitmap → text subtitle conversion"
   echo "# Supported: \"pgsrip\", \"sub2srt\""
   echo "# pgsrip requires: pgsrip (pipx) + tesseract. Install via --install-dependencies."
@@ -2799,128 +2983,128 @@ HEADER
     printf '# No OCR tool detected. Install pgsrip or sub2srt and regenerate, or uncomment manually.\n'
     printf '#SUB_OCR_TOOL=sub2srt\n'
   fi
-  echo ""
+  printf '\n'
   echo "# OCR language for Tesseract (ISO 639-3, e.g., eng, fra, deu)"
   printf '#SUB_OCR_LANG=eng\n'
-  echo ""
+  printf '\n'
   echo "# Preserve native text subtitle formats (ASS/SSA) instead of converting to SRT"
   echo "#   1 = keep ASS/SSA styling (positioning, fonts, typesetting)  |  0 = convert to SRT"
   echo "#   Only effective when output container is MKV; ignored for MP4/MOV."
   echo "#   The animation profile enables this by default."
   _V SUB_PRESERVE_TEXT_FORMAT
-  echo ""
+  printf '\n'
   echo "# Preserve PGS/VobSub bitmap subtitles via stream-copy when the output container supports them (MKV)."
   echo "#   1 = stream-copy bitmap subs (no OCR)  |  0 = always OCR to text"
   echo "#   Only effective for MKV output; ignored for MP4/MOV."
   _V SUB_PRESERVE_BITMAP
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Multi-track subtitles (archival)"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Keep ALL matching subtitle tracks instead of selecting one per type."
   echo "# All tracks are stream-copied from source (no OCR, no format conversion)."
   echo "# Filtering is subtractive: everything passes unless excluded by"
   echo "# SUB_LANG_PREF, SUB_INCLUDE_FORCED/FULL/SDH, or capped by SUB_MAX_TRACKS."
   echo "#   1 = multi-track (filter + copy all)  |  0 = single-track (pick one per type)"
   _V SUB_MULTI_TRACK
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# External subtitle discovery"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Discover external subtitle files alongside the source"
   echo "# (e.g. Movie.en.srt, Movie.en.forced.srt next to Movie.mkv)."
   echo "# Matched files are muxed in as additional subtitle tracks."
   echo "#   1 = enabled (default)  |  0 = disable discovery entirely (--no-ext-subs)"
   printf '#EXT_SUB_ENABLED=1\n'
-  echo ""
+  printf '\n'
   echo "# Override the directory searched for external subtitles"
   echo "# (default: same directory as the source file)"
   printf '#EXT_SUB_DIR=\n'
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Mux / output container"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Output extension: mp4|m4v|mov|mkv"
   _V OUTPUT_EXT
-  echo ""
+  printf '\n'
   echo "# Keep chapter markers in output"
   _V KEEP_CHAPTERS
-  echo ""
+  printf '\n'
   echo "# Strip non-essential metadata from output"
   _V STRIP_METADATA
-  echo ""
+  printf '\n'
   echo "# Embed profile tagline in container comment metadata (on by default when a profile is active)"
   _V PROFILE_COMMENT
-  echo ""
+  printf '\n'
   echo "# Default language tag for streams missing language metadata"
   printf '#TAG_LANGUAGE_DEFAULT=und\n'
-  echo ""
+  printf '\n'
   echo "# Generate descriptive titles for audio streams (e.g., \"5.1 Surround (E-AC-3)\")"
   _V INCLUDE_AUDIO_TITLES
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# Operational controls"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Write a checksum next to final output (algorithm set by CHECKSUM_ALGO)"
   _V CHECKSUM
-  echo ""
+  printf '\n'
   echo "# Checksum algorithm: sha256 | blake2b | auto (auto prefers b2sum, falls back to sha256)"
   _V CHECKSUM_ALGO
-  echo ""
+  printf '\n'
   echo "# Dry-run: plan the steps without generating real outputs"
   printf '#DRY_RUN=0\n'
-  echo ""
+  printf '\n'
   echo "# Skip processing if source already matches profile requirements"
   _V SKIP_IF_IDEAL
-  echo ""
+  printf '\n'
   echo "# Generate a JSON report alongside output"
   _V REPORT_JSON
-  echo ""
+  printf '\n'
   echo "# Warn when free disk space drops below this many GB during encode"
   printf '#DISK_FREE_WARN_GB=5\n'
-  echo ""
+  printf '\n'
   echo "# Enable smart disk space preflight estimation (1 = enabled, 0 = disable with --no-disk-check)"
   printf '#DISK_CHECK=1\n'
-  echo ""
+  printf '\n'
   echo "# Keep temporary workdir on failure (for debugging)"
   printf '#KEEP_TEMP=0\n'
-  echo ""
+  printf '\n'
   echo "# Keep temporary workdir even on success"
   printf '#KEEP_TEMP_ALWAYS=0\n'
-  echo ""
+  printf '\n'
   echo "# Replace the original source file with the output (requires interactive TTY)"
   printf '#REPLACE_SOURCE=0\n'
-  echo ""
+  printf '\n'
   echo "# Replace the original source file without confirmation (scripting-friendly)"
   printf '#FORCE_REPLACE_SOURCE=0\n'
-  echo ""
+  printf '\n'
 
-  echo ""
+  printf '\n'
   echo "# ========================="
   echo "# ffmpeg / ffprobe UX"
   echo "# ========================="
-  echo ""
+  printf '\n'
   echo "# Hide ffmpeg banner: 1 = hide  |  0 = show"
   printf '#FFMPEG_HIDE_BANNER=1\n'
-  echo ""
+  printf '\n'
   echo "# ffmpeg log level: quiet|panic|fatal|error|warning|info|verbose|debug|trace"
   _V FFMPEG_LOGLEVEL "quoted"
-  echo ""
+  printf '\n'
   echo "# Overwrite outputs without prompting"
   printf '#FFMPEG_OVERWRITE=1\n'
-  echo ""
+  printf '\n'
   echo "# ffprobe log level"
   printf '#FFPROBE_LOGLEVEL=error\n'
 
@@ -2940,11 +3124,11 @@ _create_config_emit_multi() {
 # CLI flags always override these values.
 HEADER
   printf '# Generated: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-  echo ""
+  printf '\n'
   printf 'PROFILE_NAME="%s"\n' "$profile"
 
   if (( ${#_CC_OVERRIDES[@]} > 0 )); then
-    echo ""
+    printf '\n'
     local _ovr_var _ovr_val
     for _ovr_var in "${!_CC_OVERRIDES[@]}"; do
       _ovr_val="${_CC_OVERRIDES[$_ovr_var]}"
@@ -2971,82 +3155,82 @@ _create_config() {
   while (( _cc_oi < ${#_cc_override_argv[@]} )); do
     _cc_flag="${_cc_override_argv[$_cc_oi]}"
     case "$_cc_flag" in
-      --crf)                        _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[CRF_VALUE]="$_cc_val";                _cc_oi=$((_cc_oi+2)) ;;
-      --preset)                     _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[PRESET_VALUE]="$_cc_val";             _cc_oi=$((_cc_oi+2)) ;;
-      --output-ext)                 _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[OUTPUT_EXT]="$_cc_val";               _cc_oi=$((_cc_oi+2)) ;;
-      --level)                      _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[LEVEL_VALUE]="$_cc_val";              _cc_oi=$((_cc_oi+2)) ;;
-      --video-codec)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[VIDEO_CODEC]="$_cc_val";              _cc_oi=$((_cc_oi+2)) ;;
-      --stereo-bitrate)             _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[STEREO_BITRATE]="$_cc_val";           _cc_oi=$((_cc_oi+2)) ;;
-      --sub-lang-pref)              _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SUB_LANG_PREF]="$_cc_val";            _cc_oi=$((_cc_oi+2)) ;;
-      --audio-lang-pref)            _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AUDIO_LANG_PREF]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
-      --ext-subs)                   _CC_OVERRIDES[EXT_SUB_ENABLED]=1;                                                                  _cc_oi=$((_cc_oi+1)) ;;
-      --no-ext-subs)                _CC_OVERRIDES[EXT_SUB_ENABLED]=0;                                                                  _cc_oi=$((_cc_oi+1)) ;;
-      --sub-burn-forced)            _CC_OVERRIDES[SUB_BURN_FORCED]=1;                                                                  _cc_oi=$((_cc_oi+1)) ;;
-      --no-sub-burn-forced)         _CC_OVERRIDES[SUB_BURN_FORCED]=0;                                                                  _cc_oi=$((_cc_oi+1)) ;;
-      --skip-if-ideal)              _CC_OVERRIDES[SKIP_IF_IDEAL]=1;                                                                    _cc_oi=$((_cc_oi+1)) ;;
-      --no-skip-if-ideal)           _CC_OVERRIDES[SKIP_IF_IDEAL]=0;                                                                    _cc_oi=$((_cc_oi+1)) ;;
-      --audio-lossless-passthrough) _CC_OVERRIDES[AUDIO_LOSSLESS_PASSTHROUGH]=1;                                                       _cc_oi=$((_cc_oi+1)) ;;
-      --no-audio-lossless-passthrough) _CC_OVERRIDES[AUDIO_LOSSLESS_PASSTHROUGH]=0;                                                    _cc_oi=$((_cc_oi+1)) ;;
-      --disk-check)                 _CC_OVERRIDES[DISK_CHECK]=1;                                                                       _cc_oi=$((_cc_oi+1)) ;;
-      --no-disk-check)              _CC_OVERRIDES[DISK_CHECK]=0;                                                                       _cc_oi=$((_cc_oi+1)) ;;
-      --checksum)                   _CC_OVERRIDES[CHECKSUM]=1;                                                                         _cc_oi=$((_cc_oi+1)) ;;
-      --no-checksum)                _CC_OVERRIDES[CHECKSUM]=0;                                                                         _cc_oi=$((_cc_oi+1)) ;;
-      --checksum-algo)              _CC_OVERRIDES[CHECKSUM_ALGO]="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[CHECKSUM]=1;      _cc_oi=$((_cc_oi+2)) ;;
+      --crf)                        _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[CRF_VALUE]="$_cc_val";                (( _cc_oi += 2 )) ;;
+      --preset)                     _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[PRESET_VALUE]="$_cc_val";             (( _cc_oi += 2 )) ;;
+      --output-ext)                 _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[OUTPUT_EXT]="$_cc_val";               (( _cc_oi += 2 )) ;;
+      --level)                      _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[LEVEL_VALUE]="$_cc_val";              (( _cc_oi += 2 )) ;;
+      --video-codec)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[VIDEO_CODEC]="$_cc_val";              (( _cc_oi += 2 )) ;;
+      --stereo-bitrate)             _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[STEREO_BITRATE]="$_cc_val";           (( _cc_oi += 2 )) ;;
+      --sub-lang-pref)              _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SUB_LANG_PREF]="$_cc_val";            (( _cc_oi += 2 )) ;;
+      --audio-lang-pref)            _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AUDIO_LANG_PREF]="$_cc_val";          (( _cc_oi += 2 )) ;;
+      --ext-subs)                   _CC_OVERRIDES[EXT_SUB_ENABLED]=1;                                                                  (( ++_cc_oi )) ;;
+      --no-ext-subs)                _CC_OVERRIDES[EXT_SUB_ENABLED]=0;                                                                  (( ++_cc_oi )) ;;
+      --sub-burn-forced)            _CC_OVERRIDES[SUB_BURN_FORCED]=1;                                                                  (( ++_cc_oi )) ;;
+      --no-sub-burn-forced)         _CC_OVERRIDES[SUB_BURN_FORCED]=0;                                                                  (( ++_cc_oi )) ;;
+      --skip-if-ideal)              _CC_OVERRIDES[SKIP_IF_IDEAL]=1;                                                                    (( ++_cc_oi )) ;;
+      --no-skip-if-ideal)           _CC_OVERRIDES[SKIP_IF_IDEAL]=0;                                                                    (( ++_cc_oi )) ;;
+      --audio-lossless-passthrough) _CC_OVERRIDES[AUDIO_LOSSLESS_PASSTHROUGH]=1;                                                       (( ++_cc_oi )) ;;
+      --no-audio-lossless-passthrough) _CC_OVERRIDES[AUDIO_LOSSLESS_PASSTHROUGH]=0;                                                    (( ++_cc_oi )) ;;
+      --disk-check)                 _CC_OVERRIDES[DISK_CHECK]=1;                                                                       (( ++_cc_oi )) ;;
+      --no-disk-check)              _CC_OVERRIDES[DISK_CHECK]=0;                                                                       (( ++_cc_oi )) ;;
+      --checksum)                   _CC_OVERRIDES[CHECKSUM]=1;                                                                         (( ++_cc_oi )) ;;
+      --no-checksum)                _CC_OVERRIDES[CHECKSUM]=0;                                                                         (( ++_cc_oi )) ;;
+      --checksum-algo)              _CC_OVERRIDES[CHECKSUM_ALGO]="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[CHECKSUM]=1;      (( _cc_oi += 2 )) ;;
       # Encoding params
-      --x265-params)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[X265_PARAMS_BASE]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
-      --x264-params)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[X264_PARAMS_BASE]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
-      --av1-params)                 _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SVT_AV1_PARAMS_BASE]="$_cc_val";       _cc_oi=$((_cc_oi+2)) ;;
-      --av1-maxrate)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AV1_MAXRATE]="$_cc_val";               _cc_oi=$((_cc_oi+2)) ;;
-      --av1-bufsize)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AV1_BUFSIZE]="$_cc_val";               _cc_oi=$((_cc_oi+2)) ;;
-      --max-copy-bitrate)           _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[MAX_COPY_BITRATE]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
-      --video-copy-if-compliant)    _CC_OVERRIDES[VIDEO_COPY_IF_COMPLIANT]=1;                                                           _cc_oi=$((_cc_oi+1)) ;;
-      --no-video-copy-if-compliant) _CC_OVERRIDES[VIDEO_COPY_IF_COMPLIANT]=0;                                                           _cc_oi=$((_cc_oi+1)) ;;
-      --conservative-vbv)           _CC_OVERRIDES[CONSERVATIVE_VBV]=1;                                                                  _cc_oi=$((_cc_oi+1)) ;;
-      --no-conservative-vbv)        _CC_OVERRIDES[CONSERVATIVE_VBV]=0;                                                                  _cc_oi=$((_cc_oi+1)) ;;
-      --threads)                    _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[THREADS]="$_cc_val";                   _cc_oi=$((_cc_oi+2)) ;;
+      --x265-params)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[X265_PARAMS_BASE]="$_cc_val";          (( _cc_oi += 2 )) ;;
+      --x264-params)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[X264_PARAMS_BASE]="$_cc_val";          (( _cc_oi += 2 )) ;;
+      --av1-params)                 _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SVT_AV1_PARAMS_BASE]="$_cc_val";       (( _cc_oi += 2 )) ;;
+      --av1-maxrate)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AV1_MAXRATE]="$_cc_val";               (( _cc_oi += 2 )) ;;
+      --av1-bufsize)                _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AV1_BUFSIZE]="$_cc_val";               (( _cc_oi += 2 )) ;;
+      --max-copy-bitrate)           _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[MAX_COPY_BITRATE]="$_cc_val";          (( _cc_oi += 2 )) ;;
+      --video-copy-if-compliant)    _CC_OVERRIDES[VIDEO_COPY_IF_COMPLIANT]=1;                                                           (( ++_cc_oi )) ;;
+      --no-video-copy-if-compliant) _CC_OVERRIDES[VIDEO_COPY_IF_COMPLIANT]=0;                                                           (( ++_cc_oi )) ;;
+      --conservative-vbv)           _CC_OVERRIDES[CONSERVATIVE_VBV]=1;                                                                  (( ++_cc_oi )) ;;
+      --no-conservative-vbv)        _CC_OVERRIDES[CONSERVATIVE_VBV]=0;                                                                  (( ++_cc_oi )) ;;
+      --threads)                    _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[THREADS]="$_cc_val";                   (( _cc_oi += 2 )) ;;
       # HDR/DV
-      --tonemap)                    _CC_OVERRIDES[TONEMAP_HDR_TO_SDR]=1;                                                                _cc_oi=$((_cc_oi+1)) ;;
-      --no-tonemap)                 _CC_OVERRIDES[TONEMAP_HDR_TO_SDR]=0;                                                                _cc_oi=$((_cc_oi+1)) ;;
-      --dv)                         _CC_OVERRIDES[DISABLE_DV]=0;                                                                        _cc_oi=$((_cc_oi+1)) ;;
-      --no-dv)                      _CC_OVERRIDES[DISABLE_DV]=1;                                                                        _cc_oi=$((_cc_oi+1)) ;;
-      --allow-dv-fallback)          _CC_OVERRIDES[ALLOW_DV_FALLBACK]=1;                                                                 _cc_oi=$((_cc_oi+1)) ;;
-      --no-allow-dv-fallback)       _CC_OVERRIDES[ALLOW_DV_FALLBACK]=0;                                                                 _cc_oi=$((_cc_oi+1)) ;;
-      --dv-convert-p81)             _CC_OVERRIDES[DV_CONVERT_TO_P81_IF_FAIL]=1;                                                         _cc_oi=$((_cc_oi+1)) ;;
-      --no-dv-convert-p81)          _CC_OVERRIDES[DV_CONVERT_TO_P81_IF_FAIL]=0;                                                         _cc_oi=$((_cc_oi+1)) ;;
-      --sdr-force-10bit)            _CC_OVERRIDES[SDR_FORCE_10BIT]=1;                                                                   _cc_oi=$((_cc_oi+1)) ;;
-      --no-sdr-force-10bit)         _CC_OVERRIDES[SDR_FORCE_10BIT]=0;                                                                   _cc_oi=$((_cc_oi+1)) ;;
+      --tonemap)                    _CC_OVERRIDES[TONEMAP_HDR_TO_SDR]=1;                                                                (( ++_cc_oi )) ;;
+      --no-tonemap)                 _CC_OVERRIDES[TONEMAP_HDR_TO_SDR]=0;                                                                (( ++_cc_oi )) ;;
+      --dv)                         _CC_OVERRIDES[DISABLE_DV]=0;                                                                        (( ++_cc_oi )) ;;
+      --no-dv)                      _CC_OVERRIDES[DISABLE_DV]=1;                                                                        (( ++_cc_oi )) ;;
+      --allow-dv-fallback)          _CC_OVERRIDES[ALLOW_DV_FALLBACK]=1;                                                                 (( ++_cc_oi )) ;;
+      --no-allow-dv-fallback)       _CC_OVERRIDES[ALLOW_DV_FALLBACK]=0;                                                                 (( ++_cc_oi )) ;;
+      --dv-convert-p81)             _CC_OVERRIDES[DV_CONVERT_TO_P81_IF_FAIL]=1;                                                         (( ++_cc_oi )) ;;
+      --no-dv-convert-p81)          _CC_OVERRIDES[DV_CONVERT_TO_P81_IF_FAIL]=0;                                                         (( ++_cc_oi )) ;;
+      --sdr-force-10bit)            _CC_OVERRIDES[SDR_FORCE_10BIT]=1;                                                                   (( ++_cc_oi )) ;;
+      --no-sdr-force-10bit)         _CC_OVERRIDES[SDR_FORCE_10BIT]=0;                                                                   (( ++_cc_oi )) ;;
       # Audio
-      --stereo-fallback)            _CC_OVERRIDES[ADD_STEREO_IF_MULTICH]=1;                                                             _cc_oi=$((_cc_oi+1)) ;;
-      --no-stereo-fallback)         _CC_OVERRIDES[ADD_STEREO_IF_MULTICH]=0;                                                             _cc_oi=$((_cc_oi+1)) ;;
-      --audio-force-codec)          _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AUDIO_FORCE_CODEC]="$_cc_val";         _cc_oi=$((_cc_oi+2)) ;;
-      --audio-force-bitrate)        _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AUDIO_FORCE_BITRATE]="$_cc_val";       _cc_oi=$((_cc_oi+2)) ;;
-      --audio-titles)               _CC_OVERRIDES[INCLUDE_AUDIO_TITLES]=1;                                                              _cc_oi=$((_cc_oi+1)) ;;
-      --no-audio-titles)            _CC_OVERRIDES[INCLUDE_AUDIO_TITLES]=0;                                                              _cc_oi=$((_cc_oi+1)) ;;
+      --stereo-fallback)            _CC_OVERRIDES[ADD_STEREO_IF_MULTICH]=1;                                                             (( ++_cc_oi )) ;;
+      --no-stereo-fallback)         _CC_OVERRIDES[ADD_STEREO_IF_MULTICH]=0;                                                             (( ++_cc_oi )) ;;
+      --audio-force-codec)          _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AUDIO_FORCE_CODEC]="$_cc_val";         (( _cc_oi += 2 )) ;;
+      --audio-force-bitrate)        _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[AUDIO_FORCE_BITRATE]="$_cc_val";       (( _cc_oi += 2 )) ;;
+      --audio-titles)               _CC_OVERRIDES[INCLUDE_AUDIO_TITLES]=1;                                                              (( ++_cc_oi )) ;;
+      --no-audio-titles)            _CC_OVERRIDES[INCLUDE_AUDIO_TITLES]=0;                                                              (( ++_cc_oi )) ;;
       # Subtitles
-      --sub-preserve-format)        _CC_OVERRIDES[SUB_PRESERVE_TEXT_FORMAT]=1;                                                          _cc_oi=$((_cc_oi+1)) ;;
-      --no-sub-preserve-format)     _CC_OVERRIDES[SUB_PRESERVE_TEXT_FORMAT]=0;                                                          _cc_oi=$((_cc_oi+1)) ;;
-      --sub-preserve-bitmap)        _CC_OVERRIDES[SUB_PRESERVE_BITMAP]=1;                                                               _cc_oi=$((_cc_oi+1)) ;;
-      --no-sub-preserve-bitmap)     _CC_OVERRIDES[SUB_PRESERVE_BITMAP]=0;                                                               _cc_oi=$((_cc_oi+1)) ;;
-      --sub-export-external)        _CC_OVERRIDES[SUB_EXPORT_EXTERNAL]=1;                                                               _cc_oi=$((_cc_oi+1)) ;;
-      --no-sub-export-external)     _CC_OVERRIDES[SUB_EXPORT_EXTERNAL]=0;                                                               _cc_oi=$((_cc_oi+1)) ;;
-      --sub-sole-ext-fallback)      _CC_OVERRIDES[SUB_SOLE_EXT_FALLBACK]=1;                                                             _cc_oi=$((_cc_oi+1)) ;;
-      --no-sub-sole-ext-fallback)   _CC_OVERRIDES[SUB_SOLE_EXT_FALLBACK]=0;                                                             _cc_oi=$((_cc_oi+1)) ;;
-      --no-sub-sdh)                 _CC_OVERRIDES[SUB_INCLUDE_SDH]=0;                                                                   _cc_oi=$((_cc_oi+1)) ;;
-      --ocr-lang)                   _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SUB_OCR_LANG]="$_cc_val";              _cc_oi=$((_cc_oi+2)) ;;
-      --ocr-tool)                   _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SUB_OCR_TOOL]="$_cc_val";              _cc_oi=$((_cc_oi+2)) ;;
-      --no-ocr)                     _CC_OVERRIDES[SUB_ENABLE_OCR]=0;                                                                    _cc_oi=$((_cc_oi+1)) ;;
+      --sub-preserve-format)        _CC_OVERRIDES[SUB_PRESERVE_TEXT_FORMAT]=1;                                                          (( ++_cc_oi )) ;;
+      --no-sub-preserve-format)     _CC_OVERRIDES[SUB_PRESERVE_TEXT_FORMAT]=0;                                                          (( ++_cc_oi )) ;;
+      --sub-preserve-bitmap)        _CC_OVERRIDES[SUB_PRESERVE_BITMAP]=1;                                                               (( ++_cc_oi )) ;;
+      --no-sub-preserve-bitmap)     _CC_OVERRIDES[SUB_PRESERVE_BITMAP]=0;                                                               (( ++_cc_oi )) ;;
+      --sub-export-external)        _CC_OVERRIDES[SUB_EXPORT_EXTERNAL]=1;                                                               (( ++_cc_oi )) ;;
+      --no-sub-export-external)     _CC_OVERRIDES[SUB_EXPORT_EXTERNAL]=0;                                                               (( ++_cc_oi )) ;;
+      --sub-sole-ext-fallback)      _CC_OVERRIDES[SUB_SOLE_EXT_FALLBACK]=1;                                                             (( ++_cc_oi )) ;;
+      --no-sub-sole-ext-fallback)   _CC_OVERRIDES[SUB_SOLE_EXT_FALLBACK]=0;                                                             (( ++_cc_oi )) ;;
+      --no-sub-sdh)                 _CC_OVERRIDES[SUB_INCLUDE_SDH]=0;                                                                   (( ++_cc_oi )) ;;
+      --ocr-lang)                   _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SUB_OCR_LANG]="$_cc_val";              (( _cc_oi += 2 )) ;;
+      --ocr-tool)                   _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[SUB_OCR_TOOL]="$_cc_val";              (( _cc_oi += 2 )) ;;
+      --no-ocr)                     _CC_OVERRIDES[SUB_ENABLE_OCR]=0;                                                                    (( ++_cc_oi )) ;;
       # Metadata/pipeline
-      --keep-chapters)              _CC_OVERRIDES[KEEP_CHAPTERS]=1;                                                                     _cc_oi=$((_cc_oi+1)) ;;
-      --no-keep-chapters)           _CC_OVERRIDES[KEEP_CHAPTERS]=0;                                                                     _cc_oi=$((_cc_oi+1)) ;;
-      --strip-metadata)             _CC_OVERRIDES[STRIP_METADATA]=1;                                                                    _cc_oi=$((_cc_oi+1)) ;;
-      --no-strip-metadata)          _CC_OVERRIDES[STRIP_METADATA]=0;                                                                    _cc_oi=$((_cc_oi+1)) ;;
-      --report-json)                _CC_OVERRIDES[REPORT_JSON]=1;                                                                       _cc_oi=$((_cc_oi+1)) ;;
-      --no-report-json)             _CC_OVERRIDES[REPORT_JSON]=0;                                                                       _cc_oi=$((_cc_oi+1)) ;;
-      --profile-comment)            _CC_OVERRIDES[PROFILE_COMMENT]=1;                                                                   _cc_oi=$((_cc_oi+1)) ;;
-      --no-profile-comment)         _CC_OVERRIDES[PROFILE_COMMENT]=0;                                                                   _cc_oi=$((_cc_oi+1)) ;;
+      --keep-chapters)              _CC_OVERRIDES[KEEP_CHAPTERS]=1;                                                                     (( ++_cc_oi )) ;;
+      --no-keep-chapters)           _CC_OVERRIDES[KEEP_CHAPTERS]=0;                                                                     (( ++_cc_oi )) ;;
+      --strip-metadata)             _CC_OVERRIDES[STRIP_METADATA]=1;                                                                    (( ++_cc_oi )) ;;
+      --no-strip-metadata)          _CC_OVERRIDES[STRIP_METADATA]=0;                                                                    (( ++_cc_oi )) ;;
+      --report-json)                _CC_OVERRIDES[REPORT_JSON]=1;                                                                       (( ++_cc_oi )) ;;
+      --no-report-json)             _CC_OVERRIDES[REPORT_JSON]=0;                                                                       (( ++_cc_oi )) ;;
+      --profile-comment)            _CC_OVERRIDES[PROFILE_COMMENT]=1;                                                                   (( ++_cc_oi )) ;;
+      --no-profile-comment)         _CC_OVERRIDES[PROFILE_COMMENT]=0;                                                                   (( ++_cc_oi )) ;;
       # Logging
-      --ffmpeg-loglevel)            _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[FFMPEG_LOGLEVEL]="$_cc_val";           _cc_oi=$((_cc_oi+2)) ;;
-      --ffprobe-loglevel)           _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[FFPROBE_LOGLEVEL]="$_cc_val";          _cc_oi=$((_cc_oi+2)) ;;
+      --ffmpeg-loglevel)            _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[FFMPEG_LOGLEVEL]="$_cc_val";           (( _cc_oi += 2 )) ;;
+      --ffprobe-loglevel)           _cc_val="${_cc_override_argv[$((_cc_oi+1))]}"; _CC_OVERRIDES[FFPROBE_LOGLEVEL]="$_cc_val";          (( _cc_oi += 2 )) ;;
       *)
         printf '❌ ERROR: Unknown config override: %s\n' "$_cc_flag" >&2
         printf '   Use --create-config without extra flags to generate a default template.\n' >&2
@@ -3084,16 +3268,27 @@ _create_config() {
   local _cc_is_multi=0
   if [[ "$profile" == *,* ]]; then
     _cc_is_multi=1
-    local _cc_mp _cc_mp_list=()
+    local _cc_mp _cc_mp_list=() _cc_norm_list=()
     IFS=',' read -ra _cc_mp_list <<< "$profile"
     for _cc_mp in "${_cc_mp_list[@]}"; do
       [[ -z "$_cc_mp" ]] && { printf '❌ ERROR: Empty profile name in list: %s\n' "$profile" >&2; exit 11; }
+      # Normalize deprecated aliases within each entry of a multi-profile list.
+      # The single-profile normalization above only fires when the whole string is an
+      # alias; for comma-separated lists each element must be checked individually so
+      # the config file is written with current canonical names, not deprecated ones.
+      case "$_cc_mp" in
+        dv-archival) warn "Profile 'dv-archival' is deprecated. Using 'archive' instead."; _cc_mp="archive" ;;
+        streaming)   warn "Profile 'streaming' is deprecated. Use 'streaming-hevc' instead."; _cc_mp="streaming-hevc" ;;
+      esac
       if ! _is_valid_profile "$_cc_mp"; then
         printf '❌ ERROR: Unknown profile: %s\n' "$_cc_mp" >&2
         printf '   Valid profiles: %s\n' "$(_valid_profiles_display)" >&2
         exit 11
       fi
+      _cc_norm_list+=("$_cc_mp")
     done
+    # Rebuild profile string from normalized entries
+    local _cc_IFS_save="$IFS"; IFS=','; profile="${_cc_norm_list[*]}"; IFS="$_cc_IFS_save"
   else
     if ! _is_valid_profile "$profile"; then
       printf '❌ ERROR: Unknown profile: %s\n' "$profile" >&2
@@ -3192,13 +3387,17 @@ while (( _i < ${#_prescan_args[@]} )); do
     if (( _i + 1 < ${#_prescan_args[@]} )); then
       PROFILE_NAME="${_prescan_args[$((_i+1))]}"
       _PROFILE_SOURCE="cli"
-      _i=$((_i + 2))
+      (( _i += 2 ))
     else
       die 11 "--profile requires a profile name ($(_valid_profiles_display))"
     fi
   else
     _filtered_args+=("${_prescan_args[$_i]}")
-    _i=$((_i + 1))
+    # Use pre-increment (++_i) rather than post-increment (_i++) so the arithmetic
+    # expression always evaluates to the new value (≥1), which is truthy.
+    # Post-increment returns the *old* value, so when _i==0 the expression yields 0
+    # (false) and set -e would silently exit the script before the main arg loop.
+    (( ++_i ))
   fi
 done
 # Replace positional parameters with filtered args (--profile consumed)
@@ -3736,6 +3935,7 @@ _run_multi_profiles() {
   # Build child flag args: _ORIG_FILTERED_ARGS with source/output positionals stripped.
   # Positionals are always collected at the end by the CLI parser; strip the last
   # ${#POSITIONALS[@]} elements (1 = source only, 2 = source + explicit output).
+  # _nflags = total arg count minus positionals = count of flag-only args to pass through.
   local -a _child_flags=()
   local -i _nargs=${#_ORIG_FILTERED_ARGS[@]}
   local -i _npos=${#POSITIONALS[@]}
@@ -4419,7 +4619,9 @@ need ffprobe
 need jq
 need bc
 if (( ! DISABLE_DV )); then
-  if ! command -v dovi_tool >/dev/null 2>&1; then
+  if command -v dovi_tool >/dev/null 2>&1; then
+    _HAS_DOVI_TOOL=1
+  else
     warn "dovi_tool not found — Dolby Vision handling will be disabled."
     DISABLE_DV=1
   fi
@@ -4631,6 +4833,10 @@ case "$OUTPUT_EXT" in
 esac
 
 # ===== Section 16: Build ffmpeg/ffprobe flags =================================================
+# Assemble the base flag arrays used for every ffmpeg and ffprobe invocation.
+# These arrays are prepended to command-specific flags throughout the pipeline,
+# ensuring consistent loglevel, banner suppression, overwrite policy, and probe
+# settings (analyzeduration/probesize) across all subprocess calls.
 FFMPEG_FLAGS=()
 FFPROBE_FLAGS=()
 
@@ -4725,7 +4931,7 @@ _cleanup_workdir() {
 # Globals read: FAILED, DRY_RUN, TMP_OUT, OUT, CHECKSUM, WORKDIR, DEBUG,
 #               KEEP_TEMP, KEEP_TEMP_ALWAYS, EXIT_CODE, FAIL_MSG, TERM_FD
 on_exit() {
-  # Clean up subtitle burn-in temp file (lives outside WORKDIR in /tmp)
+  # Clean up subtitle burn-in temp file (lives inside WORKDIR; explicit removal before workdir cleanup)
   [[ -n "${_BURN_SRT_FILTER:-}" && -f "$_BURN_SRT_FILTER" ]] && rm -f "$_BURN_SRT_FILTER"
 
   local have_result=0
@@ -4778,6 +4984,12 @@ on_exit() {
 trap 'on_exit' EXIT
 
 # ===== Section 19: Disk space preflight =======================================================
+# Estimates required disk space before starting an encode and aborts early if
+# the destination volume is likely too small. Estimation uses CRF-to-ratio
+# lookup tables (_crf_ratio) and preset multipliers (_preset_multiplier) to
+# derive an expected output bitrate from the source, with a 25% safety margin.
+# Both the output volume and the temp workdir volume are checked (they may differ
+# when WORKDIR is on a separate filesystem). Disable with DISK_CHECK=0.
 
 # _crf_ratio CODEC CRF — echo output/source bitrate ratio ×1000
 # Used by disk_free_warn to estimate encoded video size from source bitrate.
@@ -4954,43 +5166,50 @@ disk_free_warn() {
   fi
 
   # ---- Check temp volume (only when on a different device than output) ----
-  if [[ -n "${WORKDIR:-}" && -d "${WORKDIR:-}" ]]; then
-    local work_dev
-    work_dev="$(df -Pk "$WORKDIR" 2>/dev/null | awk 'NR==2{print $1}')"
-    if [[ -n "${out_dev:-}" && -n "$work_dev" && "$out_dev" != "$work_dev" ]]; then
-      local work_avail_kb
-      work_avail_kb="$(df -Pk "$WORKDIR" 2>/dev/null | awk 'NR==2{print $4}')"
-      if [[ -n "$work_avail_kb" ]] && (( work_avail_kb * 1024 < required )); then
-        local tmp_avail_gb
-        tmp_avail_gb="$(printf '%.1f' "$(echo "scale=2; $work_avail_kb / 1048576" | bc 2>/dev/null)" 2>/dev/null)" || \
-          tmp_avail_gb="$(( work_avail_kb / 1024 / 1024 ))"
-        warn "Estimated output ~${est_gb}GB but only ${tmp_avail_gb}GB free on temp volume ($WORKDIR)."
-        warn "Use --no-disk-check to suppress this warning."
-      fi
-    fi
-  fi
+  [[ -n "${WORKDIR:-}" && -d "${WORKDIR:-}" ]] || return 0
+  local work_dev
+  work_dev="$(df -Pk "$WORKDIR" 2>/dev/null | awk 'NR==2{print $1}')"
+  [[ -n "${out_dev:-}" && -n "$work_dev" && "$out_dev" != "$work_dev" ]] || return 0
+  local work_avail_kb
+  work_avail_kb="$(df -Pk "$WORKDIR" 2>/dev/null | awk 'NR==2{print $4}')"
+  [[ -n "$work_avail_kb" ]] && (( work_avail_kb * 1024 < required )) || return 0
+  local tmp_avail_gb
+  tmp_avail_gb="$(printf '%.1f' "$(echo "scale=2; $work_avail_kb / 1048576" | bc 2>/dev/null)" 2>/dev/null)" || \
+    tmp_avail_gb="$(( work_avail_kb / 1024 / 1024 ))"
+  warn "Estimated output ~${est_gb}GB but only ${tmp_avail_gb}GB free on temp volume ($WORKDIR)."
+  warn "Use --no-disk-check to suppress this warning."
 }
 
 # ===== Section 20: Metadata caching & ffprobe helpers =========================================
 # Cache all stream metadata in one call for performance
 cache_stream_metadata() {
   log "→ Caching stream metadata..."
-  METADATA_CACHE="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_format -show_streams -of json "$SRC_ABS" 2>/dev/null)" || {
-    die 12 "Failed to probe source file metadata - file may be corrupt"
+  local _probe_err_file="$WORKDIR/probe_meta.err"
+  METADATA_CACHE="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_format -show_streams -of json "$SRC_ABS" 2>"$_probe_err_file")" || {
+    local _probe_err
+    _probe_err="$(head -5 "$_probe_err_file" 2>/dev/null)"
+    die 12 "ffprobe failed to read source file: ${_probe_err:-file may be corrupt or inaccessible}. Try: ffprobe -v error \"$SRC_ABS\""
   }
   # Validate JSON integrity before downstream helpers rely on it
   _jq_cache empty || {
-    die 12 "ffprobe returned invalid JSON - file may be corrupt or ffprobe version incompatible"
+    die 12 "ffprobe returned invalid JSON — file may be corrupt or ffprobe version incompatible. Try: ffprobe -v error -show_format -of json \"$SRC_ABS\""
   }
+  if [[ "${DEBUG:-0}" == "1" ]]; then
+    log "[cache_stream_metadata] JSON size: ${#METADATA_CACHE} bytes"
+    log "[cache_stream_metadata] streams: $(_jq_cache -r '[.streams[].codec_type] | join(", ")' 2>/dev/null)"
+  fi
 }
 
 # ===== Section 21: Report helpers & skip-if-ideal =============================================
 
 # Add an entry to the JSON report accumulator.
-# Escapes backslash and double-quote to produce valid JSON.
+# Escapes backslash, double-quote, and ASCII control characters to produce valid JSON.
 report_add() {
-  local key="${1//\\/\\\\}"; key="${key//\"/\\\"}"
-  local val="${2//\\/\\\\}"; val="${val//\"/\\\"}"
+  # Escape in order: backslash first (must be first), then the other JSON special chars.
+  # Control characters (newline, tab, carriage-return) would break the JSON line structure
+  # if left bare, so they are replaced with their two-character escape sequences.
+  local key="${1//\\/\\\\}"; key="${key//\"/\\\"}"; key="${key//$'\n'/\\n}"; key="${key//$'\r'/\\r}"; key="${key//$'\t'/\\t}"
+  local val="${2//\\/\\\\}"; val="${val//\"/\\\"}"; val="${val//$'\n'/\\n}"; val="${val//$'\r'/\\r}"; val="${val//$'\t'/\\t}"
   REPORT_ENTRIES+=("\"${key}\": \"${val}\"")
 }
 
@@ -5064,16 +5283,7 @@ check_skip_if_ideal() {
   if (( ideal )) && (( AUDIO_MULTI_TRACK )); then
     # Multi-track: source is ideal only if every audio track survives the filter.
     # If any track would be dropped (commentary, wrong language), we need to remux.
-    local _ideal_keep
-    _ideal_keep="$(_build_audio_keep_list)"
-    local _ideal_n_keep _ideal_n_total
-    local -a _ideal_keep_arr
-    read -r -a _ideal_keep_arr <<< "$_ideal_keep"
-    _ideal_n_keep="${#_ideal_keep_arr[@]}"
-    _ideal_n_total="$(_audio_stream_count)"
-    if [[ "$_ideal_n_keep" != "$_ideal_n_total" ]]; then
-      ideal=0; reason="audio filter would drop $(( _ideal_n_total - _ideal_n_keep )) of $_ideal_n_total tracks"
-    fi
+    _check_filter_ideality "audio" "_build_audio_keep_list" "_audio_stream_count" ideal reason
   elif (( ideal )) && (( ! AUDIO_LOSSLESS_PASSTHROUGH )); then
     local n_audio a_codec
     n_audio="$(_audio_stream_count)"
@@ -5102,16 +5312,7 @@ check_skip_if_ideal() {
   if (( ideal )) && (( SUB_MULTI_TRACK )); then
     # Multi-track: source is ideal only if every subtitle track survives the filter.
     # If any track would be dropped (wrong language, excluded type, cap), we need to remux.
-    local _ideal_sub_keep
-    _ideal_sub_keep="$(_build_subtitle_keep_list)"
-    local _ideal_sub_n_keep _ideal_sub_n_total
-    local -a _ideal_sub_keep_arr
-    read -r -a _ideal_sub_keep_arr <<< "$_ideal_sub_keep"
-    _ideal_sub_n_keep="${#_ideal_sub_keep_arr[@]}"
-    _ideal_sub_n_total="$(_sub_count)"
-    if [[ "$_ideal_sub_n_keep" != "$_ideal_sub_n_total" ]]; then
-      ideal=0; reason="subtitle filter would drop $(( _ideal_sub_n_total - _ideal_sub_n_keep )) of $_ideal_sub_n_total tracks"
-    fi
+    _check_filter_ideality "subtitle" "_build_subtitle_keep_list" "_sub_count" ideal reason
   fi
 
   # ---- External subtitle check ----
@@ -5420,10 +5621,16 @@ detect_dv_info() {
       select(.side_data_type == "DOVI configuration record")')" || true
 
     if [[ -n "$side_data" ]]; then
-      DV_SRC_PROFILE="$(printf '%s\n' "$side_data" | jq -r '.dv_profile // empty' 2>/dev/null)" || true
-      DV_SRC_COMPAT_ID="$(printf '%s\n' "$side_data" | jq -r '.dv_bl_signal_compatibility_id // empty' 2>/dev/null)" || true
-      DV_SRC_BL_PRESENT="$(printf '%s\n' "$side_data" | jq -r '.bl_present_flag // empty' 2>/dev/null)" || true
-      DV_SRC_EL_PRESENT="$(printf '%s\n' "$side_data" | jq -r '.el_present_flag // empty' 2>/dev/null)" || true
+      { read -r DV_SRC_PROFILE
+        read -r DV_SRC_COMPAT_ID
+        read -r DV_SRC_BL_PRESENT
+        read -r DV_SRC_EL_PRESENT
+      } < <(printf '%s\n' "$side_data" | jq -r '
+          .dv_profile // "",
+          .dv_bl_signal_compatibility_id // "",
+          .bl_present_flag // "",
+          .el_present_flag // ""
+        ' 2>/dev/null) || true
     fi
   fi
 
@@ -5453,7 +5660,7 @@ _validate_dv_rpu() {
   local rpu_path="$1" rpu_info=""
   [[ -s "$rpu_path" ]] || { warn "RPU file is empty: $rpu_path"; return 1; }
 
-  if ! command -v dovi_tool >/dev/null 2>&1; then
+  if ! (( _HAS_DOVI_TOOL )); then
     warn "dovi_tool not available — cannot validate RPU integrity."
     return 0  # Non-fatal; proceed optimistically
   fi
@@ -5503,8 +5710,13 @@ verify_dv_container_record() {
   }
 
   local out_probe
-  out_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
-               stream_side_data -select_streams v:0 "$TMP_OUT" 2>&1)" || true
+  if ! out_probe="$(ffprobe "${FFPROBE_FLAGS[@]}" -show_streams -show_entries \
+               stream_side_data -select_streams v:0 "$TMP_OUT" 2>&1)"; then
+    warn "ffprobe could not probe output container — cannot verify DV configuration record."
+    warn "  Output may still be valid. Re-check with: ffprobe -show_streams \"$TMP_OUT\""
+    report_add "dv_container_record" "unknown (ffprobe failed to probe output)"
+    return 0
+  fi
 
   if printf '%s\n' "$out_probe" | grep -qiE "$DV_CONTAINER_PATTERN"; then
     note "✅ DOVI configuration record confirmed in output container."
@@ -5770,13 +5982,10 @@ _video_is_copy_compliant() {
   # Check DV profile compatibility when DV handling is active.
   # For atv-directplay-hq, only Profile 8 is acceptable for copy; other
   # profiles (e.g., P7) require RPU conversion and cannot be stream-copied.
-  if (( IS_DV && ! DISABLE_DV )); then
-    if [[ "${PROFILE_NAME:-}" == "atv-directplay-hq" ]]; then
-      if [[ "${DV_SRC_PROFILE:-}" != "8" ]]; then
-        _COPY_REJECT_REASON="DV profile ${DV_SRC_PROFILE:-?} requires conversion (need P8 for copy)"
-        return 1
-      fi
-    fi
+  if (( IS_DV && ! DISABLE_DV )) && [[ "${PROFILE_NAME:-}" == "atv-directplay-hq" ]] \
+     && [[ "${DV_SRC_PROFILE:-}" != "8" ]]; then
+    _COPY_REJECT_REASON="DV profile ${DV_SRC_PROFILE:-?} requires conversion (need P8 for copy)"
+    return 1
   fi
 
   # Bitrate ceiling: reject copy if source exceeds MAX_COPY_BITRATE.
@@ -5801,11 +6010,18 @@ _video_is_copy_compliant() {
     fi
 
     if [[ -n "$src_br_bps" && "$src_br_bps" =~ ^[0-9]+$ ]] && (( src_br_bps > 0 )); then
+      # MAX_COPY_BITRATE is specified as e.g. "80000k" — strip the trailing 'k'
+      # suffix to get a plain integer, then convert kbps → bps for comparison.
       max_br_kbps="${MAX_COPY_BITRATE%k}"
-      max_br_bps=$(( max_br_kbps * 1000 ))
-      if (( src_br_bps > max_br_bps )); then
-        _COPY_REJECT_REASON="bitrate ~$(( src_br_bps / 1000 ))kbps exceeds MAX_COPY_BITRATE=${MAX_COPY_BITRATE}"
-        return 1
+      # Guard: validate numeric before arithmetic to prevent bash error on bad config
+      if [[ ! "$max_br_kbps" =~ ^[0-9]+$ ]]; then
+        warn "MAX_COPY_BITRATE='${MAX_COPY_BITRATE}' is not a valid rate (expected e.g. '80000k') — skipping bitrate ceiling check."
+      else
+        max_br_bps=$(( max_br_kbps * 1000 ))
+        if (( src_br_bps > max_br_bps )); then
+          _COPY_REJECT_REASON="bitrate ~$(( src_br_bps / 1000 ))kbps exceeds MAX_COPY_BITRATE=${MAX_COPY_BITRATE}"
+          return 1
+        fi
       fi
     fi
   fi
@@ -5830,7 +6046,10 @@ _video_is_copy_compliant() {
 run_video_pipeline() {
   # Check copy-if-compliant first
   if (( VIDEO_COPY_IF_COMPLIANT )); then
-    if _video_is_copy_compliant; then
+    if ! _video_is_copy_compliant; then
+      note "Source video not compliant for copy — will re-encode."
+      report_add "video_action" "re-encode (not compliant)"
+    else
       note "→ Source video is compliant for target profile — will copy directly from source during mux."
       report_add "video_action" "copy (compliant)"
 
@@ -5842,7 +6061,7 @@ run_video_pipeline() {
       if (( IS_DV && ! DISABLE_DV )); then
         # Validate DV integrity in source before committing to copy path.
         # A corrupt RPU would pass through silently without this check.
-        if command -v dovi_tool >/dev/null 2>&1; then
+        if (( _HAS_DOVI_TOOL )); then
           note "→ Validating DV RPU integrity in source (copy path)…"
           # Quick RPU extraction to validate (piped, no temp file needed)
           local rpu_check="$WORKDIR/rpu_copy_check.bin"
@@ -5877,9 +6096,6 @@ run_video_pipeline() {
 
       mark_done "Video stream copy (compliant — direct source)"
       return 0
-    else
-      note "Source video not compliant for copy — will re-encode."
-      report_add "video_action" "re-encode (not compliant)"
     fi
   fi
 
@@ -5922,8 +6138,9 @@ run_video_pipeline() {
       if ! wait "$demux_pid" 2>/dev/null; then
         local codec
         codec="$(_probe_field codec_name)"
-        warn "Could not demux raw ES - source codec: ${codec:-unknown}. DV extraction may be skipped."
-        warn "See: $WORKDIR/demux.err for details"
+        warn "Could not demux raw HEVC ES (source codec: ${codec:-unknown})."
+        warn "  DV RPU extraction requires an HEVC source stream. Use --no-dv to skip DV processing."
+        warn "  See: $WORKDIR/demux.err for details."
         : > "$V_SRC_ES" 2>/dev/null || true
       fi
       mark_done "Demux raw ES → video_src.es"
@@ -5953,11 +6170,11 @@ run_video_pipeline() {
     # argument form (subtitles=/path) fails on many ffmpeg builds with
     # "No option name near '/path'".  Single quotes are ffmpeg filter-level
     # escaping, protecting the path from the filter graph parser (colons,
-    # commas, etc. are syntactic in that context).  We also copy to a temp
-    # directory with a PID-based name to avoid dots in WORKDIR components.
-    # Uses $TMPDIR (honoured by macOS, systemd, and containerised environments)
-    # with /tmp as the POSIX fallback.
-    _BURN_SRT_FILTER="${TMPDIR:-/tmp}/muxm-burn-$$.srt"
+    # commas, etc. are syntactic in that context).
+    # Security: Use WORKDIR (mktemp -d, unpredictable name, 0700 on Linux) so
+    # the path is not guessable by a local attacker — eliminates the TOCTOU
+    # race that a predictable /tmp/muxm-burn-$$.srt name would expose.
+    _BURN_SRT_FILTER="$WORKDIR/burn.srt"
     cp -f "$SRT_FORCED_BURN_PATH" "$_BURN_SRT_FILTER"
     vf_filters+=("subtitles=filename='${_BURN_SRT_FILTER}'")
     note "→ Burning forced subtitles into video stream"
@@ -6042,6 +6259,7 @@ run_video_pipeline() {
     total_secs="$(_get_source_duration_secs)"
     log "ffmpeg encode command: ffmpeg ${ff_cmd[*]}"
     if ! _ffmpeg_run_with_ui ff_cmd "Encoding video" "$WORKDIR/encode.err" "$total_secs"; then
+      _check_disk_full "$WORKDIR/encode.err"
       die 40 "Base video encode failed. See: $WORKDIR/encode.err"
     fi
 
@@ -6147,7 +6365,8 @@ run_video_pipeline() {
   # └─ Unknown profile → attempt passthrough with warning
 
   # Start with extracted RPU; used directly for injection in all cases
-  cp -f "$RPU_P7" "$RPU_FINAL" 2>/dev/null || true
+  cp -f "$RPU_P7" "$RPU_FINAL" 2>/dev/null \
+    || warn "Failed to copy extracted RPU to staging path — DV injection will likely fail."
 
   # Flag: set to 1 when the injected HEVC needs P7/P5→P8 conversion via
   # dovi_tool convert after RPU injection.
@@ -6275,7 +6494,7 @@ run_video_pipeline() {
   local v_frames rpu_frames
   v_frames="$(_count_video_frames "$V_MIXED")"
   # RPU frame count from dovi_tool info (if available)
-  if command -v dovi_tool >/dev/null 2>&1; then
+  if (( _HAS_DOVI_TOOL )); then
     rpu_frames="$(dovi_tool info -i "$RPU_FINAL" --summary 2>/dev/null \
                   | grep -oiE '[0-9]+ RPU' | grep -oE '[0-9]+' | head -1)" || true
     # Fallback: try parsing "Parsed X RPU" format
@@ -6522,19 +6741,26 @@ _audio_descriptive_title() {
 # Returns 10 for unlisted codecs — low preference but not a hard penalty.
 # This avoids crushing valid but uncommon codecs (e.g., Opus, FLAC) with
 # the ~97-point cliff that rank 99 would create.
+# Cache: rebuilds associative array only when AUDIO_CODEC_PREFERENCE changes.
 # Args: $1 — codec name (lowercased)
-# Globals: AUDIO_CODEC_PREFERENCE (read)
+# Globals: AUDIO_CODEC_PREFERENCE (read), _AUDIO_CODEC_RANK_CACHE/_AUDIO_CODEC_RANK_PREF (r/w)
 _audio_codec_rank(){
-  local codec="$1" list="$AUDIO_CODEC_PREFERENCE" item i=0
-  IFS=',' read -r -a arr <<<"$list"
-  for item in "${arr[@]}"; do
-    item="${item,,}"
-    item="${item// /}"   # strip spaces
-    [[ -z "$item" ]] && continue
-    if [[ "$item" == "$codec" ]]; then echo "$i"; return 0; fi
-    i=$(( i + 1 ))
-  done
-  echo "10"
+  declare -A _AUDIO_CODEC_RANK_CACHE 2>/dev/null || true
+  local codec="$1"
+  if [[ "$AUDIO_CODEC_PREFERENCE" != "$_AUDIO_CODEC_RANK_PREF" ]]; then
+    _AUDIO_CODEC_RANK_CACHE=()
+    local item i=0
+    local -a _arr
+    IFS=',' read -r -a _arr <<<"$AUDIO_CODEC_PREFERENCE"
+    for item in "${_arr[@]}"; do
+      item="${item,,}"; item="${item// /}"
+      [[ -z "$item" ]] && continue
+      _AUDIO_CODEC_RANK_CACHE["$item"]=$i
+      (( ++i ))
+    done
+    _AUDIO_CODEC_RANK_PREF="$AUDIO_CODEC_PREFERENCE"
+  fi
+  echo "${_AUDIO_CODEC_RANK_CACHE[$codec]:-10}"
 }
 
 # Check if a language tag matches any entry in AUDIO_LANG_PREF.
@@ -6603,9 +6829,7 @@ _score_audio_stream(){
   info="$(_audio_stream_info "$idx")"
   IFS=$'\t' read -r codec ch lang br title <<< "$info"
 
-  codec="${codec,,}"
-  lang="${lang,,}"
-  [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
+  _normalize_codec_lang codec lang
   [[ -z "$ch" || ! "$ch" =~ ^[0-9]+$ ]] && ch=0
   [[ -z "$br" || ! "$br" =~ ^[0-9]+$ ]] && br=0
 
@@ -6857,9 +7081,7 @@ _build_audio_keep_list(){
     local info codec lang ch br title
     info="$(_audio_stream_info "$i")"
     IFS=$'\t' read -r codec ch lang br title <<< "$info"
-    codec="${codec,,}"
-    lang="${lang,,}"
-    [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
+    _normalize_codec_lang codec lang
 
     # Filter 1: language
     if [[ -n "${AUDIO_LANG_PREF:-}" ]]; then
@@ -6878,13 +7100,7 @@ _build_audio_keep_list(){
     kept+=("$i")
   done
 
-  # Log filter results
-  if (( ${#dropped_reasons[@]} > 0 )); then
-    local reason
-    for reason in "${dropped_reasons[@]}"; do
-      log "  [multi-track] Dropped $reason"
-    done
-  fi
+  _log_dropped_tracks "multi-track" dropped_reasons
 
   echo "${kept[*]}"
 }
@@ -6925,9 +7141,7 @@ run_audio_pipeline_multi(){
     local info codec ch lang br title
     info="$(_audio_stream_info "$idx")"
     IFS=$'\t' read -r codec ch lang br title <<< "$info"
-    codec="${codec,,}"
-    lang="${lang,,}"
-    [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
+    _normalize_codec_lang codec lang
 
     AUDIO_MT_INDICES+=("$idx")
     AUDIO_MT_CODECS+=("$codec")
@@ -6952,9 +7166,7 @@ run_audio_pipeline_multi(){
     local _ainfo _c _ch_i _l _br_i _t pretty marker=""
     _ainfo="$(_audio_stream_info "$i")"
     IFS=$'\t' read -r _c _ch_i _l _br_i _t <<< "$_ainfo"
-    _c="${_c,,}"
-    _l="${_l,,}"
-    [[ -z "$_l" ]] && _l="$TAG_LANGUAGE_DEFAULT"
+    _normalize_codec_lang _c _l
     [[ -z "$_br_i" || ! "$_br_i" =~ ^[0-9]+$ ]] && _br_i=0
 
     # Check if this index is in the keep list
@@ -7051,9 +7263,7 @@ run_audio_pipeline(){
     local _ainfo _c _ch_i _l _br_i _t pretty
     _ainfo="$(_audio_stream_info "$i")"
     IFS=$'\t' read -r _c _ch_i _l _br_i _t <<< "$_ainfo"
-    _c="${_c,,}"
-    _l="${_l,,}"
-    [[ -z "$_l" ]] && _l="$TAG_LANGUAGE_DEFAULT"
+    _normalize_codec_lang _c _l
     [[ -z "$_br_i" || ! "$_br_i" =~ ^[0-9]+$ ]] && _br_i=0
 
     pretty="#$i: $_c ${_ch_i}ch [$_l]"
@@ -7240,38 +7450,7 @@ run_audio_pipeline(){
     local stereo_total_secs
     stereo_total_secs="$(_get_source_duration_secs)"
 
-    if [[ -n "$_native_si" ]]; then
-      note "[Audio] Native stereo track found (stream #${_native_si}, ${_native_sc} 2ch). Preferring over synthetic downmix."
-      # Copy if codec is compatible with the output container; otherwise transcode to AAC.
-      local _ns_do_copy=0
-      case "$OUTPUT_EXT" in
-        mkv) _ns_do_copy=1 ;;
-        mp4|m4v|mov)
-          case "$_native_sc" in aac|ac3|eac3) _ns_do_copy=1 ;; esac ;;
-      esac
-      if (( _ns_do_copy )); then
-        ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map "0:a:${_native_si}" -c copy "$AAC_STEREO" \
-          2>"$WORKDIR/audio_stereo.err" &
-        local _ns_pid=$!
-        spinner "$_ns_pid" "Copying native stereo track"
-        if ! wait "$_ns_pid" 2>/dev/null; then
-          warn "Native stereo copy failed - continuing without it. See: $WORKDIR/audio_stereo.err"
-          AAC_STEREO=""
-        else
-          mark_done "Stereo fallback prepared (native)"
-        fi
-      else
-        # shellcheck disable=SC2034  # used by name-reference in _ffmpeg_run_with_ui
-        local -a stereo_cmd=("${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map "0:a:${_native_si}" \
-          -c:a aac -b:a "$STEREO_BITRATE" "$AAC_STEREO")
-        if ! _ffmpeg_run_with_ui stereo_cmd "Transcoding native stereo" "$WORKDIR/audio_stereo.err" "$stereo_total_secs"; then
-          warn "Native stereo transcode failed - continuing without it. See: $WORKDIR/audio_stereo.err"
-          AAC_STEREO=""
-        else
-          mark_done "Stereo fallback prepared (native)"
-        fi
-      fi
-    else
+    if [[ -z "$_native_si" ]]; then
       note "[Audio] No native stereo track available. Creating downmix from surround."
       log "→ Preparing stereo fallback → $AAC_STEREO"
       # shellcheck disable=SC2034  # used by name-reference in _ffmpeg_run_with_ui
@@ -7282,6 +7461,37 @@ run_audio_pipeline(){
         AAC_STEREO=""
       else
         mark_done "Stereo fallback prepared"
+      fi
+    else
+      note "[Audio] Native stereo track found (stream #${_native_si}, ${_native_sc} 2ch). Preferring over synthetic downmix."
+      # Copy if codec is compatible with the output container; otherwise transcode to AAC.
+      local _ns_do_copy=0
+      case "$OUTPUT_EXT" in
+        mkv) _ns_do_copy=1 ;;
+        mp4|m4v|mov)
+          case "$_native_sc" in aac|ac3|eac3) _ns_do_copy=1 ;; esac ;;
+      esac
+      if (( ! _ns_do_copy )); then
+        # shellcheck disable=SC2034  # used by name-reference in _ffmpeg_run_with_ui
+        local -a stereo_cmd=("${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map "0:a:${_native_si}" \
+          -c:a aac -b:a "$STEREO_BITRATE" "$AAC_STEREO")
+        if ! _ffmpeg_run_with_ui stereo_cmd "Transcoding native stereo" "$WORKDIR/audio_stereo.err" "$stereo_total_secs"; then
+          warn "Native stereo transcode failed - continuing without it. See: $WORKDIR/audio_stereo.err"
+          AAC_STEREO=""
+        else
+          mark_done "Stereo fallback prepared (native)"
+        fi
+      else
+        ffmpeg "${FFMPEG_FLAGS[@]}" -i "$SRC_ABS" -map "0:a:${_native_si}" -c copy "$AAC_STEREO" \
+          2>"$WORKDIR/audio_stereo.err" &
+        local _ns_pid=$!
+        spinner "$_ns_pid" "Copying native stereo track"
+        if ! wait "$_ns_pid" 2>/dev/null; then
+          warn "Native stereo copy failed - continuing without it. See: $WORKDIR/audio_stereo.err"
+          AAC_STEREO=""
+        else
+          mark_done "Stereo fallback prepared (native)"
+        fi
       fi
     fi
   else
@@ -7378,10 +7588,8 @@ describe_sub_stream(){
   info="$(_sub_stream_info "$i")"
   IFS=$'\t' read -r codec lang title forced <<< "$info"
 
-  codec="${codec,,}"
-  lang="${lang,,}"
-  [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
-  
+  _normalize_codec_lang codec lang
+
   (( forced )) && flags=" (forced)"
   if _is_sdh_title "$title"; then
     [[ -n "$flags" ]] && flags="$flags, "
@@ -7985,9 +8193,7 @@ merge_subtitle_sources(){
     local info codec lang title forced stype
     info="$(_sub_stream_info "$i")"
     IFS=$'\t' read -r codec lang title forced <<< "$info"
-    codec="${codec,,}"
-    lang="${lang,,}"
-    [[ -z "$lang" ]] && lang="$TAG_LANGUAGE_DEFAULT"
+    _normalize_codec_lang codec lang
 
     if (( forced )) || _is_forced_title "$title"; then
       stype="forced"
@@ -8054,11 +8260,7 @@ _build_subtitle_keep_list(){
 
     # Human-readable source label for diagnostic messages
     local src_label
-    if [[ "$src" == embedded:* ]]; then
-      src_label="#${src#embedded:}"
-    else
-      src_label="$(basename -- "${src#ext:}")"
-    fi
+    src_label="$(_source_label "$src")"
 
     # Filter 1: language
     if [[ -n "${SUB_LANG_PREF:-}" ]]; then
@@ -8093,13 +8295,7 @@ _build_subtitle_keep_list(){
     kept+=("$i")
   done
 
-  # Log filter results
-  if (( ${#dropped_reasons[@]} > 0 )); then
-    local reason
-    for reason in "${dropped_reasons[@]}"; do
-      log "  [multi-track subs] Dropped $reason"
-    done
-  fi
+  _log_dropped_tracks "multi-track subs" dropped_reasons
 
   # Apply SUB_MAX_TRACKS cap
   if (( ${#kept[@]} > SUB_MAX_TRACKS )); then
@@ -8382,31 +8578,33 @@ build_subtitle_plan(){
   fi
 
   # Prepare selected subtitles (up to SUB_MAX_TRACKS)
-  local p pick_count=0
+  local sub_path pick_count=0
   if [[ -n "$forced_uidx" ]]; then
-    p="$(_prepare_sub_from_source "${ALL_SUB_SOURCES[$forced_uidx]}")"
-    if [[ -n "$p" ]]; then
+    sub_path="$(_prepare_sub_from_source "${ALL_SUB_SOURCES[$forced_uidx]}")"
+    if [[ -z "$sub_path" ]]; then
+      : # preparation failed; skip silently
+    elif (( SUB_BURN_FORCED )); then
+      # Route forced sub to burn path (video pipeline will handle it)
       SRT_FORCED_LANG="${ALL_SUB_LANGS[$forced_uidx]}"
       SRT_FORCED_TITLE="Forced"
-      if (( SUB_BURN_FORCED )); then
-        # Route forced sub to burn path (video pipeline will handle it)
-        SRT_FORCED_BURN_PATH="$p"
-        note "[Subs] Prepared Forced for burn-in → $SRT_FORCED_BURN_PATH"
-        report_add "sub_forced" "burn-in"
-      else
-        SRT_FORCED="$p"
-        pick_count=$(( pick_count + 1 ))
-        note "[Subs] Prepared Forced → $SRT_FORCED"
-        report_add "sub_forced" "embedded"
-      fi
+      SRT_FORCED_BURN_PATH="$sub_path"
+      note "[Subs] Prepared Forced for burn-in → $SRT_FORCED_BURN_PATH"
+      report_add "sub_forced" "burn-in"
+    else
+      SRT_FORCED_LANG="${ALL_SUB_LANGS[$forced_uidx]}"
+      SRT_FORCED_TITLE="Forced"
+      SRT_FORCED="$sub_path"
+      pick_count=$(( pick_count + 1 ))
+      note "[Subs] Prepared Forced → $SRT_FORCED"
+      report_add "sub_forced" "embedded"
     fi
   fi
   if [[ -n "$full_uidx" && $pick_count -lt $SUB_MAX_TRACKS ]]; then
-    p="$(_prepare_sub_from_source "${ALL_SUB_SOURCES[$full_uidx]}")"
-    if [[ -n "$p" ]]; then
+    sub_path="$(_prepare_sub_from_source "${ALL_SUB_SOURCES[$full_uidx]}")"
+    if [[ -n "$sub_path" ]]; then
       SRT_FULL_LANG="${ALL_SUB_LANGS[$full_uidx]}"
       SRT_FULL_TITLE="${ALL_SUB_TITLES[$full_uidx]:-Full}"
-      _export_or_embed_sub "$p" "full"
+      _export_or_embed_sub "$sub_path" "full"
       if [[ -n "$_SUB_EMBED_PATH" ]]; then
         SRT_FULL="$_SUB_EMBED_PATH"
         pick_count=$(( pick_count + 1 ))
@@ -8414,11 +8612,11 @@ build_subtitle_plan(){
     fi
   fi
   if [[ -n "$sdh_uidx" && $pick_count -lt $SUB_MAX_TRACKS ]]; then
-    p="$(_prepare_sub_from_source "${ALL_SUB_SOURCES[$sdh_uidx]}")"
-    if [[ -n "$p" ]]; then
+    sub_path="$(_prepare_sub_from_source "${ALL_SUB_SOURCES[$sdh_uidx]}")"
+    if [[ -n "$sub_path" ]]; then
       SRT_SDH_LANG="${ALL_SUB_LANGS[$sdh_uidx]}"
       SRT_SDH_TITLE="SDH"
-      _export_or_embed_sub "$p" "sdh"
+      _export_or_embed_sub "$sub_path" "sdh"
       if [[ -n "$_SUB_EMBED_PATH" ]]; then
         SRT_SDH="$_SUB_EMBED_PATH"
         pick_count=$(( pick_count + 1 ))
@@ -8640,7 +8838,9 @@ mux_final() {
     for (( _mt_si=0; _mt_si<${#SUB_MT_SOURCES[@]}; _mt_si++ )); do
       local _mt_src="${SUB_MT_SOURCES[$_mt_si]}"
       if [[ "$_mt_src" == embedded:* ]]; then
-        # Embedded: map from source input using subtitle-relative index
+        # _emb_idx is the 0-based subtitle-stream-relative index as assigned by
+        # merge_subtitle_sources (which iterates 0..sub_count-1).  ffmpeg's :s:N
+        # selector also uses the subtitle-relative index, so no remapping is needed.
         local _emb_idx="${_mt_src#embedded:}"
         ff_map+=( -map "${_src_input_idx}:s:${_emb_idx}" )
       else
@@ -8887,6 +9087,7 @@ mux_final() {
   local mux_pid=$!
   spinner "$mux_pid" "Muxing final ${OUTPUT_EXT^^}"
   if ! wait "$mux_pid" 2>/dev/null; then
+    _check_disk_full "$WORKDIR/mux.err"
     die 41 "ffmpeg final mux failed. See: $WORKDIR/mux.err"
   fi
 
@@ -8986,8 +9187,10 @@ main() {
           local _sii_pid=$!
           spinner "$_sii_pid" "Applying metadata (copy-remux)"
           if ! wait "$_sii_pid" 2>/dev/null; then
+            _check_disk_full "$WORKDIR/skip_ideal_remux.err"
             die 41 "Skip-if-ideal metadata remux failed. See: $WORKDIR/skip_ideal_remux.err"
           fi
+          _validate_media_file "$TMP_OUT" "Skip-if-ideal remux"
 
           # Log stream counts if filtering occurred
           if (( ${#SII_AUDIO_INDICES[@]} < _sii_total_a )) || (( ${#SII_SUB_INDICES[@]} < _sii_total_s )); then
@@ -9000,8 +9203,10 @@ main() {
             cp -f "$SRC_ABS" "$TMP_OUT" &
             local _sii_cp_pid=$!
             spinner "$_sii_cp_pid" "Copying source to output"
-            wait "$_sii_cp_pid" 2>/dev/null
+            wait "$_sii_cp_pid" 2>/dev/null \
+              || die 41 "Failed to copy source to output (skip-if-ideal)"
           fi
+          _validate_media_file "$TMP_OUT" "Skip-if-ideal copy"
           note "Linked/copied source to output (already ideal)."
         fi
       fi
