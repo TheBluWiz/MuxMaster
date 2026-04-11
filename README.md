@@ -104,6 +104,8 @@ muxm --profile atv-directplay-hq movie.mkv
 
 High-fidelity AV1 encode via SVT-AV1. CRF 20, preset 6, lossless audio passthrough, MKV container, and SHA-256 checksum enabled by default. Dolby Vision is automatically disabled — the AV1 encode pipeline does not support DV muxing. Intended as a modern space-efficient alternative to `hdr10-hq` for clients with AV1 decode support.
 
+> **Requires AV1 encoder support in ffmpeg.** Unlike Dolby Vision tools, a missing AV1 encoder is a fatal error — ffmpeg will exit immediately. A standard `brew install ffmpeg` does not include AV1 encoders. Use `brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-svt-av1` for SVT-AV1 (`libsvtav1`) or `--with-libaom` for libaom (`libaom-av1`), or run `muxm --install-dependencies` to check what's available.
+
 ```bash
 muxm --profile av1-hq movie.mkv
 ```
@@ -121,6 +123,8 @@ muxm --profile streaming-hevc movie.mkv
 ### `streaming-av1` — AV1 Streaming
 
 AV1 streaming encode for modern clients with AV1 decode support (Fire TV Stick 4K Max, Chromecast with Google TV, web browsers). AV1 CRF 30, preset 6, Opus audio at 256k (`AUDIO_FORCE_BITRATE="256k"`), AAC stereo fallback, soft subtitles. Always outputs MP4. Strips DV; HDR10 preserved. Delivers smaller files than `streaming-hevc` at equivalent perceptual quality on supported hardware.
+
+> **Requires AV1 encoder support in ffmpeg** — see the note under [`av1-hq`](#av1-hq--high-quality-av1) above.
 
 ```bash
 muxm --profile streaming-av1 movie.mkv
@@ -231,6 +235,8 @@ This installs `muxm` with its required dependencies (bash 4.3+, ffmpeg, jq, bc) 
 muxm --install-dependencies       # installs everything missing in one pass
 ```
 
+After installing ffmpeg, `--install-dependencies` checks whether the installed build includes AV1 encoder support (`libsvtav1` or `libaom-av1`). If AV1 encoders are missing, it prints an advisory with the exact `brew` commands needed — nothing is automatically replaced, since swapping a working ffmpeg install is a significant step.
+
 Or install individually as needed:
 
 ```bash
@@ -261,6 +267,7 @@ muxm --setup                     # installs dependencies, man page, and tab comp
 **Optional (auto-disabled if missing):**
 
 - **ffmpeg with libass** (`ffmpeg-full` on Homebrew) – required for subtitle burn-in (`--sub-burn-forced`); the standard `ffmpeg` package works for all other features
+- **ffmpeg with AV1 encoder** (`libsvtav1` or `libaom-av1`) – required for `av1-hq` and `streaming-av1` profiles; a missing AV1 encoder is a fatal error (unlike missing DV tools, it cannot be silently disabled). Not included in the standard Homebrew `ffmpeg` formula.
 - **dovi_tool** – Dolby Vision RPU extraction/injection; DV handling is automatically disabled if missing
 - **MP4Box** (gpac) – DV container-level signaling verification
 - **tesseract** – OCR engine required by `pgsrip` for PGS bitmap subtitle conversion
@@ -445,7 +452,7 @@ Beyond profiles and the core encoding pipeline, `muxm` ships with a set of opera
 - **Live Progress Bar** – During encoding, `muxm` displays a live progress bar showing percentage complete and elapsed time via Unicode block characters (▏▎▍▌▋▊▉█), updated in real-time through a named FIFO. A clean single-line indicator replaces the raw ffmpeg output and clears automatically when the encode finishes.
 - **Smart Disk Space Preflight** – Before starting an encode, `muxm` estimates the required output size from the source video bitrate, CRF value, codec, preset, and audio configuration using conservative CRF-to-ratio lookup tables with a 25% safety margin. Both the output volume and the temp volume (when on a separate device) are checked. If available space appears insufficient, the run is aborted early rather than failing mid-encode and leaving a partial file. Use `--no-disk-check` to disable, or set `DISK_CHECK=0` in `.muxmrc`.
 - **Signal Handling** – `muxm` catches `SIGINT` (Ctrl-C), `SIGTERM`, and `SIGHUP` and performs a clean shutdown: partial output files and temp files are removed, the named FIFO is cleaned up, and a brief summary is printed before exit. No stray temp files left behind.
-- **DEBUG=1 Trace Mode** – Set `DEBUG=1` in your environment (`DEBUG=1 muxm --profile streaming movie.mkv`) to enable verbose trace output. Every major decision point — profile resolution, codec detection, DV identification, stream selection — is logged to stderr, making it straightforward to diagnose unexpected behavior without modifying the script.
+- **DEBUG=1 Trace Mode** – Set `DEBUG=1` in your environment (`DEBUG=1 muxm --profile streaming movie.mkv`) to enable verbose trace output. Every major decision point — profile resolution, codec detection, DV identification, stream selection — is logged to stderr, making it straightforward to diagnose unexpected behavior without modifying the script. Debug mode also traces jq metadata cache queries (filter expression, exit code, and result preview), which is useful for diagnosing probe failures or unexpected stream detection results.
 
 ---
 

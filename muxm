@@ -1130,11 +1130,18 @@ _dep_install_dependencies(){
     if command -v ffmpeg >/dev/null 2>&1; then
       # Check compiled-in build flags — most reliable across all install methods
       if ffmpeg -version 2>/dev/null | grep -q -- "--enable-libass"; then
-        printf "✅ already installed with libass (%s)\n" "$(command -v ffmpeg)"
-        skipped=$(( skipped + 1 ))
-        return
+        local _needs_av1_reinstall=0
+        ffmpeg -encoders 2>/dev/null | grep -q 'libsvtav1' || _needs_av1_reinstall=1
+        if (( _needs_av1_reinstall )); then
+          printf "⚠️  installed with libass but missing AV1 encoders — reinstalling with AV1 support...\n"
+        else
+          printf "✅ already installed with libass and AV1 support (%s)\n" "$(command -v ffmpeg)"
+          skipped=$(( skipped + 1 ))
+          return
+        fi
+      else
+        printf "⚠️  installed but built without libass (needed for --sub-burn-forced)\n"
       fi
-      printf "⚠️  installed but built without libass (needed for --sub-burn-forced)\n"
 
       # Identify which Homebrew formula is currently providing ffmpeg so we
       # uninstall the right one. Without this, `brew uninstall ffmpeg` may
@@ -1142,6 +1149,8 @@ _dep_install_dependencies(){
       local _current_formula=""
       if brew ls --versions homebrew-ffmpeg/ffmpeg/ffmpeg >/dev/null 2>&1; then
         _current_formula="homebrew-ffmpeg/ffmpeg/ffmpeg"
+      elif brew list 2>/dev/null | grep -q '^ffmpeg-full$'; then
+        _current_formula="ffmpeg-full"
       elif brew ls --versions ffmpeg >/dev/null 2>&1; then
         _current_formula="ffmpeg"
       fi
@@ -1155,12 +1164,18 @@ _dep_install_dependencies(){
     fi
 
     brew tap homebrew-ffmpeg/ffmpeg 2>&1 | sed 's/^/    /' || true
-    if ! brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libass 2>&1 | sed 's/^/    /'; then
+    if ! brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libass --with-svt-av1 --with-libaom 2>&1 | sed 's/^/    /'; then
       # Fallback: if the tap fails, install standard ffmpeg so the tool is at least usable
       printf "  %-14s⚠️  homebrew-ffmpeg tap failed — falling back to standard ffmpeg\n" ""
       if brew install ffmpeg 2>&1 | sed 's/^/    /'; then
         printf "  %-14s✅ installed (standard build — --sub-burn-forced may not work)\n" "ffmpeg"
         installed=$(( installed + 1 ))
+        if ! ffmpeg -encoders 2>/dev/null | grep -q 'libsvtav1'; then
+          printf "  %-14s⚠️  AV1 encoder (libsvtav1/SVT-AV1) not available in this ffmpeg build\n" ""
+        fi
+        if ! ffmpeg -encoders 2>/dev/null | grep -q 'libaom-av1'; then
+          printf "  %-14s⚠️  AV1 encoder (libaom-av1) not available in this ffmpeg build\n" ""
+        fi
       else
         printf "  %-14s❌ ffmpeg install failed\n" ""
         failed=$(( failed + 1 ))
@@ -1176,6 +1191,12 @@ _dep_install_dependencies(){
       printf "  %-14s✅ installed with libass\n" "ffmpeg"
     else
       printf "  %-14s✅ installed (verify libass with: ffmpeg -version | grep enable-libass)\n" "ffmpeg"
+    fi
+    if ! ffmpeg -encoders 2>/dev/null | grep -q 'libsvtav1'; then
+      printf "  %-14s⚠️  AV1 encoder (libsvtav1/SVT-AV1) not available in this ffmpeg build\n" ""
+    fi
+    if ! ffmpeg -encoders 2>/dev/null | grep -q 'libaom-av1'; then
+      printf "  %-14s⚠️  AV1 encoder (libaom-av1) not available in this ffmpeg build\n" ""
     fi
     installed=$(( installed + 1 ))
   }
@@ -1255,6 +1276,23 @@ _dep_install_dependencies(){
     printf "ℹ️  SUB_OCR_TOOL=%s (pgsrip not installed)\n" "${SUB_OCR_TOOL:-sub2srt}"
   fi
   printf '\n'
+
+  # Post-install AV1 advisory: if ffmpeg is still missing AV1 encoder support after
+  # the automated install attempt above, print a note. Not a failure.
+  if command -v ffmpeg >/dev/null 2>&1; then
+    local _missing_av1=0
+    ffmpeg -encoders 2>/dev/null | grep -q 'libsvtav1' || _missing_av1=1
+    ffmpeg -encoders 2>/dev/null | grep -q 'libaom-av1' || _missing_av1=1
+    if (( _missing_av1 )); then
+      say ""
+      warn "ffmpeg is installed but one or more AV1 encoders are still missing."
+      warn "  The automated install attempted: homebrew-ffmpeg/ffmpeg/ffmpeg --with-libass --with-svt-av1 --with-libaom"
+      warn "  If that tap or build failed, try manually:"
+      warn "    brew tap homebrew-ffmpeg/ffmpeg"
+      warn "    brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libass --with-svt-av1 --with-libaom"
+      warn "  AV1 profiles (--video-codec libsvtav1 / libaom-av1) will not work without this."
+    fi
+  fi
 
   # Summary
   say "Summary: $total checked, $installed installed, $skipped already present, $failed failed"
@@ -4644,10 +4682,11 @@ fi
 # Check AV1 encoder availability when libsvt-av1 or libaom-av1 is requested.
 # Non-fatal probe: warn if not available now; die when actually selected at runtime.
 if [[ "$VIDEO_CODEC" == "libsvt-av1" || "$VIDEO_CODEC" == "libaom-av1" ]]; then
-  if ! ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libsvtav1'; then
-    if [[ "$VIDEO_CODEC" == "libsvt-av1" ]]; then
-      die 10 "libsvtav1 encoder not available in this ffmpeg build. Install ffmpeg with SVT-AV1 support (e.g., brew install ffmpeg)."
-    fi
+  if [[ "$VIDEO_CODEC" == "libsvt-av1" ]] && ! ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libsvtav1'; then
+    die 10 "libsvtav1 encoder not available in this ffmpeg build. Install ffmpeg with SVT-AV1 support (e.g., brew install ffmpeg)."
+  fi
+  if [[ "$VIDEO_CODEC" == "libaom-av1" ]] && ! ffmpeg -hide_banner -encoders 2>/dev/null | grep -q 'libaom-av1'; then
+    die 10 "libaom-av1 encoder not available in this ffmpeg build. Install ffmpeg with libaom support (e.g., brew tap homebrew-ffmpeg/ffmpeg && brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libaom)."
   fi
 fi
 
@@ -6193,10 +6232,13 @@ run_video_pipeline() {
 
   if [[ "$VIDEO_CODEC" == "libsvt-av1" || "$VIDEO_CODEC" == "libaom-av1" ]]; then
     # AV1 encode (SVT-AV1 or libaom-av1)
+    # ffmpeg's encoder name is "libsvtav1" (no dash); "libsvt-av1" is muxm's user-facing alias.
+    local _ffmpeg_vcodec="$VIDEO_CODEC"
+    [[ "$_ffmpeg_vcodec" == "libsvt-av1" ]] && _ffmpeg_vcodec="libsvtav1"
     local av1_preset="${PRESET_VALUE:-6}"
     log "→ Encoding video (AV1, ${TARGET_PIXFMT}, preset ${av1_preset}, CRF ${CRF_VALUE}) → $V_BASE"
     encode_args=(
-      -c:v "$VIDEO_CODEC"
+      -c:v "$_ffmpeg_vcodec"
       -crf "$CRF_VALUE"
       -pix_fmt "$TARGET_PIXFMT"
       "${COLOR_ARGS[@]}"

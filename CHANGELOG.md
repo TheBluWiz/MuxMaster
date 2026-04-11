@@ -8,6 +8,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com), and this 
 
 ### Added
 
+- **Table of contents comment block** — 30-section TOC with line numbers added to the top of the script for navigability.
+- **Clarifying comments** — Added at `.muxmrc` sourcing, cross-platform detection, error handling strategy, FD 3 lifecycle, and other key locations throughout the script.
+- **`_check_disk_full()` helper** — Detects `ENOSPC` (disk-full) conditions in encode/mux failure output and surfaces a targeted error message.
+- **`_repeat_char()` pure-bash helper** — Replaces the external `seq` dependency for character repetition.
+- **`_normalize_codec_lang()`, `_log_dropped_tracks()`, `_source_label()`, `_check_filter_ideality()` DRY helpers** — Extracted repeated logic into named helpers to reduce duplication across pipeline paths.
+- **Debug `jq` logging (`DEBUG=1`)** — When `DEBUG=1`, logs the jq filter, exit code, and first 300 characters of output for every jq invocation.
+- **Post-install AV1 encoder advisory** — `--install-dependencies` now prints brew commands for AV1 encoders after ffmpeg installation.
+- **Runtime validation for `libaom-av1` encoder selection** — Exits early with a clear error when `libaom-av1` is selected but not available in the installed ffmpeg build.
+- **Two-step output verification in `_validate_media_file`** — Checks file existence first, then runs an ffprobe stream check, so each failure mode produces a distinct error.
+- **`MAX_COPY_BITRATE` arithmetic guard** — Guards against non-numeric values before using `MAX_COPY_BITRATE` in arithmetic expressions.
 - **`AUDIO_FORCE_BITRATE` variable and `--audio-force-bitrate` flag** — Sets a fixed bitrate for all non-lossless audio output (e.g., `AUDIO_FORCE_BITRATE="256k"`). Overrides codec-specific bitrate variables (`EAC3_BITRATE_5_1`, `EAC3_BITRATE_7_1`, `STEREO_BITRATE`) when set. Used by `streaming-av1` to pin Opus surround at 256k.
 - **AV1 (SVT-AV1) codec support** — `--video-codec libsvt-av1` enables full AV1 pipeline integration: CRF, preset, encoder params, conflict detection, disk space estimation, and config generation. Companion CLI flags: `--av1-params STR`, `--av1-maxrate KBPS`, `--av1-bufsize KBPS`.
 - **`--checksum-algo` flag** — Selects the checksum algorithm: `sha256`, `blake2b`, or `auto`. Specifying an algorithm implies `--checksum`; `auto` prefers `b2sum` and falls back to `sha256`.
@@ -20,17 +30,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com), and this 
 
 ### Changed
 
+- **Standardize blank-line output** — 132 `echo` calls used solely to print a blank line replaced with `printf '\n'`.
+- **Rename `$p` variables** — Cryptic `$p` variables renamed to `$file_path` / `$sub_path` in `write_checksum` and `build_subtitle_plan` for clarity.
+- **Guard-clause refactor** — `disk_free_warn`, `_video_is_copy_compliant`, `run_video_pipeline`, `run_audio_pipeline`, `build_subtitle_plan`, and `_ensure_ffmpeg_full` refactored to early-return guard-clause style.
+- **Void-context arithmetic** — 70+ `$((...))` expressions used for their side-effects (no value captured) converted to `((...))` form.
+- **Batch `jq` calls in `detect_dv_info`** — 4 sequential `jq` invocations merged into a single call, reducing subprocess overhead.
+- **Associative-array cache for `_audio_codec_rank`** — Codec rank lookups are now O(1) via a pre-built associative array instead of a linear scan.
+- **Cache `dovi_tool` availability at startup** — `command -v dovi_tool` is now checked once at startup and cached; repeated inline checks removed.
 - **`streaming` renamed to `streaming-hevc`** — The existing HEVC streaming profile is now canonically named `streaming-hevc`. The old name `streaming` is retained as a deprecated backwards-compatible alias — existing scripts and `.muxmrc` files will continue to work but will log a deprecation notice.
 - **Single-track subtitle mode preserves PGS bitmap subs** — When the output container supports bitmap subtitles (MKV), PGS tracks are stream-copied rather than OCR'd. OCR is used only when the container requires text subtitles (MP4) or the user explicitly disables preservation via `--no-sub-preserve-bitmap`.
 - **`write_checksum()` rewritten with algorithm dispatch** — Supports BLAKE2b, SHA-256, and auto-detection in a unified function replacing the previous single-algorithm implementation.
 
 ### Fixed
 
+- **`--help` and `--version` silently exiting** — `_prescan_args` used post-increment (`counter++`) from zero, which evaluates to `0` under `set -e` and triggered the ERR trap before the help/version output could print. Replaced with `counter=$(( counter + 1 ))`.
+- **Post-increment bug in config-override parser** — The same `(( flag++ ))` from-zero pattern in the boolean config-override parser caused silent exits when a boolean flag appeared at argument position 0. Fixed with `$(( flag + 1 ))` assignment form.
+- **`report_add` producing invalid JSON** — Values containing newlines, tabs, or carriage returns were written literally into the JSON string, producing unparseable output. Values are now escaped before insertion.
+- **Deprecated aliases not normalized in comma-separated multi-profile lists** — Deprecated profile aliases (e.g., `dv-archival`) were not resolved when passed as part of a comma-separated `--profile` list (e.g., `dv-archival,streaming`), causing an unknown-profile error. Alias normalization now runs before per-profile validation.
+- **False "DOVI record missing" warning when ffprobe failed** — When `ffprobe` itself failed (e.g., unsupported file), the empty output was being checked for a DOVI record, producing a spurious warning. The check is now skipped when ffprobe exits non-zero.
+- **RPU copy failure silently swallowed** — Errors from the `dovi_tool` RPU copy step were not surfaced; a failed RPU copy would silently produce a corrupt or incomplete output. The failure is now detected and propagated as a fatal error.
+- **SII remux/copy exit code silently discarded** — The exit code from the secondary-image-interleave remux and copy paths was not checked. Both paths now validate exit code and ffprobe the output before continuing.
+- **`--install-dependencies` not verifying AV1 encoder after ffmpeg install** — After installing ffmpeg, `--install-dependencies` did not confirm that the installed build included an AV1 encoder, so a missing encoder would only surface at encode time. The post-install check now verifies AV1 encoder availability and prints an advisory if absent.
 - **`libaom-av1` receiving wrong ffmpeg flags** — The encoder flag dispatch was passing `-svtav1-params` and `-preset` to `libaom-av1` encodes. `libaom-av1` uses `-aom-params` and `-cpu-used` instead; the dispatch now routes each flag set to the correct encoder.
 - **Opus multichannel bitrate using EAC3 values in `streaming-av1`** — The surround audio pass for `streaming-av1` was pulling `EAC3_BITRATE_5_1` / `EAC3_BITRATE_7_1` instead of an Opus-appropriate bitrate. `streaming-av1` now sets `AUDIO_FORCE_BITRATE="256k"`, which the audio pipeline prefers over codec-specific variables when set.
 - **Working file extension derived from encoder name instead of format** — Intermediate audio copy files were using the codec/encoder name (e.g., `libopus`) as the file extension instead of the container-appropriate format extension (e.g., `ogg`). The new `_audio_codec_ext()` helper maps encoder names to correct extensions, preventing "Unable to choose output format" errors for Opus and similar non-obvious codec/extension pairs.
 - **`--create-config` profile variable detection** — Snapshot baseline now captures script defaults before config file loading, preventing values set in `.muxmrc` from masking profile-owned variables in the generated config.
 - **`--checksum-algo` test assertions** — Moved from the boolean toggle array to explicit value-flag tests.
+
+### Security
+
+- **`_BURN_SRT_FILTER` temp file moved to `WORKDIR`** — The subtitle filter file was previously written to a PID-predictable `/tmp` path, making it vulnerable to symlink attacks. It is now created inside the mktemp-based `WORKDIR`, which is only accessible to the running process.
+
+### Docs
+
+- **`docs/config_profile.md` cross-references synced** — All 10 profile entries now include accurate script section cross-references matching the current TOC.
+- **`completions/muxm-completion.bash`** — Added missing `--x264-params` to the tab-completion flag list.
 
 ## [1.3.0] - 2026-03-29
 
