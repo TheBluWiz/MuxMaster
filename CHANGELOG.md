@@ -4,6 +4,14 @@ All notable changes to MuxMaster will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com), and this project adheres to [Semantic Versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+
+- **Hardware acceleration foundation (Phase 1)** — Plumbing for the upcoming VideoToolbox (v1.5.0) and NVENC (v1.6.0) backends. Introduces the `--hw-accel` CLI flag (and matching `HW_ACCEL` variable in `.muxmrc`) accepting `none`, `auto`, `videotoolbox`, or `nvenc`. Detection probes populate `HW_ACCEL_AVAILABLE` from `ffmpeg -encoders`; `auto` resolves to the best available backend. Compatibility gates identify incompatible combinations (Dolby Vision, `libaom-av1`, AV1 on VideoToolbox, pre-Ada NVENC for AV1) and fall back to software with a recorded reason. Explicit backends that aren't available fail fast with a precise error. No encode behavior changes yet: the existing software encoders remain in use.
+- **`docs/HW_ACCEL.md`** — Architecture document describing the resolver flow, gates, and forward plan for Phase 2 (VideoToolbox calibration) and Phase 3 (NVENC calibration).
+- **`hw_accel` test suite** (`tests/test_muxm.sh --suite hw_accel`) — Config-only regression coverage: CLI parsing, `.muxmrc` loading, CLI-over-rc precedence, rejection of invalid values, explicit-backend strict check, profile-level compatibility warnings, and `auto` resolution on platforms without hardware encoders.
+
 ## [1.4.0] - 2026-04-11
 
 ### Added

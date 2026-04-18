@@ -169,6 +169,20 @@ LEVEL_VBV_5_0_MAXRATE=25000k; LEVEL_VBV_5_0_BUFSIZE=50000k
 LEVEL_VBV_5_1_MAXRATE=40000k; LEVEL_VBV_5_1_BUFSIZE=80000k
 LEVEL_VBV_5_2_MAXRATE=60000k; LEVEL_VBV_5_2_BUFSIZE=120000k
 
+# ---- Hardware acceleration (Phase 1 foundation: scaffolding only)
+# HW_ACCEL selects the backend used by the video encoder dispatch layer.
+#   none         — force pure-software encoders (libx265/libx264/libsvt-av1)
+#   auto         — detect and pick the best available backend on this host
+#   videotoolbox — Apple Silicon VideoToolbox (HEVC/H.264; no AV1 HW encode)
+#   nvenc        — NVIDIA NVENC (HEVC/H.264; AV1 on Ada Lovelace/RTX 40+)
+# Phase 1 wires flag parsing, detection, and fallback gating; hardware
+# dispatch arms are filled in by Phase 2 (VideoToolbox) and Phase 3 (NVENC).
+HW_ACCEL="none"
+declare -i _CLI_HW_ACCEL_EXPLICIT=0
+declare -a HW_ACCEL_AVAILABLE=()   # populated by detect_hw_accel()
+HW_ACCEL_RESOLVED=""               # concrete backend after auto→explicit resolution
+HW_ACCEL_FALLBACK_REASON=""        # set when an incompatibility forces software fallback
+
 # ---- Pixel format / chroma policy
 declare -i FORCE_CHROMA_420=1
 declare -i SDR_USE_10BIT_IF_SRC_10BIT=1
@@ -800,6 +814,88 @@ is_valid_loglevel(){
   esac
 }
 
+# Validate HW_ACCEL values (used by .muxmrc validation + CLI parsing).
+# Accepted: none | auto | videotoolbox | nvenc
+is_valid_hw_accel(){
+  case "$1" in
+    none|auto|videotoolbox|nvenc) return 0;;
+    *) return 1;;
+  esac
+}
+
+# is_apple_silicon — true on arm64 Darwin (M-series and beyond).
+is_apple_silicon(){
+  [[ "$(uname -s 2>/dev/null)" == "Darwin" ]] && [[ "$(uname -m 2>/dev/null)" == "arm64" ]]
+}
+
+# ffmpeg_has_encoder — returns 0 if ffmpeg reports the named encoder.
+# Args: $1 — encoder name as listed by `ffmpeg -encoders` (e.g. hevc_videotoolbox).
+# Safe to call before tool validation: if ffmpeg is absent, grep returns 1 (not found).
+ffmpeg_has_encoder(){
+  local name="$1"
+  [[ -n "$name" ]] || return 1
+  ffmpeg -hide_banner -encoders 2>/dev/null | awk '{print $2}' | grep -qx "$name"
+}
+
+# detect_hw_accel — populate HW_ACCEL_AVAILABLE from ffmpeg's encoder list
+# and resolve HW_ACCEL="auto" to a concrete backend when possible.
+#
+# Non-fatal probe: when HW_ACCEL is set to an explicit backend that is not
+# available, HW_ACCEL_RESOLVED is left as "none" and the strict check in
+# Section 14 dies with a precise error. This mirrors the AV1 encoder pattern
+# (Section 14 strict check at the point of use), so --print-effective-config
+# can still run even when ffmpeg is missing or lacks the requested backend.
+#
+# Phase 1 scope: detection + resolution only. No encoder dispatch change.
+# Phase 2 adds VideoToolbox parameter builders; Phase 3 adds NVENC.
+#
+# Sets:
+#   HW_ACCEL_AVAILABLE[]  — subset of {videotoolbox, nvenc}
+#   HW_ACCEL_RESOLVED     — concrete backend name, or "none"
+# Reads:
+#   HW_ACCEL              — user/config/CLI-selected backend
+detect_hw_accel(){
+  HW_ACCEL_AVAILABLE=()
+
+  # VideoToolbox is Apple Silicon only in practice; probe on Darwin hosts.
+  if is_apple_silicon && ffmpeg_has_encoder hevc_videotoolbox; then
+    HW_ACCEL_AVAILABLE+=("videotoolbox")
+  fi
+  # NVENC availability is detected purely by encoder presence (cross-platform).
+  if ffmpeg_has_encoder hevc_nvenc; then
+    HW_ACCEL_AVAILABLE+=("nvenc")
+  fi
+
+  case "$HW_ACCEL" in
+    none)
+      HW_ACCEL_RESOLVED="none"
+      ;;
+    auto)
+      # Prefer platform-native backend first (videotoolbox on macOS, then nvenc).
+      if [[ " ${HW_ACCEL_AVAILABLE[*]} " == *" videotoolbox "* ]]; then
+        HW_ACCEL_RESOLVED="videotoolbox"
+      elif [[ " ${HW_ACCEL_AVAILABLE[*]} " == *" nvenc "* ]]; then
+        HW_ACCEL_RESOLVED="nvenc"
+      else
+        HW_ACCEL_RESOLVED="none"
+        note "Hardware acceleration 'auto' requested but no supported encoder is available — falling back to software."
+      fi
+      ;;
+    videotoolbox|nvenc)
+      # Non-fatal: if explicit backend is missing, leave HW_ACCEL_RESOLVED="none".
+      # Section 14 runs a strict check and dies with a precise error message.
+      if [[ " ${HW_ACCEL_AVAILABLE[*]} " == *" $HW_ACCEL "* ]]; then
+        HW_ACCEL_RESOLVED="$HW_ACCEL"
+      else
+        HW_ACCEL_RESOLVED="none"
+      fi
+      ;;
+    *)
+      die 11 "Invalid HW_ACCEL=\"$HW_ACCEL\" (internal). Valid values: none, auto, videotoolbox, nvenc"
+      ;;
+  esac
+}
+
 # _normalize_codec_lang — lowercase codec and lang in-place; default lang to
 # TAG_LANGUAGE_DEFAULT when empty. Uses namerefs so callers can pass any variable names.
 # Args: $1 — name of codec variable, $2 — name of lang variable
@@ -881,6 +977,7 @@ declare -Ag _MUXM_PRE_CONFIG=()
 for _pcd_v in \
   VIDEO_CODEC CRF_VALUE PRESET_VALUE X265_PARAMS_BASE X264_PARAMS_BASE SVT_AV1_PARAMS_BASE \
   AV1_MAXRATE AV1_BUFSIZE \
+  HW_ACCEL \
   LEVEL_VALUE CONSERVATIVE_VBV \
   LEVEL_VBV_4_1_MAXRATE LEVEL_VBV_4_1_BUFSIZE \
   LEVEL_VBV_5_0_MAXRATE LEVEL_VBV_5_0_BUFSIZE \
@@ -921,6 +1018,9 @@ fi
   die 11 "Invalid FFMPEG_LOGLEVEL=\"$FFMPEG_LOGLEVEL\" in config. Valid values: quiet, panic, fatal, error, warning, info, verbose, debug, trace"
 [[ -n "$FFPROBE_LOGLEVEL" ]] && ! is_valid_loglevel "$FFPROBE_LOGLEVEL" && \
   die 11 "Invalid FFPROBE_LOGLEVEL=\"$FFPROBE_LOGLEVEL\" in config. Valid values: quiet, panic, fatal, error, warning, info, verbose, debug, trace"
+# Validate HW_ACCEL set via .muxmrc (CLI validation happens in the parser).
+[[ -n "${HW_ACCEL:-}" ]] && ! is_valid_hw_accel "$HW_ACCEL" && \
+  die 11 "Invalid HW_ACCEL=\"$HW_ACCEL\" in config. Valid values: none, auto, videotoolbox, nvenc"
 
 # ===== Section 7: Dependency installer ========================================================
 # Invoked via --install-dependencies. Checks for all tools required by muxm and
@@ -4152,6 +4252,8 @@ Common options:
   --profile NAME              Apply a format profile (overrides config defaults)
   --crf N                     Video quality (default: ${CRF_VALUE})
   -p, --preset NAME           x265 preset (default: ${PRESET_VALUE})
+  --hw-accel BACKEND          Hardware acceleration: none | auto | videotoolbox | nvenc
+                              (default: ${HW_ACCEL}; also accepted in .muxmrc as HW_ACCEL="...")
   --dry-run                   Plan steps without encoding
   --setup                     Install dependencies, man page, and completions
   --create-config {system|user|project} [PROFILE]
@@ -4231,6 +4333,11 @@ while [[ $# -gt 0 ]]; do
         libx265|libx264|libsvt-av1|libaom-av1) ;;
         *) die 11 "Invalid --video-codec: must be libx265, libx264, libsvt-av1, or libaom-av1 (got: $VIDEO_CODEC)" ;;
       esac
+      shift 2
+      ;;
+    --hw-accel)
+      HW_ACCEL="${2:-}"; _CLI_HW_ACCEL_EXPLICIT=1
+      is_valid_hw_accel "$HW_ACCEL" || die 11 "Invalid --hw-accel: \"$HW_ACCEL\". Valid values: none, auto, videotoolbox, nvenc"
       shift 2
       ;;
     --video-copy-if-compliant) VIDEO_COPY_IF_COMPLIANT=1; shift ;;
@@ -4617,6 +4724,33 @@ else
   _H264_HDR_WARN_PENDING=0
 fi
 
+# Probe hardware-encoder availability and resolve HW_ACCEL=auto.
+# Non-fatal: an explicit but missing backend leaves HW_ACCEL_RESOLVED="none"
+# so --print-effective-config can still run; Section 14 dies with a precise
+# error when the encode actually needs the backend.
+detect_hw_accel
+
+# Emit profile-level HW_ACCEL compatibility warnings now that the backend is
+# resolved. These mirror the --no-dv/--tonemap style conflict warnings above
+# and surface the fallback reason before print_effective_config exits.
+if [[ -n "${PROFILE_NAME:-}" ]] && [[ "$HW_ACCEL_RESOLVED" != "none" ]]; then
+  case "$PROFILE_NAME" in
+    archive)
+      _warn_conflict "$PROFILE_NAME" "--hw-accel $HW_ACCEL" \
+        "archive is copy-only; hardware acceleration only applies when re-encoding. Ignored unless VIDEO_COPY_IF_COMPLIANT fails."
+      ;;
+    av1-hq|streaming-av1)
+      if [[ "$HW_ACCEL_RESOLVED" == "videotoolbox" ]]; then
+        _warn_conflict "$PROFILE_NAME" "--hw-accel videotoolbox" \
+          "VideoToolbox has no AV1 encoder on Apple Silicon. Falling back to libsvt-av1 (software)."
+      elif [[ "$HW_ACCEL_RESOLVED" == "nvenc" ]] && ! ffmpeg_has_encoder av1_nvenc; then
+        _warn_conflict "$PROFILE_NAME" "--hw-accel nvenc" \
+          "av1_nvenc not available (requires Ada Lovelace / RTX 40-series or newer). Falling back to libsvt-av1 (software)."
+      fi
+      ;;
+  esac
+fi
+
 
 # Display the resolved configuration from all sources (config files + profile + CLI).
 # Called when --print-effective-config is passed. Exits after printing.
@@ -4637,6 +4771,11 @@ Effective config (post config-files + profile + CLI):
   LEVEL_VALUE               = ${LEVEL_VALUE:-<auto>}
   CONSERVATIVE_VBV          = $CONSERVATIVE_VBV
   THREADS                   = ${THREADS:-<auto>}
+
+  [Video — Hardware Acceleration]
+  HW_ACCEL                  = $HW_ACCEL
+  HW_ACCEL_RESOLVED         = ${HW_ACCEL_RESOLVED:-<not detected>}
+  HW_ACCEL_AVAILABLE        = ${HW_ACCEL_AVAILABLE[*]:-<none>}
 
   [Video — Pixel Format / Color]
   FORCE_CHROMA_420          = $FORCE_CHROMA_420
@@ -4760,6 +4899,18 @@ if [[ "$VIDEO_CODEC" == "libsvt-av1" || "$VIDEO_CODEC" == "libaom-av1" ]]; then
     die 10 "libaom-av1 encoder not available in this ffmpeg build. Install ffmpeg with libaom support (e.g., brew tap homebrew-ffmpeg/ffmpeg && brew install homebrew-ffmpeg/ffmpeg/ffmpeg --with-libaom)."
   fi
 fi
+
+# Strict check for explicit hardware acceleration requests. detect_hw_accel
+# ran earlier (Section 13b) as a non-fatal probe so --print-effective-config
+# could still run; here we enforce that an explicit --hw-accel or HW_ACCEL
+# from config actually resolved to the requested backend.
+case "$HW_ACCEL" in
+  videotoolbox|nvenc)
+    if [[ "$HW_ACCEL_RESOLVED" != "$HW_ACCEL" ]]; then
+      die 10 "Hardware acceleration '--hw-accel $HW_ACCEL' requested, but no matching encoder (hevc_${HW_ACCEL}) is available in this ffmpeg build. Install an ffmpeg build with ${HW_ACCEL} support, or use --hw-accel none/auto."
+    fi
+    ;;
+esac
 
 if (( SUB_ENABLE_OCR )); then
   # Security: reject OCR tool names containing shell metacharacters to prevent
@@ -5642,6 +5793,93 @@ build_x265_params() {
 
 build_av1_params() {
   SVT_AV1_PARAMS="$SVT_AV1_PARAMS_BASE"
+}
+
+# build_video_encoder_params — dispatch parameter assembly based on the
+# resolved encoder backend. Software encoders populate their *_PARAMS globals
+# (consumed via -x265-params / -svtav1-params / -x264-params in the video
+# pipeline); hardware backends (Phase 2+) will populate separate param arrays
+# owned by their own builders.
+#
+# Phase 1 is a behavior-preserving refactor: it centralizes the dispatch so
+# the video pipeline and Section 30's pre-encode step both go through a
+# single entry point. No new parameters are produced yet.
+#
+# Reads:  VIDEO_CODEC, HW_ACCEL_RESOLVED
+# Writes: X265_PARAMS, SVT_AV1_PARAMS (indirectly via build_x265_params / build_av1_params)
+build_video_encoder_params() {
+  # Hardware-encoder param builders land in Phase 2 (videotoolbox) / Phase 3 (nvenc).
+  # For now, hardware backends still drive through the software param assembly
+  # because resolve_video_encoder falls back to software in every case.
+  case "$VIDEO_CODEC" in
+    libsvt-av1|libaom-av1) build_av1_params ;;
+    *)                     build_x265_params ;;
+  esac
+}
+
+# resolve_video_encoder — map (VIDEO_CODEC, HW_ACCEL_RESOLVED, IS_DV) to the
+# concrete ffmpeg `-c:v` argument, applying compatibility gates along the way.
+#
+# Phase 1 returns the software encoder in every branch but records the
+# fallback reason in HW_ACCEL_FALLBACK_REASON so it surfaces in logs and in
+# --print-effective-config. Phase 2 fills in the VideoToolbox arm; Phase 3
+# fills in NVENC.
+#
+# Gates (any one forces software fallback with a warning):
+#   - Dolby Vision source        — DV RPU injection requires libx265
+#   - libaom-av1 codec           — no hardware counterpart
+#   - videotoolbox + AV1 codec   — Apple Silicon has no AV1 hardware encoder
+#   - nvenc + av1_nvenc missing  — pre-Ada GPUs
+#
+# Writes:
+#   VIDEO_ENCODER_FFMPEG       — concrete -c:v value
+#   HW_ACCEL_FALLBACK_REASON   — human-readable reason when gated to SW
+# Reads:
+#   VIDEO_CODEC, HW_ACCEL_RESOLVED, IS_DV
+resolve_video_encoder() {
+  VIDEO_ENCODER_FFMPEG="$VIDEO_CODEC"
+  HW_ACCEL_FALLBACK_REASON=""
+
+  # ffmpeg's SVT-AV1 encoder is spelled "libsvtav1" (no dash); muxm's
+  # user-facing alias is "libsvt-av1". Normalise when emitting -c:v.
+  [[ "$VIDEO_ENCODER_FFMPEG" == "libsvt-av1" ]] && VIDEO_ENCODER_FFMPEG="libsvtav1"
+
+  # Software path: nothing to resolve.
+  [[ -z "$HW_ACCEL_RESOLVED" || "$HW_ACCEL_RESOLVED" == "none" ]] && return 0
+
+  # Gate 1: Dolby Vision stays on libx265 regardless of backend.
+  if (( IS_DV )); then
+    HW_ACCEL_FALLBACK_REASON="Dolby Vision requires libx265 for RPU injection"
+    note "Hardware acceleration disabled for this encode: $HW_ACCEL_FALLBACK_REASON."
+    return 0
+  fi
+
+  # Gate 2: libaom-av1 has no hardware counterpart — always software.
+  if [[ "$VIDEO_CODEC" == "libaom-av1" ]]; then
+    HW_ACCEL_FALLBACK_REASON="libaom-av1 has no hardware counterpart"
+    note "Hardware acceleration disabled for this encode: $HW_ACCEL_FALLBACK_REASON."
+    return 0
+  fi
+
+  # Gate 3: VideoToolbox does not offer AV1 encode on any current Apple Silicon.
+  if [[ "$HW_ACCEL_RESOLVED" == "videotoolbox" && "$VIDEO_CODEC" == "libsvt-av1" ]]; then
+    HW_ACCEL_FALLBACK_REASON="VideoToolbox has no AV1 encoder on Apple Silicon"
+    note "Hardware acceleration disabled for this encode: $HW_ACCEL_FALLBACK_REASON."
+    return 0
+  fi
+
+  # Gate 4: NVENC AV1 requires Ada Lovelace (RTX 40+) — probe for av1_nvenc.
+  if [[ "$HW_ACCEL_RESOLVED" == "nvenc" && "$VIDEO_CODEC" == "libsvt-av1" ]] && ! ffmpeg_has_encoder av1_nvenc; then
+    HW_ACCEL_FALLBACK_REASON="av1_nvenc not available (requires RTX 40-series or newer)"
+    note "Hardware acceleration disabled for this encode: $HW_ACCEL_FALLBACK_REASON."
+    return 0
+  fi
+
+  # Phase 2/3 will return the concrete HW encoder name here
+  # (e.g. hevc_videotoolbox, hevc_nvenc, av1_nvenc). For now, record the
+  # *intended* backend so logs reflect the plumbing is live, but keep the
+  # software encoder as the actual -c:v value.
+  HW_ACCEL_FALLBACK_REASON="hardware dispatch pending (Phase 2/3 implementation)"
 }
 
 # Apply level-based VBV constraints
@@ -9422,10 +9660,8 @@ main() {
 
   # Decide color space and build encoder params
   decide_color_and_pixfmt
-  case "$VIDEO_CODEC" in
-    libsvt-av1|libaom-av1) build_av1_params ;;
-    *)                     build_x265_params ;;
-  esac
+  build_video_encoder_params
+  resolve_video_encoder
 
   # Deferred warning: H.264 + HDR source + no tone-mapping → washed-out output
   if (( _H264_HDR_WARN_PENDING )) && [[ "$PROFILE_DESC" == "HDR10" || "$PROFILE_DESC" == "HLG" ]]; then

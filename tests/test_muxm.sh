@@ -56,6 +56,7 @@ show_help() {
       profiles      Profile variable assignment (--print-effective-config)
       conflicts     Conflict warnings (profile + contradictory flag)
       toggles       CLI toggle/flag parsing (--flag / --no-flag pairs)
+      hw_accel      Hardware acceleration flag, .muxmrc, and resolver scaffolding
       config        Config file precedence (.muxmrc layering)
       unit          Pure unit tests (helpers, codec maps, heuristics)
       completions   Tab-completion installer/uninstaller
@@ -2062,6 +2063,127 @@ test_conflicts() {
       pass "atv passthrough mode: no MKV container warning (other warnings unrelated)"
     fi
   fi
+}
+
+# === Suite: Hardware Acceleration (Phase 1 foundation) ===
+# Validates the --hw-accel flag plumbing, .muxmrc integration, strict-check
+# behavior, and profile-level compatibility warnings. Phase 1 does NOT wire
+# hardware encoders into the dispatch — this suite is config-only; encode
+# parity coverage arrives with Phase 2 (VideoToolbox) and Phase 3 (NVENC).
+#
+# WHY SEPARATE FROM test_toggles: --hw-accel takes a value (not a --flag/--no-flag pair)
+# and has platform-dependent semantics (resolved backend varies by host). The
+# auto-resolution and strict-check assertions are host-aware.
+test_hw_accel() {
+  section "Hardware Acceleration (Phase 1 foundation)"
+
+  local out
+
+  # --- CLI parsing: each accepted value registers in effective config ---
+  out="$(run_muxm --hw-accel none --print-effective-config)"
+  assert_contains "HW_ACCEL                  = none" "--hw-accel none: registered" "$out"
+
+  out="$(run_muxm --hw-accel auto --print-effective-config)"
+  assert_contains "HW_ACCEL                  = auto" "--hw-accel auto: registered" "$out"
+
+  out="$(run_muxm --hw-accel videotoolbox --print-effective-config)"
+  assert_contains "HW_ACCEL                  = videotoolbox" "--hw-accel videotoolbox: registered" "$out"
+
+  out="$(run_muxm --hw-accel nvenc --print-effective-config)"
+  assert_contains "HW_ACCEL                  = nvenc" "--hw-accel nvenc: registered" "$out"
+
+  # --- Invalid value rejected with exit 11 ---
+  assert_exit "$EXIT_VALIDATION" "--hw-accel bogus: rejected with exit $EXIT_VALIDATION" \
+    --hw-accel bogus --print-effective-config
+
+  # --- Default is "none" when the flag is absent ---
+  out="$(run_muxm --print-effective-config)"
+  assert_contains "HW_ACCEL                  = none" "default HW_ACCEL is none" "$out"
+
+  # --- HW_ACCEL_RESOLVED appears and is "none" for --hw-accel none ---
+  out="$(run_muxm --hw-accel none --print-effective-config)"
+  assert_contains "HW_ACCEL_RESOLVED         = none" "--hw-accel none: resolves to none" "$out"
+
+  # --- Platform-aware auto resolution ---
+  # On Apple Silicon with hevc_videotoolbox in ffmpeg, auto → videotoolbox.
+  # Otherwise auto may resolve to nvenc (unlikely in test env) or none.
+  # Assert the RESOLVED line exists with any valid value; platform-specific
+  # assertions follow only when HW encoders are actually present.
+  out="$(run_muxm --hw-accel auto --print-effective-config)"
+  assert_contains "HW_ACCEL_RESOLVED" "--hw-accel auto: resolved field present" "$out"
+
+  if [[ "$(uname -s 2>/dev/null)" == "Darwin" && "$(uname -m 2>/dev/null)" == "arm64" ]] \
+      && ffmpeg -hide_banner -encoders 2>/dev/null | awk '{print $2}' | grep -qx hevc_videotoolbox; then
+    assert_contains "HW_ACCEL_RESOLVED         = videotoolbox" \
+      "--hw-accel auto: prefers videotoolbox on Apple Silicon" "$out"
+  else
+    skip "--hw-accel auto: Apple Silicon videotoolbox check (host lacks backend)"
+  fi
+
+  # --- .muxmrc loads HW_ACCEL ---
+  local rc_home="$TESTDIR/hw_accel_rc_home"
+  mkdir -p "$rc_home"
+  cat > "$rc_home/.muxmrc" <<'EOF'
+HW_ACCEL="videotoolbox"
+EOF
+  out="$(MUXM_HOME="$rc_home" run_muxm_in "$TESTDIR" --print-effective-config)"
+  assert_contains "HW_ACCEL                  = videotoolbox" \
+    "HW_ACCEL in .muxmrc: loaded" "$out"
+
+  # --- CLI overrides .muxmrc ---
+  out="$(MUXM_HOME="$rc_home" run_muxm_in "$TESTDIR" --hw-accel none --print-effective-config)"
+  assert_contains "HW_ACCEL                  = none" \
+    "CLI --hw-accel overrides .muxmrc HW_ACCEL" "$out"
+
+  # --- Invalid HW_ACCEL in .muxmrc rejected with exit 11 ---
+  cat > "$rc_home/.muxmrc" <<'EOF'
+HW_ACCEL="garbage"
+EOF
+  local code
+  out="$(cd "$TESTDIR" && HOME="$rc_home" "$MUXM" --print-effective-config 2>&1)" && code=$? || code=$?
+  if [[ "$code" -eq "$EXIT_VALIDATION" ]]; then
+    pass "Invalid HW_ACCEL in .muxmrc → exit $EXIT_VALIDATION"
+  else
+    fail "Invalid HW_ACCEL in .muxmrc — expected exit $EXIT_VALIDATION, got $code"
+  fi
+  assert_contains "Invalid HW_ACCEL" "Error message names the bad variable" "$out"
+
+  # --- Profile + AV1 codec + --hw-accel videotoolbox → warning + software fallback ---
+  out="$(run_muxm --profile av1-hq --hw-accel videotoolbox --print-effective-config)"
+  assert_contains "VideoToolbox has no AV1 encoder" \
+    "av1-hq + videotoolbox: compatibility warning emitted" "$out"
+  assert_contains "VIDEO_CODEC               = libsvt-av1" \
+    "av1-hq + videotoolbox: codec remains software libsvt-av1" "$out"
+
+  out="$(run_muxm --profile streaming-av1 --hw-accel videotoolbox --print-effective-config)"
+  assert_contains "VideoToolbox has no AV1 encoder" \
+    "streaming-av1 + videotoolbox: compatibility warning emitted" "$out"
+
+  # --- Profile archive + hw-accel: copy-only warning ---
+  out="$(run_muxm --profile archive --hw-accel auto --print-effective-config)"
+  assert_contains "archive is copy-only" \
+    "archive + --hw-accel: copy-only warning emitted" "$out"
+
+  # --- Explicit unavailable backend: strict check fires on real encode path ---
+  # --print-effective-config exits before Section 14, so it does NOT die.
+  # A real encode path (even without a valid source) goes through Section 14.
+  # Use a nonexistent source to trigger Section 14 processing fast without
+  # actually encoding. Exit code 10 indicates missing encoder.
+  if ! ffmpeg -hide_banner -encoders 2>/dev/null | awk '{print $2}' | grep -qx hevc_nvenc; then
+    out="$(cd "$TESTDIR" && "$MUXM" --hw-accel nvenc /does/not/exist.mkv 2>&1)" && code=$? || code=$?
+    if [[ "$code" -eq 10 ]]; then
+      pass "--hw-accel nvenc (unavailable): strict check dies with exit 10"
+    else
+      fail "--hw-accel nvenc (unavailable) — expected exit 10, got $code"
+    fi
+    assert_contains "no matching encoder (hevc_nvenc)" \
+      "Strict check error message names the missing encoder" "$out"
+  else
+    skip "strict-check for missing hevc_nvenc: host has nvenc"
+  fi
+
+  # --- Cleanup ---
+  rm -rf "$rc_home"
 }
 
 # === Suite: Dry-Run Mode ===
@@ -5652,6 +5774,7 @@ run_suites() {
       test_config
       test_profiles
       test_conflicts
+      test_hw_accel
       test_collision
       test_dryrun
       test_video
@@ -5668,6 +5791,7 @@ run_suites() {
       ;;
     cli)           test_cli ;;
     toggles)       test_toggles ;;
+    hw_accel)      test_hw_accel ;;
     unit)          test_unit ;;
     completions)   test_completions ;;
     setup)         test_setup ;;
@@ -5751,7 +5875,7 @@ summary() {
 # MEDIA_FREE_SUITES: Pure config/CLI/unit tests — no ffmpeg fixtures needed (~2s).
 # Core media: basic_sdr_subs.mkv only — needed by cli, dryrun, edge, etc. (~3s to generate).
 # EXTENDED_SUITES: Full fixture set (multi-track, HDR, chapters, metadata) (~15s to generate).
-readonly MEDIA_FREE_SUITES="^(toggles|completions|setup|config|profiles|conflicts|unit)$"
+readonly MEDIA_FREE_SUITES="^(toggles|completions|setup|config|profiles|conflicts|hw_accel|unit)$"
 readonly EXTENDED_SUITES="^(collision|dryrun|video|hdr|audio|subs|ext_subs|output|containers|metadata|edge|e2e|multi_profile|all)$"
 
 auto_cleanup_test_dirs
