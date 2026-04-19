@@ -169,19 +169,51 @@ LEVEL_VBV_5_0_MAXRATE=25000k; LEVEL_VBV_5_0_BUFSIZE=50000k
 LEVEL_VBV_5_1_MAXRATE=40000k; LEVEL_VBV_5_1_BUFSIZE=80000k
 LEVEL_VBV_5_2_MAXRATE=60000k; LEVEL_VBV_5_2_BUFSIZE=120000k
 
-# ---- Hardware acceleration (Phase 1 foundation: scaffolding only)
+# ---- Hardware acceleration
 # HW_ACCEL selects the backend used by the video encoder dispatch layer.
 #   none         — force pure-software encoders (libx265/libx264/libsvt-av1)
 #   auto         — detect and pick the best available backend on this host
 #   videotoolbox — Apple Silicon VideoToolbox (HEVC/H.264; no AV1 HW encode)
 #   nvenc        — NVIDIA NVENC (HEVC/H.264; AV1 on Ada Lovelace/RTX 40+)
-# Phase 1 wires flag parsing, detection, and fallback gating; hardware
-# dispatch arms are filled in by Phase 2 (VideoToolbox) and Phase 3 (NVENC).
+# Phase 2 adds the VideoToolbox dispatch arm; Phase 3 adds NVENC.
 HW_ACCEL="none"
 declare -i _CLI_HW_ACCEL_EXPLICIT=0
 declare -a HW_ACCEL_AVAILABLE=()   # populated by detect_hw_accel()
 HW_ACCEL_RESOLVED=""               # concrete backend after auto→explicit resolution
 HW_ACCEL_FALLBACK_REASON=""        # set when an incompatibility forces software fallback
+
+# ---- VideoToolbox quality map
+# hevc_videotoolbox / h264_videotoolbox use `-q:v N` (0-100, higher=better) as
+# their quality knob instead of x265/x264's CRF. VT_QUALITY_MAP stores the
+# calibrated quality value per profile — the fixed point where VT's VMAF
+# matches (within tolerance) the profile's software CRF baseline.
+#
+# Phase 2 Commit 1 ships stub values anchored at 65 (a reasonable midpoint);
+# the empirical sweep in a later commit replaces these with calibrated
+# values from docs/VIDEOTOOLBOX_CALIBRATION.md. The default (65) is used
+# when --profile is not set and when a profile is not present in the map.
+declare -A VT_QUALITY_MAP=(
+  [hdr10-hq]=65
+  [atv-directplay-hq]=65
+  [atv-directplay-animation]=65
+  [streaming-hevc]=60
+  [animation]=65
+  [universal]=60
+  [youtube-upload]=70
+)
+declare -i VT_QUALITY_DEFAULT=65
+
+# Per-encode explicit quality override (set via --hw-accel-quality).
+# When empty, build_videotoolbox_params resolves VT_QUALITY_MAP[profile]
+# (or VT_QUALITY_DEFAULT if profile not in the map).
+HW_ACCEL_QUALITY=""
+declare -i _CLI_HW_ACCEL_QUALITY_EXPLICIT=0
+
+# Let VideoToolbox fall back to its internal software encoder path when the
+# hardware encoder cannot accept a given frame (rare; usually unsupported
+# resolutions or pixel formats). Users who need strict hardware-only encoding
+# can set HW_ACCEL_ALLOW_SW=0 in their .muxmrc or pass --no-hw-accel-allow-sw.
+declare -i HW_ACCEL_ALLOW_SW=1
 
 # ---- Pixel format / chroma policy
 declare -i FORCE_CHROMA_420=1
@@ -977,7 +1009,7 @@ declare -Ag _MUXM_PRE_CONFIG=()
 for _pcd_v in \
   VIDEO_CODEC CRF_VALUE PRESET_VALUE X265_PARAMS_BASE X264_PARAMS_BASE SVT_AV1_PARAMS_BASE \
   AV1_MAXRATE AV1_BUFSIZE \
-  HW_ACCEL \
+  HW_ACCEL HW_ACCEL_QUALITY HW_ACCEL_ALLOW_SW \
   LEVEL_VALUE CONSERVATIVE_VBV \
   LEVEL_VBV_4_1_MAXRATE LEVEL_VBV_4_1_BUFSIZE \
   LEVEL_VBV_5_0_MAXRATE LEVEL_VBV_5_0_BUFSIZE \
@@ -4254,6 +4286,8 @@ Common options:
   -p, --preset NAME           x265 preset (default: ${PRESET_VALUE})
   --hw-accel BACKEND          Hardware acceleration: none | auto | videotoolbox | nvenc
                               (default: ${HW_ACCEL}; also accepted in .muxmrc as HW_ACCEL="...")
+  --hw-accel-quality N        Override VT/NVENC quality knob (0-100, default: profile-calibrated)
+  --no-hw-accel-allow-sw      Disallow VT's internal software fallback (default: allowed)
   --dry-run                   Plan steps without encoding
   --setup                     Install dependencies, man page, and completions
   --create-config {system|user|project} [PROFILE]
@@ -4340,6 +4374,16 @@ while [[ $# -gt 0 ]]; do
       is_valid_hw_accel "$HW_ACCEL" || die 11 "Invalid --hw-accel: \"$HW_ACCEL\". Valid values: none, auto, videotoolbox, nvenc"
       shift 2
       ;;
+    --hw-accel-quality)
+      HW_ACCEL_QUALITY="${2:-}"; _CLI_HW_ACCEL_QUALITY_EXPLICIT=1
+      # Accept integer 0–100 (VT/NVENC quality scales both fit this range).
+      if [[ ! "$HW_ACCEL_QUALITY" =~ ^[0-9]+$ ]] || (( HW_ACCEL_QUALITY < 0 )) || (( HW_ACCEL_QUALITY > 100 )); then
+        die 11 "Invalid --hw-accel-quality: \"$HW_ACCEL_QUALITY\". Must be an integer between 0 and 100."
+      fi
+      shift 2
+      ;;
+    --hw-accel-allow-sw)    HW_ACCEL_ALLOW_SW=1; shift ;;
+    --no-hw-accel-allow-sw) HW_ACCEL_ALLOW_SW=0; shift ;;
     --video-copy-if-compliant) VIDEO_COPY_IF_COMPLIANT=1; shift ;;
     --no-video-copy-if-compliant) VIDEO_COPY_IF_COMPLIANT=0; shift ;;
     --tonemap) TONEMAP_HDR_TO_SDR=1; shift ;;
@@ -4776,6 +4820,9 @@ Effective config (post config-files + profile + CLI):
   HW_ACCEL                  = $HW_ACCEL
   HW_ACCEL_RESOLVED         = ${HW_ACCEL_RESOLVED:-<not detected>}
   HW_ACCEL_AVAILABLE        = ${HW_ACCEL_AVAILABLE[*]:-<none>}
+  HW_ACCEL_QUALITY          = ${HW_ACCEL_QUALITY:-<profile default>}
+  HW_ACCEL_ALLOW_SW         = $HW_ACCEL_ALLOW_SW
+  VT_QUALITY (active profile) = $(if [[ -n "${PROFILE_NAME:-}" ]] && [[ -n "${VT_QUALITY_MAP[$PROFILE_NAME]:-}" ]]; then echo "${VT_QUALITY_MAP[$PROFILE_NAME]}"; else echo "$VT_QUALITY_DEFAULT (default)"; fi)
 
   [Video — Pixel Format / Color]
   FORCE_CHROMA_420          = $FORCE_CHROMA_420
@@ -5795,47 +5842,118 @@ build_av1_params() {
   SVT_AV1_PARAMS="$SVT_AV1_PARAMS_BASE"
 }
 
+# build_videotoolbox_params — assemble VIDEOTOOLBOX_ARGS[] for hevc_videotoolbox
+# or h264_videotoolbox invocations. Dispatches on VIDEO_ENCODER_FFMPEG so the
+# HEVC and H.264 arms share common knobs (quality, allow_sw) while differing
+# on profile selection and Apple-compatibility tag.
+#
+# Quality resolution order:
+#   1. HW_ACCEL_QUALITY (explicit override via --hw-accel-quality or rc file)
+#   2. VT_QUALITY_MAP[PROFILE_NAME] (calibrated per-profile value)
+#   3. VT_QUALITY_DEFAULT (fallback when no profile is active)
+#
+# HDR10 and color metadata flow through via COLOR_ARGS[] (appended by the
+# pipeline dispatch). The VideoToolbox encoder itself does not take explicit
+# master_display / max_cll flags — ffmpeg 6.0+ carries input side data
+# forward to the muxer, which writes the correct MP4 atoms (colr/mdcv/clli)
+# or MKV Colour/MasteringMetadata elements automatically (verified in the
+# Phase 2 HDR10 and DV spikes).
+#
+# Reads:  VIDEO_ENCODER_FFMPEG, VIDEO_CODEC, HW_ACCEL_QUALITY, VT_QUALITY_MAP,
+#         VT_QUALITY_DEFAULT, PROFILE_NAME, HW_ACCEL_ALLOW_SW, OUTPUT_EXT,
+#         PROFILE_DESC, X264_PARAMS_BASE
+# Writes: VIDEOTOOLBOX_ARGS[]
+build_videotoolbox_params() {
+  VIDEOTOOLBOX_ARGS=()
+
+  # Resolve the quality knob.
+  local vt_q=""
+  if [[ -n "$HW_ACCEL_QUALITY" ]]; then
+    vt_q="$HW_ACCEL_QUALITY"
+  elif [[ -n "${PROFILE_NAME:-}" ]] && [[ -n "${VT_QUALITY_MAP[$PROFILE_NAME]:-}" ]]; then
+    vt_q="${VT_QUALITY_MAP[$PROFILE_NAME]}"
+  else
+    vt_q="$VT_QUALITY_DEFAULT"
+  fi
+
+  # Common flags across HEVC and H.264 VideoToolbox encoders.
+  VIDEOTOOLBOX_ARGS=(
+    -q:v "$vt_q"
+    -allow_sw "$HW_ACCEL_ALLOW_SW"
+    -realtime 0
+  )
+
+  # Encoder-specific profile + container tag.
+  case "$VIDEO_ENCODER_FFMPEG" in
+    hevc_videotoolbox)
+      # 10-bit HDR/SDR → Main10, 8-bit SDR → Main.
+      if [[ "$TARGET_PIXFMT" == *"10le"* ]] || [[ "$TARGET_PIXFMT" == "p010le" ]]; then
+        VIDEOTOOLBOX_ARGS+=( -profile:v main10 )
+      else
+        VIDEOTOOLBOX_ARGS+=( -profile:v main )
+      fi
+      # Apple Direct Play and MP4 playback require the hvc1 tag; MKV is agnostic.
+      case "${OUTPUT_EXT,,}" in
+        mp4|m4v|mov) VIDEOTOOLBOX_ARGS+=( -tag:v hvc1 ) ;;
+      esac
+      ;;
+    h264_videotoolbox)
+      # Mirror the existing libx264 profile choice: youtube-upload uses High,
+      # everything else stays on the encoder default (which selects High
+      # automatically for 8-bit 4:2:0 yuv420p inputs).
+      if [[ "$X264_PARAMS_BASE" == *"profile=high"* ]]; then
+        VIDEOTOOLBOX_ARGS+=( -profile:v high )
+      fi
+      ;;
+  esac
+}
+
 # build_video_encoder_params — dispatch parameter assembly based on the
 # resolved encoder backend. Software encoders populate their *_PARAMS globals
 # (consumed via -x265-params / -svtav1-params / -x264-params in the video
-# pipeline); hardware backends (Phase 2+) will populate separate param arrays
-# owned by their own builders.
+# pipeline); hardware backends populate their own arg arrays.
 #
-# Phase 1 is a behavior-preserving refactor: it centralizes the dispatch so
-# the video pipeline and Section 30's pre-encode step both go through a
-# single entry point. No new parameters are produced yet.
+# Phase 2: the VideoToolbox arm populates VIDEOTOOLBOX_ARGS[]. The software
+# HEVC param builder (build_x265_params) is still invoked even when VT is in
+# effect, because --print-effective-config and downstream DV conversion code
+# may reference X265_PARAMS — harmless for VT encodes, and preserves behavior
+# when VT falls back to software for a particular encode.
 #
-# Reads:  VIDEO_CODEC, HW_ACCEL_RESOLVED
-# Writes: X265_PARAMS, SVT_AV1_PARAMS (indirectly via build_x265_params / build_av1_params)
+# Reads:  VIDEO_CODEC, VIDEO_ENCODER_FFMPEG
+# Writes: X265_PARAMS, SVT_AV1_PARAMS, VIDEOTOOLBOX_ARGS
 build_video_encoder_params() {
-  # Hardware-encoder param builders land in Phase 2 (videotoolbox) / Phase 3 (nvenc).
-  # For now, hardware backends still drive through the software param assembly
-  # because resolve_video_encoder falls back to software in every case.
   case "$VIDEO_CODEC" in
     libsvt-av1|libaom-av1) build_av1_params ;;
     *)                     build_x265_params ;;
   esac
+
+  # Hardware-encoder param builders layer on top: the software builder above
+  # leaves X265_PARAMS populated for display/reference; the hardware builder
+  # populates its own ARGS array used by the dispatch.
+  case "$VIDEO_ENCODER_FFMPEG" in
+    hevc_videotoolbox|h264_videotoolbox) build_videotoolbox_params ;;
+  esac
 }
 
-# resolve_video_encoder — map (VIDEO_CODEC, HW_ACCEL_RESOLVED, IS_DV) to the
-# concrete ffmpeg `-c:v` argument, applying compatibility gates along the way.
+# resolve_video_encoder — map (VIDEO_CODEC, HW_ACCEL_RESOLVED) to the concrete
+# ffmpeg `-c:v` argument, applying compatibility gates along the way.
 #
-# Phase 1 returns the software encoder in every branch but records the
-# fallback reason in HW_ACCEL_FALLBACK_REASON so it surfaces in logs and in
-# --print-effective-config. Phase 2 fills in the VideoToolbox arm; Phase 3
-# fills in NVENC.
+# Phase 2 wires the VideoToolbox arm. Dolby Vision is NOT a gate: the DV
+# pipeline (Section 26) extracts the RPU from the source and injects it into
+# the encoded bitstream post-hoc via dovi_tool, which is encoder-agnostic.
+# Frame-count parity is already verified at the end of run_video_pipeline, so
+# the existing safety net covers VT+DV too.
 #
-# Gates (any one forces software fallback with a warning):
-#   - Dolby Vision source        — DV RPU injection requires libx265
+# Gates (any one forces software fallback with a recorded reason):
 #   - libaom-av1 codec           — no hardware counterpart
 #   - videotoolbox + AV1 codec   — Apple Silicon has no AV1 hardware encoder
-#   - nvenc + av1_nvenc missing  — pre-Ada GPUs
+#   - nvenc + av1_nvenc missing  — pre-Ada GPUs (Phase 3)
 #
 # Writes:
 #   VIDEO_ENCODER_FFMPEG       — concrete -c:v value
 #   HW_ACCEL_FALLBACK_REASON   — human-readable reason when gated to SW
 # Reads:
-#   VIDEO_CODEC, HW_ACCEL_RESOLVED, IS_DV
+#   VIDEO_CODEC, HW_ACCEL_RESOLVED
 resolve_video_encoder() {
   VIDEO_ENCODER_FFMPEG="$VIDEO_CODEC"
   HW_ACCEL_FALLBACK_REASON=""
@@ -5847,47 +5965,54 @@ resolve_video_encoder() {
   # Software path: nothing to resolve.
   [[ -z "$HW_ACCEL_RESOLVED" || "$HW_ACCEL_RESOLVED" == "none" ]] && return 0
 
-  # Gate 1: Dolby Vision stays on libx265 regardless of backend.
-  if (( IS_DV )); then
-    HW_ACCEL_FALLBACK_REASON="Dolby Vision requires libx265 for RPU injection"
-    note "Hardware acceleration disabled for this encode: $HW_ACCEL_FALLBACK_REASON."
-    return 0
-  fi
-
-  # Gate 2: libaom-av1 has no hardware counterpart — always software.
+  # Gate 1: libaom-av1 has no hardware counterpart — always software.
   if [[ "$VIDEO_CODEC" == "libaom-av1" ]]; then
     HW_ACCEL_FALLBACK_REASON="libaom-av1 has no hardware counterpart"
     note "Hardware acceleration disabled for this encode: $HW_ACCEL_FALLBACK_REASON."
     return 0
   fi
 
-  # Gate 3: VideoToolbox does not offer AV1 encode on any current Apple Silicon.
+  # Gate 2: VideoToolbox does not offer AV1 encode on any current Apple Silicon.
   if [[ "$HW_ACCEL_RESOLVED" == "videotoolbox" && "$VIDEO_CODEC" == "libsvt-av1" ]]; then
     HW_ACCEL_FALLBACK_REASON="VideoToolbox has no AV1 encoder on Apple Silicon"
     note "Hardware acceleration disabled for this encode: $HW_ACCEL_FALLBACK_REASON."
     return 0
   fi
 
-  # Gate 4: NVENC AV1 requires Ada Lovelace (RTX 40+) — probe for av1_nvenc.
+  # Gate 3: NVENC AV1 requires Ada Lovelace (RTX 40+) — probe for av1_nvenc.
   if [[ "$HW_ACCEL_RESOLVED" == "nvenc" && "$VIDEO_CODEC" == "libsvt-av1" ]] && ! ffmpeg_has_encoder av1_nvenc; then
     HW_ACCEL_FALLBACK_REASON="av1_nvenc not available (requires RTX 40-series or newer)"
     note "Hardware acceleration disabled for this encode: $HW_ACCEL_FALLBACK_REASON."
     return 0
   fi
 
-  # Phase 2/3 will return the concrete HW encoder name here
-  # (e.g. hevc_videotoolbox, hevc_nvenc, av1_nvenc). For now, record the
-  # *intended* backend so logs reflect the plumbing is live, but keep the
-  # software encoder as the actual -c:v value.
-  HW_ACCEL_FALLBACK_REASON="hardware dispatch pending (Phase 2/3 implementation)"
+  # Backend-specific encoder selection.
+  case "$HW_ACCEL_RESOLVED" in
+    videotoolbox)
+      case "$VIDEO_CODEC" in
+        libx265) VIDEO_ENCODER_FFMPEG="hevc_videotoolbox" ;;
+        libx264) VIDEO_ENCODER_FFMPEG="h264_videotoolbox" ;;
+      esac
+      ;;
+    nvenc)
+      # Phase 3 fills in: libx265 → hevc_nvenc, libx264 → h264_nvenc,
+      # libsvt-av1 → av1_nvenc (when av1_nvenc is available).
+      HW_ACCEL_FALLBACK_REASON="NVENC dispatch pending (Phase 3 implementation)"
+      ;;
+  esac
 }
 
 # Apply level-based VBV constraints
 # VBV (Video Buffering Verifier) ensures bitrate stays within device capabilities
 apply_level_vbv() {
-  # AV1 encoders use different level/VBV mechanisms — skip x265-specific params
+  # AV1 encoders use different level/VBV mechanisms — skip x265-specific params.
   case "$VIDEO_CODEC" in
     libsvt-av1|libaom-av1) return 0 ;;
+  esac
+  # VideoToolbox picks its own level; it does not accept x265-params and has
+  # no corresponding vbv-maxrate knob. Skip for HW backends.
+  case "$VIDEO_ENCODER_FFMPEG" in
+    hevc_videotoolbox|h264_videotoolbox) return 0 ;;
   esac
   local lvl="$1" maxrate="" bufsize=""
   if (( CONSERVATIVE_VBV )); then
@@ -6448,13 +6573,18 @@ run_video_pipeline() {
   fi
 
   # Determine intermediate format: raw ES is needed only when DV RPU injection
-  # is possible (HEVC codec + DV source + DV enabled). Otherwise, use a container
+  # is possible (HEVC encoder + DV source + DV enabled). Otherwise, use a container
   # (matroska) to preserve timestamps that the Matroska final muxer requires.
   # Raw ES files lack packet pts/dts, which the mp4 muxer can reconstruct from
   # HEVC VUI/SPS parameters but the matroska muxer cannot — causing mux failures
   # for any MKV output path.
+  #
+  # Both libx265 and hevc_videotoolbox produce raw Annex B HEVC suitable for
+  # dovi_tool inject-rpu (verified in the Phase 2 DV spike — RPU round-trips
+  # bit-perfect through VT). VIDEO_ENCODER_FFMPEG captures both cases.
   local -i v_needs_raw_es=0
-  if [[ "$VIDEO_CODEC" == "libx265" ]] && (( IS_DV && ! DISABLE_DV )); then
+  if { [[ "$VIDEO_ENCODER_FFMPEG" == "libx265" ]] || [[ "$VIDEO_ENCODER_FFMPEG" == "hevc_videotoolbox" ]]; } \
+     && (( IS_DV && ! DISABLE_DV )); then
     v_needs_raw_es=1
   fi
 
@@ -6539,60 +6669,106 @@ run_video_pipeline() {
     vf_str="$(IFS=','; echo "${vf_filters[*]}")"
   fi
 
-  if [[ "$VIDEO_CODEC" == "libsvt-av1" || "$VIDEO_CODEC" == "libaom-av1" ]]; then
-    # AV1 encode (SVT-AV1 or libaom-av1)
-    # ffmpeg's encoder name is "libsvtav1" (no dash); "libsvt-av1" is muxm's user-facing alias.
-    local _ffmpeg_vcodec="$VIDEO_CODEC"
-    [[ "$_ffmpeg_vcodec" == "libsvt-av1" ]] && _ffmpeg_vcodec="libsvtav1"
-    local av1_preset="${PRESET_VALUE:-6}"
-    log "→ Encoding video (AV1, ${TARGET_PIXFMT}, preset ${av1_preset}, CRF ${CRF_VALUE}) → $V_BASE"
-    encode_args=(
-      -c:v "$_ffmpeg_vcodec"
-      -crf "$CRF_VALUE"
-      -pix_fmt "$TARGET_PIXFMT"
-      "${COLOR_ARGS[@]}"
-    )
-    if [[ "$VIDEO_CODEC" == "libsvt-av1" ]]; then
-      encode_args+=( -preset "$av1_preset" )
-    else
-      encode_args+=( -cpu-used "$av1_preset" )
-    fi
-    # SVT_AV1_PARAMS_BASE is shared between libsvt-av1 and libaom-av1; flag name differs per encoder
-    if [[ -n "${SVT_AV1_PARAMS:-}" ]]; then
-      if [[ "$VIDEO_CODEC" == "libsvt-av1" ]]; then
-        encode_args+=( -svtav1-params "$SVT_AV1_PARAMS" )
+  # Dispatch on VIDEO_ENCODER_FFMPEG (set by resolve_video_encoder). This is
+  # the concrete ffmpeg `-c:v` value and captures both software and hardware
+  # backends for each logical codec. AV1 (libsvtav1/libaom-av1) remains
+  # software-only in Phase 2; HEVC/H.264 may route to VideoToolbox when
+  # HW_ACCEL_RESOLVED=videotoolbox.
+  case "$VIDEO_ENCODER_FFMPEG" in
+    libsvtav1|libaom-av1)
+      # AV1 encode (SVT-AV1 or libaom-av1)
+      local av1_preset="${PRESET_VALUE:-6}"
+      log "→ Encoding video (AV1, ${TARGET_PIXFMT}, preset ${av1_preset}, CRF ${CRF_VALUE}) → $V_BASE"
+      encode_args=(
+        -c:v "$VIDEO_ENCODER_FFMPEG"
+        -crf "$CRF_VALUE"
+        -pix_fmt "$TARGET_PIXFMT"
+        "${COLOR_ARGS[@]}"
+      )
+      if [[ "$VIDEO_ENCODER_FFMPEG" == "libsvtav1" ]]; then
+        encode_args+=( -preset "$av1_preset" )
       else
-        encode_args+=( -aom-params "$SVT_AV1_PARAMS" )
+        encode_args+=( -cpu-used "$av1_preset" )
       fi
-    fi
-    [[ -n "$AV1_MAXRATE" ]] && encode_args+=( -maxrate "$AV1_MAXRATE" )
-    [[ -n "$AV1_BUFSIZE" ]] && encode_args+=( -bufsize "$AV1_BUFSIZE" )
-    report_add "video_codec" "av1"
-  elif [[ "$VIDEO_CODEC" == "libx264" ]]; then
-    # H.264 encode (universal / youtube-upload profile)
-    log "→ Encoding video (H.264/SDR, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
-    encode_args=(
-      -c:v libx264
-      -preset "$PRESET_VALUE"
-      -crf "$CRF_VALUE"
-      -pix_fmt yuv420p
-      "${COLOR_ARGS[@]}"
-    )
-    [[ -n "$X264_PARAMS_BASE" ]] && encode_args+=( -x264-params "$X264_PARAMS_BASE" )
-    report_add "video_codec" "h264"
-  else
-    # HEVC encode (default, hdr10-hq, atv-directplay-hq)
-    log "→ Encoding video (${PROFILE_DESC}, ${TARGET_PIXFMT}, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
-    encode_args=(
-      -c:v libx265
-      -preset "$PRESET_VALUE"
-      -crf "$CRF_VALUE"
-      -pix_fmt "$TARGET_PIXFMT"
-      "${COLOR_ARGS[@]}"
-      -x265-params "$X265_PARAMS"
-    )
-    report_add "video_codec" "hevc"
-  fi
+      # SVT_AV1_PARAMS_BASE is shared between libsvt-av1 and libaom-av1; flag name differs per encoder
+      if [[ -n "${SVT_AV1_PARAMS:-}" ]]; then
+        if [[ "$VIDEO_ENCODER_FFMPEG" == "libsvtav1" ]]; then
+          encode_args+=( -svtav1-params "$SVT_AV1_PARAMS" )
+        else
+          encode_args+=( -aom-params "$SVT_AV1_PARAMS" )
+        fi
+      fi
+      [[ -n "$AV1_MAXRATE" ]] && encode_args+=( -maxrate "$AV1_MAXRATE" )
+      [[ -n "$AV1_BUFSIZE" ]] && encode_args+=( -bufsize "$AV1_BUFSIZE" )
+      report_add "video_codec" "av1"
+      ;;
+
+    libx264)
+      # H.264 software encode (universal / youtube-upload profile)
+      log "→ Encoding video (H.264/SDR, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
+      encode_args=(
+        -c:v libx264
+        -preset "$PRESET_VALUE"
+        -crf "$CRF_VALUE"
+        -pix_fmt yuv420p
+        "${COLOR_ARGS[@]}"
+      )
+      [[ -n "$X264_PARAMS_BASE" ]] && encode_args+=( -x264-params "$X264_PARAMS_BASE" )
+      report_add "video_codec" "h264"
+      ;;
+
+    h264_videotoolbox)
+      # H.264 via Apple Silicon VideoToolbox.
+      # VideoToolbox uses `-q:v` (assembled by build_videotoolbox_params into
+      # VIDEOTOOLBOX_ARGS) instead of -crf, and does not accept -preset.
+      log "→ Encoding video (H.264/SDR via VideoToolbox, q:v ${VIDEOTOOLBOX_ARGS[1]:-?}) → $V_BASE"
+      encode_args=(
+        -c:v h264_videotoolbox
+        -pix_fmt yuv420p
+        "${COLOR_ARGS[@]}"
+        "${VIDEOTOOLBOX_ARGS[@]}"
+      )
+      report_add "video_codec" "h264 (hw: videotoolbox)"
+      ;;
+
+    libx265)
+      # HEVC software encode (default, hdr10-hq, atv-directplay-*, animation, streaming-hevc)
+      log "→ Encoding video (${PROFILE_DESC}, ${TARGET_PIXFMT}, preset ${PRESET_VALUE}, CRF ${CRF_VALUE}) → $V_BASE"
+      encode_args=(
+        -c:v libx265
+        -preset "$PRESET_VALUE"
+        -crf "$CRF_VALUE"
+        -pix_fmt "$TARGET_PIXFMT"
+        "${COLOR_ARGS[@]}"
+        -x265-params "$X265_PARAMS"
+      )
+      report_add "video_codec" "hevc"
+      ;;
+
+    hevc_videotoolbox)
+      # HEVC via Apple Silicon VideoToolbox.
+      # Pixel format: VT accepts p010le natively for 10-bit and yuv420p for 8-bit.
+      # ffmpeg converts yuv420p10le → p010le internally when needed; we set p010le
+      # explicitly on 10-bit paths to match VT's native format and avoid an
+      # extra swscale pass. COLOR_ARGS carries HDR10/HLG metadata; ffmpeg
+      # forwards input side data (mastering display, content light level) to
+      # the muxer, which writes the correct MP4 atoms / MKV elements.
+      local _vt_pixfmt="$TARGET_PIXFMT"
+      [[ "$_vt_pixfmt" == "yuv420p10le" ]] && _vt_pixfmt="p010le"
+      log "→ Encoding video (${PROFILE_DESC} via VideoToolbox, ${_vt_pixfmt}, q:v ${VIDEOTOOLBOX_ARGS[1]:-?}) → $V_BASE"
+      encode_args=(
+        -c:v hevc_videotoolbox
+        -pix_fmt "$_vt_pixfmt"
+        "${COLOR_ARGS[@]}"
+        "${VIDEOTOOLBOX_ARGS[@]}"
+      )
+      report_add "video_codec" "hevc (hw: videotoolbox)"
+      ;;
+
+    *)
+      die 11 "Internal error: unhandled VIDEO_ENCODER_FFMPEG=\"$VIDEO_ENCODER_FFMPEG\". This is a bug in muxm's encoder dispatch."
+      ;;
+  esac
 
   if (( DRY_RUN )); then
     : > "$V_BASE" 2>/dev/null || true
@@ -9658,10 +9834,13 @@ main() {
     fi
   fi
 
-  # Decide color space and build encoder params
+  # Decide color space, then resolve concrete encoder (logical codec +
+  # hardware backend → VIDEO_ENCODER_FFMPEG) before assembling encoder
+  # parameters — the VideoToolbox param builder reads VIDEO_ENCODER_FFMPEG
+  # and TARGET_PIXFMT, so both must be set first.
   decide_color_and_pixfmt
-  build_video_encoder_params
   resolve_video_encoder
+  build_video_encoder_params
 
   # Deferred warning: H.264 + HDR source + no tone-mapping → washed-out output
   if (( _H264_HDR_WARN_PENDING )) && [[ "$PROFILE_DESC" == "HDR10" || "$PROFILE_DESC" == "HLG" ]]; then
