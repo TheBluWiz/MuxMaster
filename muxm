@@ -8452,6 +8452,85 @@ _fps_to_decimal(){
   esac
 }
 
+# Decide whether a "nominal" frame rate (r_frame_rate) should be superseded by
+# its "average" counterpart (avg_frame_rate) because the two diverge sharply —
+# the signature of a VFR container reporting its raw timing base as
+# r_frame_rate rather than true cadence (seen in the wild as flat multiples
+# like 600/1 or 1000/1 on macOS/game-capture .mov files, many times the
+# content's actual average cadence). Shared by init_src_fps (source side) and
+# the post-mux fps integrity guard (output side, Section 33) so both sides of
+# that comparison use the exact same tolerance and definition of "VFR".
+# Args: $1 — nominal rate, exact decimal (e.g. "600.0000")
+#       $2 — average rate, exact decimal (e.g. "58.0376")
+# Returns: 0 (true) if the average should be preferred, 1 otherwise (includes
+# either arg being empty/unusable — callers keep the nominal rate in that case).
+_fps_prefers_avg(){
+  local nominal="$1" avg="$2"
+  [[ -n "$nominal" && -n "$avg" ]] || return 1
+  local agree
+  agree="$(LC_ALL=C awk -v r="$nominal" -v a="$avg" \
+    'BEGIN{ d=r-a; if (d<0) d=-d; print (r>0 && d/r <= 0.02) ? 1 : 0 }')"
+  [[ "$agree" != "1" ]]
+}
+
+# The post-mux fps integrity guard's final pass/fail comparison (Section 33),
+# extracted so it is unit-testable independent of a real encode. Both args are
+# already VFR-resolved decimals — SRC_FPS's own fallback happens in
+# init_src_fps, the output's happens at the call site via _fps_prefers_avg —
+# so this is just the 1% relative-tolerance comparison between them: tight
+# enough to still catch a genuine desync (e.g. the historical 23.976→25
+# raw-ES-stamping regression this guard exists for), loose enough to absorb
+# ordinary rational↔decimal rounding (23.976 vs 23.976023976).
+# Args: $1 — resolved source decimal fps   $2 — resolved output decimal fps
+# Returns: 0 if they agree within 1%, 1 otherwise (including either arg empty).
+_fps_integrity_ok(){
+  local s="$1" o="$2"
+  [[ -n "$s" && -n "$o" ]] || return 1
+  LC_ALL=C awk -v s="$s" -v o="$o" \
+    'BEGIN{ d=s-o; if (d<0) d=-d; exit !(s>0 && d/s <= 0.01) }'
+}
+
+# Measure a file's TRUE average video fps directly, bypassing ffprobe's
+# avg_frame_rate field entirely: real packet count (via -count_packets — a
+# demux-only pass, no decoding, so it stays fast even on large files: ~0.1s
+# measured on a 473MB real-world capture) divided by the VIDEO STREAM's own
+# real duration. Needed because some containers never populate a genuine
+# avg_frame_rate at all — Matroska/WebM, in this ffprobe build, just echoes
+# r_frame_rate back verbatim rather than deriving it from real frame
+# count/duration — so _fps_prefers_avg has nothing genuine to compare
+# against on those files; callers gate on the container (format_name
+# containing "matroska") before calling this, since it costs a real extra
+# ffprobe pass and MP4/MOV already gets a trustworthy avg_frame_rate for
+# free.
+# The duration MUST be the video stream's own duration, not the container's
+# overall .format.duration: audio commonly runs a little longer than video
+# (encoder priming/padding), so format.duration silently pulls in the audio
+# track's length and skews the average low. Matroska exposes this per-stream
+# as a "tags.DURATION" string (HH:MM:SS.nnnnnnnnn) rather than a numeric
+# field, so this accepts either form.
+# Args: $1 — media file path
+#       $2 — the VIDEO stream's own duration: a plain decimal seconds value,
+#            or a Matroska "tags.DURATION" string (HH:MM:SS.nnnnnnnnn)
+# Echoes: the measured decimal fps; nothing if it couldn't be determined
+# (caller keeps whatever nominal/avg value it already had).
+_fps_measure_avg_decimal(){
+  local file="$1" dur="$2" secs
+  if [[ "$dur" == *:* ]]; then
+    [[ "$dur" =~ ^([0-9]+):([0-9]{2}):([0-9]+(\.[0-9]+)?)$ ]] || return 0
+    secs="$(LC_ALL=C awk -v h="${BASH_REMATCH[1]}" -v m="${BASH_REMATCH[2]}" -v s="${BASH_REMATCH[3]}" \
+      'BEGIN{ printf "%.4f", h*3600+m*60+s }')"
+  else
+    [[ "$dur" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 0
+    secs="$dur"
+  fi
+  LC_ALL=C awk -v d="$secs" 'BEGIN{ exit !(d>0) }' || return 0
+  local frames
+  frames="$(ffprobe -v error -select_streams v:0 -count_packets \
+    -show_entries stream=nb_read_packets -of default=nk=1:nw=1 "$file" 2>/dev/null)"
+  [[ "$frames" =~ ^[0-9]+$ ]] || return 0
+  LC_ALL=C awk -v f="$frames" -v d="$secs" 'BEGIN{ if (f>0 && d>0) printf "%.4f", f/d }'
+}
+
 # Populate the SRC_FPS global from the cached source metadata (r_frame_rate).
 # Keeps the exact rational so downstream wrap steps (mp4box -fps, ffmpeg -r) can
 # stamp the precise rate with zero rounding drift. Leaves SRC_FPS empty when the
@@ -8459,17 +8538,24 @@ _fps_to_decimal(){
 #
 # VFR fallback: r_frame_rate is not always a real frame rate — for variable
 # frame-rate sources (common in screen/game-capture .mov files, e.g. macOS
-# screen recording) ffprobe reports it as the container's raw timing base
-# (seen in the wild as flat multiples like 600/1 or 1000/1), which can be
-# 10x+ the content's actual cadence. Trusting it as "source fps" makes the
-# post-encode integrity check (Section 33) compare the real output rate
-# against a number the source never actually played at, and reject a
-# perfectly good encode as "desynced". avg_frame_rate (derived by ffprobe
-# from nb_frames/duration) reflects what was actually delivered, so when the
-# two disagree by more than a couple of percent, prefer avg_frame_rate.
+# screen recording) ffprobe reports it as the container's raw timing base,
+# which can be 10x+ the content's actual cadence. Trusting it as "source fps"
+# makes the post-encode integrity check (Section 33) compare the real output
+# rate against a number the source never actually played at, and reject a
+# perfectly good encode as "desynced". avg_frame_rate (derived by ffprobe from
+# nb_frames/duration) reflects what was actually delivered, so when the two
+# disagree sharply (see _fps_prefers_avg), prefer avg_frame_rate — except on a
+# Matroska/WebM source, where this ffprobe build never computes a real
+# avg_frame_rate at all (it just echoes r_frame_rate back), so there is
+# nothing genuine to fall back to without measuring directly; see
+# _fps_measure_avg_decimal for why (same limitation, output side). That
+# measurement returns a decimal, not an exact rational, so SRC_FPS loses its
+# "zero rounding drift" guarantee for this one case — still a strict
+# improvement over stamping the source's outright-wrong nominal rate on the
+# rare DV-wrap-from-a-VFR-Matroska-source path that would otherwise reach.
 # Globals: SRC_FPS (write). Must run AFTER cache_stream_metadata().
 init_src_fps(){
-  local raw dec avg avg_dec
+  local raw dec avg avg_dec src_format
   raw="$(_probe_field r_frame_rate)"
   dec="$(_fps_to_decimal "$raw")"
   if [[ -z "$dec" ]]; then
@@ -8479,17 +8565,21 @@ init_src_fps(){
   fi
 
   SRC_FPS="$raw"
-  avg="$(_probe_field avg_frame_rate)"
-  avg_dec="$(_fps_to_decimal "$avg")"
-  if [[ -n "$avg_dec" ]]; then
-    local _fps_agree
-    _fps_agree="$(LC_ALL=C awk -v r="$dec" -v a="$avg_dec" \
-      'BEGIN{ d=r-a; if (d<0) d=-d; print (r>0 && d/r <= 0.02) ? 1 : 0 }')"
-    if [[ "$_fps_agree" != "1" ]]; then
-      note "Source r_frame_rate (${dec} fps) diverges sharply from its average frame rate (${avg_dec} fps) — treating this as a variable-frame-rate source and using the average (${avg}) for fps enforcement instead of the nominal ${raw}."
-      SRC_FPS="$avg"
-      dec="$avg_dec"
-    fi
+  src_format="$(_jq_cache -r '.format.format_name // empty')"
+  if [[ "$src_format" == *matroska* ]]; then
+    local src_dur
+    src_dur="$(_probe_field duration)"
+    [[ -z "$src_dur" ]] && src_dur="$(_probe_field "tags.DURATION")"
+    avg_dec="$(_fps_measure_avg_decimal "$SRC_ABS" "$src_dur")"
+    avg="$avg_dec"
+  else
+    avg="$(_probe_field avg_frame_rate)"
+    avg_dec="$(_fps_to_decimal "$avg")"
+  fi
+  if [[ -n "$avg_dec" ]] && _fps_prefers_avg "$dec" "$avg_dec"; then
+    note "Source r_frame_rate (${dec} fps) diverges sharply from its average frame rate (${avg_dec} fps) — treating this as a variable-frame-rate source and using the average (${avg}) for fps enforcement instead of the nominal ${raw}."
+    SRC_FPS="$avg"
+    dec="$avg_dec"
   fi
   log "[init_src_fps] source frame rate: $SRC_FPS (${dec} fps)"
 }
@@ -14589,23 +14679,30 @@ main() {
     # (was two separate -show_streams spawns of the same file). The JSON is written to the log —
     # it is complete, and no assertion parses this dump (only muxm's own log lines are grepped).
     local verify_json
-    verify_json="$(ffprobe -v error -show_streams -of json "$TMP_OUT" 2>/dev/null)" || true
+    verify_json="$(ffprobe -v error -show_format -show_streams -of json "$TMP_OUT" 2>/dev/null)" || true
     log "--- ffprobe output streams (full, json) ---"
     printf '%s\n' "${verify_json:-<no ffprobe output>}" >> "$LOGFILE" 2>/dev/null || true
     log "--- end ffprobe output ---"
 
     # Compact stream summary → terminal + log (via say)
     if [[ -n "${verify_json:-}" ]]; then
-      # Batch: fetch all video summary fields in a single jq call
-      local v_codec v_res v_fps v_avg_fps s_count _v_summary
+      # Batch: fetch all video summary fields in a single jq call. v_dur_tag is
+      # the VIDEO stream's own duration (needed for _fps_measure_avg_decimal —
+      # NOT .format.duration, which reflects the container's longest track and
+      # is commonly a little longer than video due to audio encoder priming).
+      # MP4/MOV expose it as a numeric .duration; Matroska only as the
+      # "tags.DURATION" string (HH:MM:SS.nnnnnnnnn) — try both.
+      local v_codec v_res v_fps v_avg_fps s_count v_format v_dur_tag _v_summary
       _v_summary="$(printf '%s\n' "$verify_json" | jq -r '
         ([.streams[] | select(.codec_type=="video")][0] |
           "\(.codec_name // "?") \(.profile // "")"
           + "\t" + "\(.width)x\(.height)"
           + "\t" + (.r_frame_rate // "?")
-          + "\t" + (.avg_frame_rate // "?"))
-        + "\t" + ([.streams[] | select(.codec_type=="subtitle")] | length | tostring)' 2>/dev/null)"
-      _split_tab "$_v_summary" v_codec v_res v_fps v_avg_fps s_count  # Non-collapsing split (keep the pattern uniform; fields here are never empty)
+          + "\t" + (.avg_frame_rate // "?")
+          + "\t" + (.duration // .tags.DURATION // "?"))
+        + "\t" + ([.streams[] | select(.codec_type=="subtitle")] | length | tostring)
+        + "\t" + (.format.format_name // "?")' 2>/dev/null)"
+      _split_tab "$_v_summary" v_codec v_res v_fps v_avg_fps v_dur_tag s_count v_format  # Non-collapsing split (keep the pattern uniform; fields here are never empty)
       v_codec="${v_codec% }"
       # Convert fractional fps like 24000/1001 to decimal (display value — the container's
       # nominal rate; the integrity guard below may still prefer avg_frame_rate for the
@@ -14634,22 +14731,31 @@ main() {
           # average within a short duration). Mirror init_src_fps's fallback so both
           # sides of the comparison are true averages rather than a nominal container
           # rate compared against one.
+          #
+          # Matroska/WebM outputs (-output-ext mkv): this ffprobe build never
+          # populates a real avg_frame_rate for them at all — it just echoes
+          # r_frame_rate back, so _fps_prefers_avg would see no divergence
+          # even on a genuinely VFR output and miss the same false-positive
+          # this whole guard exists to avoid. Measure the true average
+          # directly instead (_fps_measure_avg_decimal) for those containers;
+          # MP4/MOV already gets a trustworthy avg_frame_rate for free, so
+          # skip the extra ffprobe pass there.
           local _out_fps_dec="$v_fps" _v_avg_dec
-          _v_avg_dec="$(_fps_to_decimal "$v_avg_fps")"
-          if [[ -n "$_v_avg_dec" ]]; then
-            local _out_fps_agree
-            _out_fps_agree="$(LC_ALL=C awk -v r="$v_fps" -v a="$_v_avg_dec" \
-              'BEGIN{ d=r-a; if (d<0) d=-d; print (r>0 && d/r <= 0.02) ? 1 : 0 }')"
-            [[ "$_out_fps_agree" != "1" ]] && _out_fps_dec="$_v_avg_dec"
+          if [[ "$v_format" == *matroska* ]]; then
+            _v_avg_dec="$(_fps_measure_avg_decimal "$TMP_OUT" "$v_dur_tag")"
+          else
+            _v_avg_dec="$(_fps_to_decimal "$v_avg_fps")"
+          fi
+          if [[ -n "$_v_avg_dec" ]] && _fps_prefers_avg "$v_fps" "$_v_avg_dec"; then
+            log "[verify] output r_frame_rate (${v_fps} fps) diverges sharply from its average frame rate (${_v_avg_dec} fps) — using the average for the fps integrity comparison instead of the nominal rate."
+            _out_fps_dec="$_v_avg_dec"
           fi
 
-          local _fps_ok
-          _fps_ok="$(LC_ALL=C awk -v s="$_src_fps_dec" -v o="$_out_fps_dec" \
-            'BEGIN{ d=s-o; if (d<0) d=-d; print (s>0 && d/s <= 0.01) ? 1 : 0 }')"
-          if [[ "$_fps_ok" != "1" ]]; then
+          if _fps_integrity_ok "$_src_fps_dec" "$_out_fps_dec"; then
+            log "[verify] fps integrity OK: source ${_src_fps_dec} ≈ output ${_out_fps_dec} fps"
+          else
             die 45 "Frame-rate integrity check failed: source ${_src_fps_dec} fps but output ${_out_fps_dec} fps. This would cause progressive audio desync; refusing to ship a desynced encode. See log: $LOGFILE"
           fi
-          log "[verify] fps integrity OK: source ${_src_fps_dec} ≈ output ${_out_fps_dec} fps"
         fi
       fi
 

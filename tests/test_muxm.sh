@@ -5065,6 +5065,147 @@ test_video() {
     skip "fps preservation: could not generate fractional-fps fixture"
   fi
 
+  # Variable-frame-rate source (regression: the muxm screen-recording
+  # false-positive bug). A VFR container can report r_frame_rate as its raw
+  # timing base — a real screen/game-capture .mov was seen reporting 600/1
+  # while its content actually averaged ~58fps — rather than true cadence.
+  # Trusting r_frame_rate naively (the pre-fix behavior) makes the post-mux
+  # fps integrity guard compare a number the source never played at against
+  # the correctly-encoded real rate, and reject a perfectly good encode.
+  # Guards init_src_fps's and the verify step's avg_frame_rate fallback
+  # (_fps_prefers_avg) end-to-end, on both the source AND the output side —
+  # the unit tests in _test_unit_fps_helpers cover the fallback predicate and
+  # the final _fps_integrity_ok comparison in isolation; this proves the real
+  # pipeline actually wires them in.
+  #
+  # Built via `select` + -fps_mode vfr on a 120fps lavfi source: two
+  # consecutive frames every 24-frame window force a 1/120s minimum gap
+  # (locking r_frame_rate near 120), while the rest of the window is sparsely
+  # sampled (1 in 8), pulling the real average far below it — the same shape
+  # as the real capture (a nominal rate many times the true average). MP4
+  # output here; the MKV-output variant of this same test (which needs
+  # avg_frame_rate to work) lives right below, once _fps_measure_avg_decimal
+  # is confirmed available.
+  local vfr_src="$TESTDIR/fps_vfr_src.mp4" vfr_out="$TESTDIR/fps_vfr_out.mp4"
+  ffmpeg -y -f lavfi -i "color=c=blue:s=320x240:r=120:d=2" \
+         -f lavfi -i "sine=frequency=440:duration=2" \
+         -vf "select='if(lt(mod(n\,24)\,2)\,1\,not(mod(n\,8)))'" -fps_mode vfr \
+         -c:v libx265 -x265-params log-level=none -c:a ac3 "$vfr_src" >/dev/null 2>&1
+  if [[ -s "$vfr_src" ]]; then
+    local _vfr_r _vfr_avg
+    _vfr_r="$(probe_video "$vfr_src" r_frame_rate)"
+    _vfr_avg="$(probe_video "$vfr_src" avg_frame_rate)"
+    if [[ "$_vfr_r" == "120/1" && -n "$_vfr_avg" && "$_vfr_avg" != "120/1" ]]; then
+      log "Encoding VFR source (r_frame_rate=$_vfr_r, avg_frame_rate=$_vfr_avg) — must not false-positive the fps integrity guard..."
+      local vfr_result
+      vfr_result="$(cd "$TESTDIR" && "$MUXM" -K --verbose --crf 28 --preset ultrafast "$vfr_src" "$vfr_out" 2>&1)" || true
+      if [[ -f "$vfr_out" && -s "$vfr_out" ]]; then
+        pass "fps VFR fallback: output produced (source r_frame_rate diverges sharply from avg_frame_rate)"
+        assert_contains "treating this as a variable-frame-rate source" \
+          "fps VFR fallback: init_src_fps logs the source-side fallback to avg_frame_rate" "$vfr_result"
+        assert_contains "using the average for the fps integrity comparison" \
+          "fps VFR fallback: the verify step logs the output-side fallback too" "$vfr_result"
+        assert_contains "Build SUCCEEDED" \
+          "fps VFR fallback: build succeeds instead of a false-positive 'Frame-rate integrity check failed'" "$vfr_result"
+      else
+        fail "fps VFR fallback: no output — false-positive integrity check likely still firing"
+        (( VERBOSE )) && echo "    Output: ${vfr_result:0:400}"
+      fi
+    else
+      skip "fps VFR fallback: fixture didn't reproduce a divergent r_frame_rate/avg_frame_rate (r=$_vfr_r avg=$_vfr_avg) — ffmpeg/ffprobe version may estimate frame rates differently"
+    fi
+  else
+    skip "fps VFR fallback: could not generate the synthetic VFR fixture"
+  fi
+
+  # MKV-output variant of the same VFR regression: MP4 gets a trustworthy
+  # avg_frame_rate for free, but Matroska/WebM (in this ffprobe build) never
+  # computes a real one at all — it just echoes r_frame_rate back — so an MKV
+  # output needed its own fix (_fps_measure_avg_decimal: real packet count
+  # over the VIDEO STREAM's own duration, not the container's, which runs a
+  # little longer due to audio encoder priming/padding). Guards that fix
+  # end-to-end.
+  #
+  # Uses a longer (20s) source than the MP4 variant above: on a very short
+  # clip, ffmpeg re-encoding VFR content without an explicit fps_mode can
+  # hold/pad a trailing frame by a fraction of a second — negligible against
+  # a real file's runtime, but enough of a ~2s clip's total to trip the 1%
+  # tolerance on its own (discovered empirically while building this fix,
+  # unrelated to any bug). 20s keeps that padding effect comfortably below
+  # 1% while still finishing fast (tiny 320x240 frames, ultrafast preset).
+  local vfr_mkv_src="$TESTDIR/fps_vfr_mkv_src.mp4" vfr_mkv_out="$TESTDIR/fps_vfr_mkv_out.mkv"
+  ffmpeg -y -f lavfi -i "color=c=blue:s=320x240:r=120:d=20" \
+         -f lavfi -i "sine=frequency=440:duration=20" \
+         -vf "select='if(lt(mod(n\,24)\,2)\,1\,not(mod(n\,8)))'" -fps_mode vfr \
+         -c:v libx265 -x265-params log-level=none -c:a ac3 "$vfr_mkv_src" >/dev/null 2>&1
+  if [[ -s "$vfr_mkv_src" ]]; then
+    local _vfr_mkv_r _vfr_mkv_avg
+    _vfr_mkv_r="$(probe_video "$vfr_mkv_src" r_frame_rate)"
+    _vfr_mkv_avg="$(probe_video "$vfr_mkv_src" avg_frame_rate)"
+    if [[ "$_vfr_mkv_r" == "120/1" && -n "$_vfr_mkv_avg" && "$_vfr_mkv_avg" != "120/1" ]]; then
+      log "Encoding VFR source to MKV (r_frame_rate=$_vfr_mkv_r, avg_frame_rate=$_vfr_mkv_avg) — must not false-positive the fps integrity guard..."
+      local vfr_mkv_result
+      vfr_mkv_result="$(cd "$TESTDIR" && "$MUXM" -K --verbose --crf 28 --preset ultrafast --output-ext mkv "$vfr_mkv_src" "$vfr_mkv_out" 2>&1)" || true
+      if [[ -f "$vfr_mkv_out" && -s "$vfr_mkv_out" ]]; then
+        pass "fps VFR fallback (MKV output): output produced"
+        assert_contains "treating this as a variable-frame-rate source" \
+          "fps VFR fallback (MKV output): init_src_fps logs the source-side fallback to avg_frame_rate" "$vfr_mkv_result"
+        assert_contains "using the average for the fps integrity comparison" \
+          "fps VFR fallback (MKV output): the verify step logs the output-side fallback too (via the measured average, not the unreliable avg_frame_rate field)" "$vfr_mkv_result"
+        assert_contains "Build SUCCEEDED" \
+          "fps VFR fallback (MKV output): build succeeds instead of a false-positive 'Frame-rate integrity check failed'" "$vfr_mkv_result"
+      else
+        fail "fps VFR fallback (MKV output): no output — false-positive integrity check likely still firing"
+        (( VERBOSE )) && echo "    Output: ${vfr_mkv_result:0:400}"
+      fi
+    else
+      skip "fps VFR fallback (MKV output): fixture didn't reproduce a divergent r_frame_rate/avg_frame_rate (r=$_vfr_mkv_r avg=$_vfr_mkv_avg) — ffmpeg/ffprobe version may estimate frame rates differently"
+    fi
+  else
+    skip "fps VFR fallback (MKV output): could not generate the synthetic VFR fixture"
+  fi
+
+  # MKV-SOURCE variant of the same regression: the measurement fix
+  # (_fps_measure_avg_decimal, this time called from init_src_fps) for when
+  # the user's ORIGINAL file — not muxm's output — is the VFR Matroska/WebM
+  # one. Same underlying gap: this ffprobe build never computes a real
+  # avg_frame_rate for a Matroska source either, so without this fix
+  # init_src_fps would see r_frame_rate==avg_frame_rate (both echoing the
+  # same wrong nominal value), never suspect VFR at all, and leave SRC_FPS
+  # stuck on the wrong nominal rate for the rest of the run. MP4 output here
+  # isolates this from the MKV-output fix already covered above — so the
+  # guard check below only requires the nominal rate to reproduce (120/1);
+  # unlike the MP4-source fixtures, avg_frame_rate is NOT expected to differ
+  # from it here, since that's exactly the condition this fix works around.
+  local vfr_srcmkv_src="$TESTDIR/fps_vfr_srcmkv_src.mkv" vfr_srcmkv_out="$TESTDIR/fps_vfr_srcmkv_out.mp4"
+  ffmpeg -y -f lavfi -i "color=c=blue:s=320x240:r=120:d=20" \
+         -f lavfi -i "sine=frequency=440:duration=20" \
+         -vf "select='if(lt(mod(n\,24)\,2)\,1\,not(mod(n\,8)))'" -fps_mode vfr \
+         -c:v libx265 -x265-params log-level=none -c:a ac3 "$vfr_srcmkv_src" >/dev/null 2>&1
+  if [[ -s "$vfr_srcmkv_src" ]]; then
+    local _vfr_srcmkv_r
+    _vfr_srcmkv_r="$(probe_video "$vfr_srcmkv_src" r_frame_rate)"
+    if [[ "$_vfr_srcmkv_r" == "120/1" ]]; then
+      log "Encoding from a VFR MKV source (r_frame_rate=$_vfr_srcmkv_r; avg_frame_rate is unusable on Matroska in this ffprobe build) — must not false-positive the fps integrity guard..."
+      local vfr_srcmkv_result
+      vfr_srcmkv_result="$(cd "$TESTDIR" && "$MUXM" -K --verbose --crf 28 --preset ultrafast "$vfr_srcmkv_src" "$vfr_srcmkv_out" 2>&1)" || true
+      if [[ -f "$vfr_srcmkv_out" && -s "$vfr_srcmkv_out" ]]; then
+        pass "fps VFR fallback (MKV source): output produced"
+        assert_contains "treating this as a variable-frame-rate source" \
+          "fps VFR fallback (MKV source): init_src_fps logs the source-side fallback (via the measured average, not the unreliable avg_frame_rate field)" "$vfr_srcmkv_result"
+        assert_contains "Build SUCCEEDED" \
+          "fps VFR fallback (MKV source): build succeeds instead of a false-positive 'Frame-rate integrity check failed'" "$vfr_srcmkv_result"
+      else
+        fail "fps VFR fallback (MKV source): no output — false-positive integrity check likely still firing"
+        (( VERBOSE )) && echo "    Output: ${vfr_srcmkv_result:0:400}"
+      fi
+    else
+      skip "fps VFR fallback (MKV source): fixture didn't reproduce a nominal r_frame_rate of 120/1 (r=$_vfr_srcmkv_r) — ffmpeg/ffprobe version may estimate frame rates differently"
+    fi
+  else
+    skip "fps VFR fallback (MKV source): could not generate the synthetic VFR fixture"
+  fi
+
   # ---- A1: streaming-av1 CRF is resolution/HDR-aware ----
   # CRF 30 is transparent at 1080p SDR but drops below the ~93 VMAF line at 4K HDR, so ≥4K
   # or HDR sources are nudged to CRF 28 (1080p SDR keeps 30; explicit --crf always wins).
@@ -11457,6 +11598,78 @@ _test_unit_fps_helpers() {
   assert_muxm_fn_stdout "_fps_to_decimal(0)=empty"            ""        _fps_to_decimal "" "0"
   assert_muxm_fn_stdout "_fps_to_decimal('')=empty"           ""        _fps_to_decimal "" ""
   assert_muxm_fn_stdout "_fps_to_decimal(abc)=empty"          ""        _fps_to_decimal "" "abc"
+
+  # ---- _fps_prefers_avg ----
+  # Shared VFR-detection predicate for init_src_fps (source side) and the
+  # post-mux fps integrity guard (output side): true (rc 0) iff the nominal
+  # rate (r_frame_rate) diverges from the average rate (avg_frame_rate) by
+  # more than 2% — the signature of a VFR container reporting its raw timing
+  # base as r_frame_rate rather than true cadence, not a real frame rate.
+  assert_muxm_fn_exit "_fps_prefers_avg(600.0000,58.0376)=true (real VFR repro: 600fps nominal vs ~58fps avg)" 0 _fps_prefers_avg "" "600.0000" "58.0376"
+  assert_muxm_fn_exit "_fps_prefers_avg(23.9760,23.9760)=false (true CFR, no divergence)"                      1 _fps_prefers_avg "" "23.9760" "23.9760"
+  assert_muxm_fn_exit "_fps_prefers_avg(100,98)=false (exactly at the 2% tolerance boundary, inclusive)"       1 _fps_prefers_avg "" "100" "98"
+  assert_muxm_fn_exit "_fps_prefers_avg(100,97.98)=true (just over the 2% tolerance boundary)"                 0 _fps_prefers_avg "" "100" "97.98"
+  assert_muxm_fn_exit "_fps_prefers_avg(100,'')=false (missing avg → keep nominal, fail-safe)"                 1 _fps_prefers_avg "" "100" ""
+  assert_muxm_fn_exit "_fps_prefers_avg('',58)=false (missing nominal → keep nominal, fail-safe)"              1 _fps_prefers_avg "" "" "58"
+
+  # ---- _fps_integrity_ok ----
+  # The post-mux guard's final pass/fail comparison, downstream of any
+  # _fps_prefers_avg fallback on either side. The VFR fallback work must NOT
+  # have blunted the guard's original purpose: a genuine, non-VFR mismatch —
+  # like the historical 23.976→25 raw-ES-stamping regression this guard was
+  # built to catch — must still fail.
+  assert_muxm_fn_exit "_fps_integrity_ok(23.9760,25.0000)=false (genuine CFR desync — the guard's original bug — must still be caught)" 1 _fps_integrity_ok "" "23.9760" "25.0000"
+  assert_muxm_fn_exit "_fps_integrity_ok(23.9760,23.9760)=true (exact CFR match)"                                                        0 _fps_integrity_ok "" "23.9760" "23.9760"
+  assert_muxm_fn_exit "_fps_integrity_ok(21.2389,21.1416)=true (real VFR-resolved values from an actual run, <1% apart)"                 0 _fps_integrity_ok "" "21.2389" "21.1416"
+  assert_muxm_fn_exit "_fps_integrity_ok(100,99)=true (exactly at the 1% tolerance boundary, inclusive)"                                 0 _fps_integrity_ok "" "100" "99"
+  assert_muxm_fn_exit "_fps_integrity_ok(100,98.99)=false (just over the 1% tolerance boundary)"                                         1 _fps_integrity_ok "" "100" "98.99"
+  assert_muxm_fn_exit "_fps_integrity_ok(100,'')=false (missing output value → fail closed, not a silent pass)"                          1 _fps_integrity_ok "" "100" ""
+  assert_muxm_fn_exit "_fps_integrity_ok('',58)=false (missing source value → fail closed, not a silent pass)"                           1 _fps_integrity_ok "" "" "58"
+}
+
+# End-to-end coverage for init_src_fps's VFR fallback (the muxm screen-recording
+# false-positive bug: a source whose r_frame_rate is a VFR container's raw
+# timing base — e.g. 600/1 — rather than its true cadence must resolve SRC_FPS
+# to avg_frame_rate and log why, not silently carry the bogus nominal rate
+# into the post-mux integrity guard). _fps_prefers_avg above tests the pure
+# predicate in isolation; this tests init_src_fps's actual use of it against a
+# mocked METADATA_CACHE, matching _test_video_detect_dv_uses_cache's pattern.
+_test_unit_init_src_fps_vfr() {
+  local body
+  body="$(_extract_muxm_fns init_src_fps _probe_field _jq_cache _fps_to_decimal _fps_prefers_avg)" \
+    || { fail "unit-init-src-fps-vfr: could not extract init_src_fps + helpers"; return; }
+
+  _run_init_src_fps(){   # $1 = METADATA_CACHE JSON → echoes "SRC_FPS=<val> noted=<0|1>"
+    local env_setup
+    # shellcheck disable=SC2016  # $1 must expand in the CHILD bash (below), not here
+    env_setup='METADATA_CACHE="$1"; SRC_FPS=""; _noted=0; note(){ _noted=1; }; log(){ :; }; warn(){ :; }'
+    bash -c "$env_setup"$'\n'"$body"$'\n''init_src_fps; echo "SRC_FPS=$SRC_FPS noted=$_noted"' -- "$1"
+  }
+
+  local vfr_out cfr_out noavg_out
+  vfr_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"600/1","avg_frame_rate":"317640/5473"}]}')"
+  if [[ "$vfr_out" == "SRC_FPS=317640/5473 noted=1" ]]; then
+    pass "unit-init-src-fps-vfr: 600/1 nominal vs ~58.04fps avg (real repro values) → SRC_FPS falls back to avg_frame_rate, note logged"
+  else
+    fail "unit-init-src-fps-vfr: expected 'SRC_FPS=317640/5473 noted=1', got '$vfr_out'"
+  fi
+
+  cfr_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"24000/1001","avg_frame_rate":"24000/1001"}]}')"
+  if [[ "$cfr_out" == "SRC_FPS=24000/1001 noted=0" ]]; then
+    pass "unit-init-src-fps-vfr: agreeing CFR rate stays on r_frame_rate, no VFR note (true CFR unaffected by the fallback)"
+  else
+    fail "unit-init-src-fps-vfr: expected 'SRC_FPS=24000/1001 noted=0', got '$cfr_out'"
+  fi
+
+  # avg_frame_rate absent/unusable ("0/0", e.g. an old ffprobe or a stream that
+  # never reports it) must NOT crash and must keep the nominal rate — matches
+  # _fps_prefers_avg's fail-safe (an unusable avg never triggers the fallback).
+  noavg_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"25/1","avg_frame_rate":"0/0"}]}')"
+  if [[ "$noavg_out" == "SRC_FPS=25/1 noted=0" ]]; then
+    pass "unit-init-src-fps-vfr: unusable avg_frame_rate (0/0) is ignored, SRC_FPS keeps r_frame_rate"
+  else
+    fail "unit-init-src-fps-vfr: expected 'SRC_FPS=25/1 noted=0', got '$noavg_out'"
+  fi
 }
 
 _test_unit_extract_helper() {
@@ -12885,6 +13098,7 @@ test_unit() {
   _test_unit_vt_vui_color_stamp
   _test_unit_sii_dv_guard
   _test_unit_fps_helpers
+  _test_unit_init_src_fps_vfr
   _test_unit_extract_helper
   _test_unit_score_audio_stream
   _test_unit_rate_to_kbps
