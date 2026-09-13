@@ -223,7 +223,9 @@ declare -i _MAIN_ARGC0=0
 METADATA_CACHE=""
 _CACHED_SRC_DURATION_SECS=""   # Populated on first call to _get_source_duration_secs
 SRC_FPS=""                     # Source video frame rate as exact rational (e.g. 24000/1001).
-                               # Populated by init_src_fps() after cache_stream_metadata.
+                               # Populated by init_src_fps() after cache_stream_metadata. Normally
+                               # r_frame_rate; falls back to avg_frame_rate when the two disagree
+                               # (VFR sources — see init_src_fps).
                                # Empty when undeterminable (e.g. r_frame_rate="0/0") — callers
                                # must skip fps enforcement rather than pass a bogus value.
 
@@ -8454,18 +8456,42 @@ _fps_to_decimal(){
 # Keeps the exact rational so downstream wrap steps (mp4box -fps, ffmpeg -r) can
 # stamp the precise rate with zero rounding drift. Leaves SRC_FPS empty when the
 # source advertises no usable rate (e.g. "0/0"), so callers skip fps enforcement.
+#
+# VFR fallback: r_frame_rate is not always a real frame rate — for variable
+# frame-rate sources (common in screen/game-capture .mov files, e.g. macOS
+# screen recording) ffprobe reports it as the container's raw timing base
+# (seen in the wild as flat multiples like 600/1 or 1000/1), which can be
+# 10x+ the content's actual cadence. Trusting it as "source fps" makes the
+# post-encode integrity check (Section 33) compare the real output rate
+# against a number the source never actually played at, and reject a
+# perfectly good encode as "desynced". avg_frame_rate (derived by ffprobe
+# from nb_frames/duration) reflects what was actually delivered, so when the
+# two disagree by more than a couple of percent, prefer avg_frame_rate.
 # Globals: SRC_FPS (write). Must run AFTER cache_stream_metadata().
 init_src_fps(){
-  local raw dec
+  local raw dec avg avg_dec
   raw="$(_probe_field r_frame_rate)"
   dec="$(_fps_to_decimal "$raw")"
-  if [[ -n "$dec" ]]; then
-    SRC_FPS="$raw"
-    log "[init_src_fps] source frame rate: $SRC_FPS (${dec} fps)"
-  else
+  if [[ -z "$dec" ]]; then
     SRC_FPS=""
     warn "Could not determine source frame rate (r_frame_rate='${raw:-unset}'); fps will not be enforced on the DV wrap. Output fps should be verified manually."
+    return 0
   fi
+
+  SRC_FPS="$raw"
+  avg="$(_probe_field avg_frame_rate)"
+  avg_dec="$(_fps_to_decimal "$avg")"
+  if [[ -n "$avg_dec" ]]; then
+    local _fps_agree
+    _fps_agree="$(LC_ALL=C awk -v r="$dec" -v a="$avg_dec" \
+      'BEGIN{ d=r-a; if (d<0) d=-d; print (r>0 && d/r <= 0.02) ? 1 : 0 }')"
+    if [[ "$_fps_agree" != "1" ]]; then
+      note "Source r_frame_rate (${dec} fps) diverges sharply from its average frame rate (${avg_dec} fps) — treating this as a variable-frame-rate source and using the average (${avg}) for fps enforcement instead of the nominal ${raw}."
+      SRC_FPS="$avg"
+      dec="$avg_dec"
+    fi
+  fi
+  log "[init_src_fps] source frame rate: $SRC_FPS (${dec} fps)"
 }
 
 # ===== Section 22: Color space & pixel format decision ========================================
@@ -14571,16 +14597,19 @@ main() {
     # Compact stream summary → terminal + log (via say)
     if [[ -n "${verify_json:-}" ]]; then
       # Batch: fetch all video summary fields in a single jq call
-      local v_codec v_res v_fps s_count _v_summary
+      local v_codec v_res v_fps v_avg_fps s_count _v_summary
       _v_summary="$(printf '%s\n' "$verify_json" | jq -r '
         ([.streams[] | select(.codec_type=="video")][0] |
           "\(.codec_name // "?") \(.profile // "")"
           + "\t" + "\(.width)x\(.height)"
-          + "\t" + (.r_frame_rate // "?"))
+          + "\t" + (.r_frame_rate // "?")
+          + "\t" + (.avg_frame_rate // "?"))
         + "\t" + ([.streams[] | select(.codec_type=="subtitle")] | length | tostring)' 2>/dev/null)"
-      _split_tab "$_v_summary" v_codec v_res v_fps s_count  # Non-collapsing split (keep the pattern uniform; fields here are never empty)
+      _split_tab "$_v_summary" v_codec v_res v_fps v_avg_fps s_count  # Non-collapsing split (keep the pattern uniform; fields here are never empty)
       v_codec="${v_codec% }"
-      # Convert fractional fps like 24000/1001 to decimal
+      # Convert fractional fps like 24000/1001 to decimal (display value — the container's
+      # nominal rate; the integrity guard below may still prefer avg_frame_rate for the
+      # comparison itself, same as init_src_fps does for the source).
       if [[ "$v_fps" == */* ]]; then
         v_fps="$(echo "scale=3; $v_fps" | bc 2>/dev/null | sed 's/0*$//' | sed 's/\.$//')"
       fi
@@ -14599,13 +14628,28 @@ main() {
         local _src_fps_dec
         _src_fps_dec="$(_fps_to_decimal "$SRC_FPS")"
         if [[ -n "$_src_fps_dec" ]]; then
+          # Output fps used for the comparison: r_frame_rate can be a VFR-container
+          # artifact on the OUTPUT side too, not just the source's (seen on short VFR
+          # encodes, where the muxed file's nominal rate doesn't settle to the real
+          # average within a short duration). Mirror init_src_fps's fallback so both
+          # sides of the comparison are true averages rather than a nominal container
+          # rate compared against one.
+          local _out_fps_dec="$v_fps" _v_avg_dec
+          _v_avg_dec="$(_fps_to_decimal "$v_avg_fps")"
+          if [[ -n "$_v_avg_dec" ]]; then
+            local _out_fps_agree
+            _out_fps_agree="$(LC_ALL=C awk -v r="$v_fps" -v a="$_v_avg_dec" \
+              'BEGIN{ d=r-a; if (d<0) d=-d; print (r>0 && d/r <= 0.02) ? 1 : 0 }')"
+            [[ "$_out_fps_agree" != "1" ]] && _out_fps_dec="$_v_avg_dec"
+          fi
+
           local _fps_ok
-          _fps_ok="$(LC_ALL=C awk -v s="$_src_fps_dec" -v o="$v_fps" \
+          _fps_ok="$(LC_ALL=C awk -v s="$_src_fps_dec" -v o="$_out_fps_dec" \
             'BEGIN{ d=s-o; if (d<0) d=-d; print (s>0 && d/s <= 0.01) ? 1 : 0 }')"
           if [[ "$_fps_ok" != "1" ]]; then
-            die 45 "Frame-rate integrity check failed: source ${_src_fps_dec} fps but output ${v_fps} fps. This would cause progressive audio desync; refusing to ship a desynced encode. See log: $LOGFILE"
+            die 45 "Frame-rate integrity check failed: source ${_src_fps_dec} fps but output ${_out_fps_dec} fps. This would cause progressive audio desync; refusing to ship a desynced encode. See log: $LOGFILE"
           fi
-          log "[verify] fps integrity OK: source ${_src_fps_dec} ≈ output ${v_fps} fps"
+          log "[verify] fps integrity OK: source ${_src_fps_dec} ≈ output ${_out_fps_dec} fps"
         fi
       fi
 
