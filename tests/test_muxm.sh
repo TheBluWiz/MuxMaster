@@ -5091,11 +5091,19 @@ test_video() {
          -f lavfi -i "sine=frequency=440:duration=2" \
          -vf "select='if(lt(mod(n\,24)\,2)\,1\,not(mod(n\,8)))'" -fps_mode vfr \
          -c:v libx265 -x265-params log-level=none -c:a ac3 "$vfr_src" >/dev/null 2>&1
-  if [[ -s "$vfr_src" ]]; then
+  # Skip-first guards (not else-skips) per the soft-skip ratchet, _test_meta_soft_skip: the
+  # generation/divergence checks are genuine host/version skips (a different ffmpeg/ffprobe
+  # may not support this exact filter chain, or may estimate frame rates differently), so the
+  # negated condition skips up front and the real assertions live in the (unnested) else.
+  if [[ ! -s "$vfr_src" ]]; then
+    skip "fps VFR fallback: could not generate the synthetic VFR fixture"
+  else
     local _vfr_r _vfr_avg
     _vfr_r="$(probe_video "$vfr_src" r_frame_rate)"
     _vfr_avg="$(probe_video "$vfr_src" avg_frame_rate)"
-    if [[ "$_vfr_r" == "120/1" && -n "$_vfr_avg" && "$_vfr_avg" != "120/1" ]]; then
+    if [[ "$_vfr_r" != "120/1" || -z "$_vfr_avg" || "$_vfr_avg" == "120/1" ]]; then
+      skip "fps VFR fallback: fixture didn't reproduce a divergent r_frame_rate/avg_frame_rate (r=$_vfr_r avg=$_vfr_avg) — ffmpeg/ffprobe version may estimate frame rates differently"
+    else
       log "Encoding VFR source (r_frame_rate=$_vfr_r, avg_frame_rate=$_vfr_avg) — must not false-positive the fps integrity guard..."
       local vfr_result
       vfr_result="$(cd "$TESTDIR" && "$MUXM" -K --verbose --crf 28 --preset ultrafast "$vfr_src" "$vfr_out" 2>&1)" || true
@@ -5111,11 +5119,7 @@ test_video() {
         fail "fps VFR fallback: no output — false-positive integrity check likely still firing"
         (( VERBOSE )) && echo "    Output: ${vfr_result:0:400}"
       fi
-    else
-      skip "fps VFR fallback: fixture didn't reproduce a divergent r_frame_rate/avg_frame_rate (r=$_vfr_r avg=$_vfr_avg) — ffmpeg/ffprobe version may estimate frame rates differently"
     fi
-  else
-    skip "fps VFR fallback: could not generate the synthetic VFR fixture"
   fi
 
   # MKV-output variant of the same VFR regression: MP4 gets a trustworthy
@@ -5138,11 +5142,17 @@ test_video() {
          -f lavfi -i "sine=frequency=440:duration=20" \
          -vf "select='if(lt(mod(n\,24)\,2)\,1\,not(mod(n\,8)))'" -fps_mode vfr \
          -c:v libx265 -x265-params log-level=none -c:a ac3 "$vfr_mkv_src" >/dev/null 2>&1
-  if [[ -s "$vfr_mkv_src" ]]; then
+  # Skip-first guards (not else-skips) per the soft-skip ratchet — see the identical note on
+  # the MP4 variant above.
+  if [[ ! -s "$vfr_mkv_src" ]]; then
+    skip "fps VFR fallback (MKV output): could not generate the synthetic VFR fixture"
+  else
     local _vfr_mkv_r _vfr_mkv_avg
     _vfr_mkv_r="$(probe_video "$vfr_mkv_src" r_frame_rate)"
     _vfr_mkv_avg="$(probe_video "$vfr_mkv_src" avg_frame_rate)"
-    if [[ "$_vfr_mkv_r" == "120/1" && -n "$_vfr_mkv_avg" && "$_vfr_mkv_avg" != "120/1" ]]; then
+    if [[ "$_vfr_mkv_r" != "120/1" || -z "$_vfr_mkv_avg" || "$_vfr_mkv_avg" == "120/1" ]]; then
+      skip "fps VFR fallback (MKV output): fixture didn't reproduce a divergent r_frame_rate/avg_frame_rate (r=$_vfr_mkv_r avg=$_vfr_mkv_avg) — ffmpeg/ffprobe version may estimate frame rates differently"
+    else
       log "Encoding VFR source to MKV (r_frame_rate=$_vfr_mkv_r, avg_frame_rate=$_vfr_mkv_avg) — must not false-positive the fps integrity guard..."
       local vfr_mkv_result
       vfr_mkv_result="$(cd "$TESTDIR" && "$MUXM" -K --verbose --crf 28 --preset ultrafast --output-ext mkv "$vfr_mkv_src" "$vfr_mkv_out" 2>&1)" || true
@@ -5158,11 +5168,7 @@ test_video() {
         fail "fps VFR fallback (MKV output): no output — false-positive integrity check likely still firing"
         (( VERBOSE )) && echo "    Output: ${vfr_mkv_result:0:400}"
       fi
-    else
-      skip "fps VFR fallback (MKV output): fixture didn't reproduce a divergent r_frame_rate/avg_frame_rate (r=$_vfr_mkv_r avg=$_vfr_mkv_avg) — ffmpeg/ffprobe version may estimate frame rates differently"
     fi
-  else
-    skip "fps VFR fallback (MKV output): could not generate the synthetic VFR fixture"
   fi
 
   # MKV-SOURCE variant of the same regression: the measurement fix
@@ -5182,10 +5188,16 @@ test_video() {
          -f lavfi -i "sine=frequency=440:duration=20" \
          -vf "select='if(lt(mod(n\,24)\,2)\,1\,not(mod(n\,8)))'" -fps_mode vfr \
          -c:v libx265 -x265-params log-level=none -c:a ac3 "$vfr_srcmkv_src" >/dev/null 2>&1
-  if [[ -s "$vfr_srcmkv_src" ]]; then
+  # Skip-first guards (not else-skips) per the soft-skip ratchet — see the identical note on
+  # the MP4 variant above.
+  if [[ ! -s "$vfr_srcmkv_src" ]]; then
+    skip "fps VFR fallback (MKV source): could not generate the synthetic VFR fixture"
+  else
     local _vfr_srcmkv_r
     _vfr_srcmkv_r="$(probe_video "$vfr_srcmkv_src" r_frame_rate)"
-    if [[ "$_vfr_srcmkv_r" == "120/1" ]]; then
+    if [[ "$_vfr_srcmkv_r" != "120/1" ]]; then
+      skip "fps VFR fallback (MKV source): fixture didn't reproduce a nominal r_frame_rate of 120/1 (r=$_vfr_srcmkv_r) — ffmpeg/ffprobe version may estimate frame rates differently"
+    else
       log "Encoding from a VFR MKV source (r_frame_rate=$_vfr_srcmkv_r; avg_frame_rate is unusable on Matroska in this ffprobe build) — must not false-positive the fps integrity guard..."
       local vfr_srcmkv_result
       vfr_srcmkv_result="$(cd "$TESTDIR" && "$MUXM" -K --verbose --crf 28 --preset ultrafast "$vfr_srcmkv_src" "$vfr_srcmkv_out" 2>&1)" || true
@@ -5199,11 +5211,7 @@ test_video() {
         fail "fps VFR fallback (MKV source): no output — false-positive integrity check likely still firing"
         (( VERBOSE )) && echo "    Output: ${vfr_srcmkv_result:0:400}"
       fi
-    else
-      skip "fps VFR fallback (MKV source): fixture didn't reproduce a nominal r_frame_rate of 120/1 (r=$_vfr_srcmkv_r) — ffmpeg/ffprobe version may estimate frame rates differently"
     fi
-  else
-    skip "fps VFR fallback (MKV source): could not generate the synthetic VFR fixture"
   fi
 
   # ---- A1: streaming-av1 CRF is resolution/HDR-aware ----

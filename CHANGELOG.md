@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com), and this 
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-09-13
+
+### Fixed
+
+- **Frame-rate integrity guard false-positived on variable-frame-rate sources** — muxm refused to ship a correctly-encoded, perfectly-synced file with `Frame-rate integrity check failed: source 600.0000 fps but output 58 fps … refusing to ship a desynced encode` (`die 45`), on sources where ffprobe's `r_frame_rate` is a VFR container's raw timing base rather than the content's real average cadence. Confirmed on a real macOS screen-recording `.mov` reporting `r_frame_rate=600/1` while `avg_frame_rate` and frame-count÷duration both independently agreed the content actually ran ~58 fps — `init_src_fps()` was trusting `r_frame_rate` alone for `SRC_FPS`, and the post-mux verify step was doing the same for the muxed output, so a correct 58fps encode got compared against a source number the file never actually played at. Both now fall back to `avg_frame_rate` when it diverges from `r_frame_rate` by more than 2%, via a new shared predicate, `_fps_prefers_avg()`; true CFR sources, where the two already agree, are unaffected. The guard's own pass/fail comparison was extracted into `_fps_integrity_ok()` so it is unit-testable independent of a real encode — a genuine desync turns out to be hard to manufacture honestly (an early synthetic VFR fixture coincidentally passed even against the pre-fix code, since source and output happened to share the same wrong nominal value) — and a dedicated case (23.976 vs 25, the historical raw-ES-stamping desync this guard exists to catch) locks in that the fallback didn't blunt its original purpose. Verified against the real 228s capture, a 20s trim, and several synthetic fixtures, all previously failing at exit 45 and now succeeding.
+
+- **The same false positive reproduced on Matroska/WebM containers, on both the source and the output side, even after the fix above** — this ffprobe build never computes a real `avg_frame_rate` for Matroska at all; it just echoes `r_frame_rate` back, leaving `_fps_prefers_avg` nothing genuine to compare against, so an MKV/WebM source or `--output-ext mkv` output could still trip the guard. Added `_fps_measure_avg_decimal()`: a real packet count (`-count_packets` — demux-only, no decoding, ~0.1s measured on a 473MB file) divided by the **video stream's own** duration, not the container's `.format.duration` — an early version of this fix used the container duration and was itself subtly wrong, since audio commonly runs a few milliseconds to tens of milliseconds longer than video (encoder priming/padding), which silently skewed the computed average low. Matroska only exposes the video-specific duration as a `tags.DURATION` string (`HH:MM:SS.nnnnnnnnn`), so the function parses either that or a plain numeric duration. Gated on `format_name` containing `matroska`, so MP4/MOV — which already get a trustworthy `avg_frame_rate` for free — pay no extra cost. Wired into both `init_src_fps()` and the verify step.
+
+### Changed
+
+- **Version bumped to 1.6.2.** `docs/muxm.1` and `completions/muxm-completion.bash` regenerated via `tools/gen-docs.sh`. Test suite: 691/692 unit tests and 79/79 video-pipeline tests pass (0 failures across both), including new coverage for `_fps_prefers_avg`, `_fps_integrity_ok`, `init_src_fps`'s VFR fallback, and four end-to-end VFR scenarios (MP4→MP4, MP4→MKV, MKV→MP4) alongside the existing CFR `fps preservation` regression test, unaffected throughout.
+
 ## [1.6.1] - 2026-08-29
 
 ### Fixed
@@ -670,6 +682,7 @@ Initial public release.
 - Structured exit codes for scripting and automation (10 = missing tool, 11 = bad arguments, 12 = corrupt source, 40–43 = pipeline failures)
 - Comprehensive test harness (`test_muxm.sh`) with 18 test suites and ~165 assertions
 
+[1.6.2]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.6.2
 [1.6.1]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.6.1
 [1.6.0]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.6.0
 [1.5.1]: https://github.com/TheBluWiz/MuxMaster/releases/tag/v1.5.1
