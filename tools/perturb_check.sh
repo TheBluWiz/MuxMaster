@@ -270,14 +270,14 @@ enforce MUT-M5-UNBOUND cli \
   'cli-config-missing-value: --create-config with a trailing --crf (missing value)' \
   'M-M5-UNBOUND: _cc_need_val bounds-checks config-override values → clean-die-11 probe'
 
-# MUT-M6-EOF (M6): drop the `|| _confirm=""` EOF guard on the replace-source prompt. A
-# non-interactive stdin (EOF) then makes `read` fail and crash under set -e instead of a clean
-# die 11 decline.
+# MUT-M6-EOF (M6, extended for the -t 30 bound): drop the `|| _confirm=""` EOF/timeout guard on
+# the replace-source prompt. A non-interactive stdin (EOF) then makes `read` fail and crash under
+# set -e instead of a clean die 11 decline.
 # shellcheck disable=SC2016  # _confirm is literal sed text.
 enforce MUT-M6-EOF cli \
-  's/  read -r _confirm || _confirm="".*/  read -r _confirm/' \
+  's/  read -t 30 -r _confirm || _confirm="".*/  read -t 30 -r _confirm/' \
   'cli-replace-source-eof: REPLACE_SOURCE + EOF stdin → expected die 11' \
-  'M-M6-EOF: read EOF treated as decline → clean-die-11-not-crash probe'
+  'M-M6-EOF: read EOF/timeout treated as decline → clean-die-11-not-crash probe'
 
 # MUT-M7-BRIDGE (M7): make the deprecation bridge's guard always-true (compare the new var
 # to itself), reverting to the unconditional overwrite. With BOTH set in config the legacy value

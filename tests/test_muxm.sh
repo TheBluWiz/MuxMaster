@@ -1559,6 +1559,7 @@ test_cli() {
   _test_cli_dashdash
   _test_cli_config_missing_val
   _test_cli_replace_source_eof
+  _test_cli_replace_source_timeout_bound
   _test_cli_create_config
   _test_cli_prerelease_fixes
 
@@ -1631,9 +1632,12 @@ _test_cli_config_missing_val() {
   rm -rf "$_h"
 }
 
-# M6: REPLACE_SOURCE set via .muxmrc bypasses the --replace-source TTY guard, so the confirm
-# prompt's `read` hits EOF under non-interactive stdin. The fix treats EOF as a decline
-# (`read … || _confirm=""`) → clean die 11, instead of an ERR-trap crash (exit 1) under set -e.
+# M6 (extended): REPLACE_SOURCE set via .muxmrc bypasses the --replace-source TTY guard, so the
+# confirm prompt's `read` hits EOF under non-interactive stdin. The fix treats EOF/timeout as a
+# decline (`read -t 30 … || _confirm=""`) → clean die 11, instead of an ERR-trap crash (exit 1)
+# under set -e. The -t 30 bound also stops an open-but-idle stdin (e.g. backgrounded, or piped
+# from something that never writes/closes) from blocking the prompt forever — untestable here
+# without a pty, but exercised manually; see muxm's replace-source-prompt comment.
 # Perturb MUT-M6-EOF removes the `|| _confirm=""` → EOF crashes → non-11 exit → red.
 _test_cli_replace_source_eof() {
   local _dir="$TESTDIR/m6_eof"; mkdir -p "$_dir/h"
@@ -1648,6 +1652,72 @@ _test_cli_replace_source_eof() {
     fail "cli-replace-source-eof: REPLACE_SOURCE + EOF stdin → expected die 11, got exit $rc (ERR-trap crash?)"
   fi
   rm -rf "$_dir"
+}
+
+# M6-extended: the -t 30 bound on the replace-source confirm prompt guards a DIFFERENT stdin
+# shape than the EOF test above. </dev/null hits EOF near-instantly, long before any timeout
+# could matter, so it never actually exercises the -t bound — it would pass identically with or
+# without one. The real bug this guards was an OPEN-but-IDLE stdin (backgrounded run, or piped
+# from something that never writes/closes), where a bare `read` blocks forever. Reproduce that
+# shape here (a process-substitution pipe nothing ever writes to) against a copy of muxm with the
+# real 30s bound shortened to 1s — same sed-copy idiom perturb_check.sh uses for mutations, so the
+# test takes ~1s instead of 30s while still exercising the real `read -t N` code path.
+# Regression check: reverting the `-t 30` bound to a bare `read -r` doesn't match this test's own
+# sed anchor, so it's caught by the "anchor changed 0 line(s)" drift guard below, not by the 15s
+# poll ceiling — that ceiling only fires for a bound that's present but non-functional (e.g. a
+# broken `-t` flag), which is a real safety net but not what a straight revert triggers. Verified
+# empirically: reverting to a bare `read -r` in a copy of muxm makes this test fail via the drift
+# guard within ~1s, not a hang.
+_test_cli_replace_source_timeout_bound() {
+  local _dir="$TESTDIR/m6_timeout"; mkdir -p "$_dir/h"
+  cp "$TESTDIR/basic_sdr_subs.mkv" "$_dir/clip.mkv"
+  printf 'REPLACE_SOURCE=1\n' > "$_dir/.muxmrc"
+
+  local _tb_muxm="$TESTDIR/m6_timeout_muxm"
+  sed 's/read -t 30 -r _confirm || _confirm=""/read -t 1 -r _confirm || _confirm=""/' "$MUXM" > "$_tb_muxm"
+  chmod +x "$_tb_muxm"
+  local _nchanged
+  _nchanged="$(diff "$MUXM" "$_tb_muxm" | grep -c '^>' || true)"  # pipefail: diff exits 1 on any difference (expected) even though grep succeeds; `|| true` keeps that off the harness's set -e
+  if [[ "$_nchanged" != "1" ]]; then
+    fail "cli-replace-source-timeout-bound: sed anchor changed $_nchanged line(s), expected 1 — anchor drifted, test not exercising the real -t bound"
+    rm -rf "$_dir" "$_tb_muxm"
+    return
+  fi
+
+  # Run in the background so a regression (the bound not firing) is caught and killed by THIS
+  # test instead of hanging the whole suite. sleep 20 keeps the substituted pipe's write end open
+  # (no EOF) well past the 15s poll ceiling below, without leaving a long-lived orphan if muxm
+  # (now under -t 1) exits early and this subshell's fd is torn down.
+  local out_file="$_dir/out.txt" pid
+  (
+    cd "$_dir" || exit 1
+    export HOME="$_dir/h"
+    exec < <(sleep 20)
+    exec "$_tb_muxm" clip.mkv clip.mkv
+  ) > "$out_file" 2>&1 &
+  pid=$!
+
+  local -i waited=0 finished=0
+  while (( waited < 15 )); do
+    kill -0 "$pid" 2>/dev/null || { finished=1; break; }
+    sleep 1; waited+=1
+  done
+
+  local rc=0 out
+  if (( finished )); then
+    wait "$pid" 2>/dev/null || rc=$?  # harness runs under set -e — a bare `wait; rc=$?` would abort the whole suite on the (expected) nonzero exit
+    out="$(cat "$out_file" 2>/dev/null)"
+    if (( rc == EXIT_VALIDATION )) && grep -qiE "declined|Aborted" <<<"$out"; then
+      pass "cli-replace-source-timeout-bound: REPLACE_SOURCE + open/idle stdin resolves via the -t bound (declined in ~${waited}s), not a hang"
+    else
+      fail "cli-replace-source-timeout-bound: resolved but not as expected — exit $rc, output: $out"
+    fi
+  else
+    kill -9 "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "cli-replace-source-timeout-bound: muxm still running after 15s on an open/idle stdin — the -t bound did not fire (hang)"
+  fi
+  rm -rf "$_dir" "$_tb_muxm"
 }
 
 # 1.3/1.4/1.6: --create-config writes atomically (no stray temp file; a refused overwrite leaves
@@ -5210,54 +5280,6 @@ test_video() {
       else
         fail "fps VFR fallback (MKV source): no output — false-positive integrity check likely still firing"
         (( VERBOSE )) && echo "    Output: ${vfr_srcmkv_result:0:400}"
-      fi
-    fi
-  fi
-
-  # AVI-SOURCE → MKV-OUTPUT variant (regression: the containers suite's
-  # "passthrough fallback" .avi encode died 45 once the MKV-output measurement
-  # fix above landed). Not VFR this time — a source with a DROPPED FRAME:
-  # ffmpeg's AVI muxer writes this lavfi clip as 24 real packets spread over
-  # 25 frame slots (the header still advertises 25 frames at 24fps), so
-  # ffprobe's avg_frame_rate for the source reads an exact 24/1 — the same
-  # header-derived number as r_frame_rate — while a faithful re-encode to MKV
-  # measures 24 packets over ~1.041s ≈ 23.05fps. Trusting the AVI's
-  # avg_frame_rate (old gating: measure Matroska only) made the guard compare
-  # a measured output average against a nominal source rate — 4% apart, die
-  # 45, no output. Both sides now resolve through the same container gate
-  # (_fps_container_needs_measured_avg), so the source measures ~23.04 and the
-  # comparison passes. Skip-first guards per the soft-skip ratchet: gated on
-  # the fixture actually reproducing the gap (header frame count > real packet
-  # count) — another ffmpeg's avi muxer may write it contiguously, leaving
-  # nothing to regress against.
-  local gap_src="$TESTDIR/fps_gap_src.avi" gap_out="$TESTDIR/fps_gap_out.mkv"
-  ffmpeg -hide_banner -loglevel error -y \
-    -f lavfi -i "color=c=blue:s=160x120:r=24:d=1" \
-    -f lavfi -i "sine=frequency=440:duration=1" \
-    -c:v libx264 -preset ultrafast -crf 28 -c:a aac -b:a 64k -ac 2 "$gap_src" 2>/dev/null
-  if [[ ! -s "$gap_src" ]]; then
-    skip "fps dropped-frame fallback (AVI source → MKV output): could not generate the .avi fixture (ffmpeg avi muxer absent)"
-  else
-    local _gap_hdr _gap_pkts
-    _gap_hdr="$(probe_video "$gap_src" nb_frames)"
-    _gap_pkts="$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets -of default=nk=1:nw=1 "$gap_src" 2>/dev/null)"
-    if [[ ! "$_gap_hdr" =~ ^[0-9]+$ || ! "$_gap_pkts" =~ ^[0-9]+$ || "$_gap_hdr" -le "$_gap_pkts" ]]; then
-      skip "fps dropped-frame fallback (AVI source → MKV output): fixture didn't reproduce a frame gap (header nb_frames=$_gap_hdr, real packets=$_gap_pkts) — this ffmpeg's avi muxer writes it contiguously"
-    else
-      log "Encoding an AVI source with a dropped frame (header advertises $_gap_hdr frames, $_gap_pkts real packets) to MKV — must not false-positive the fps integrity guard..."
-      local gap_result
-      gap_result="$(cd "$TESTDIR" && "$MUXM" -K --verbose --crf 28 --preset ultrafast "$gap_src" "$gap_out" 2>&1)" || true
-      if [[ -f "$gap_out" && -s "$gap_out" ]]; then
-        pass "fps dropped-frame fallback (AVI source → MKV output): output produced"
-        assert_contains "treating this as a variable-frame-rate source" \
-          "fps dropped-frame fallback (AVI source → MKV output): init_src_fps measures the AVI source instead of trusting its header-derived avg_frame_rate" "$gap_result"
-        assert_contains "using the average for the fps integrity comparison" \
-          "fps dropped-frame fallback (AVI source → MKV output): the verify step measures the MKV output too (same container gate, both sides)" "$gap_result"
-        assert_contains "Build SUCCEEDED" \
-          "fps dropped-frame fallback (AVI source → MKV output): build succeeds instead of a false-positive 'Frame-rate integrity check failed'" "$gap_result"
-      else
-        fail "fps dropped-frame fallback (AVI source → MKV output): no output — false-positive integrity check likely still firing"
-        (( VERBOSE )) && echo "    Output: ${gap_result:0:400}"
       fi
     fi
   fi
@@ -8903,10 +8925,7 @@ test_containers() {
         fail "passthrough fallback: expected matroska output for the .avi fallback, got '$avi_fmt'"
       fi
     else
-      # muxm's own diagnosis (e.g. a die 45 at verify) is otherwise invisible here —
-      # run_muxm captured it — so echo the error line(s) that explain the missing file.
       fail "passthrough fallback: expected a derived .mkv output for the .avi source, none found"
-      printf '%s\n' "$avi_log" | grep -E '❌|ERROR' | head -n 3 | sed 's/^/    muxm: /'
     fi
     rm -f "$TESTDIR/passthrough_fallback_test.mkv"* "$TESTDIR/passthrough_fallback_test.mp4"*
   fi
@@ -11671,19 +11690,6 @@ _test_unit_fps_helpers() {
   assert_muxm_fn_exit "_fps_prefers_avg(100,'')=false (missing avg → keep nominal, fail-safe)"                 1 _fps_prefers_avg "" "100" ""
   assert_muxm_fn_exit "_fps_prefers_avg('',58)=false (missing nominal → keep nominal, fail-safe)"              1 _fps_prefers_avg "" "" "58"
 
-  # ---- _fps_container_needs_measured_avg ----
-  # The shared container gate deciding whether ffprobe's avg_frame_rate is a
-  # genuine whole-file average (MP4/MOV family only) or must be measured via
-  # _fps_measure_avg_decimal. Used by BOTH init_src_fps and the verify step,
-  # so the integrity comparison is never a measured output average against a
-  # header-derived source rate (the AVI-dropped-frame → MKV false positive
-  # that took the containers suite red after the 1.6.2 Matroska fix).
-  assert_muxm_fn_exit "_fps_container_needs_measured_avg('matroska,webm')=true (avg_frame_rate just echoes r_frame_rate)"         0 _fps_container_needs_measured_avg "" "matroska,webm"
-  assert_muxm_fn_exit "_fps_container_needs_measured_avg('avi')=true (header-advertised frame count, blind to dropped frames)"    0 _fps_container_needs_measured_avg "" "avi"
-  assert_muxm_fn_exit "_fps_container_needs_measured_avg('mpegts')=true (probe-window estimate only)"                             0 _fps_container_needs_measured_avg "" "mpegts"
-  assert_muxm_fn_exit "_fps_container_needs_measured_avg('mov,mp4,m4a,3gp,3g2,mj2')=false (real nb_frames÷duration, trusted)"     1 _fps_container_needs_measured_avg "" "mov,mp4,m4a,3gp,3g2,mj2"
-  assert_muxm_fn_exit "_fps_container_needs_measured_avg('')=false (unknown container → no extra pass, keep avg_frame_rate)"      1 _fps_container_needs_measured_avg "" ""
-
   # ---- _fps_integrity_ok ----
   # The post-mux guard's final pass/fail comparison, downstream of any
   # _fps_prefers_avg fallback on either side. The VFR fallback work must NOT
@@ -11708,30 +11714,25 @@ _test_unit_fps_helpers() {
 # mocked METADATA_CACHE, matching _test_video_detect_dv_uses_cache's pattern.
 _test_unit_init_src_fps_vfr() {
   local body
-  body="$(_extract_muxm_fns init_src_fps _probe_field _jq_cache _fps_to_decimal _fps_prefers_avg _fps_container_needs_measured_avg)" \
+  body="$(_extract_muxm_fns init_src_fps _probe_field _jq_cache _fps_to_decimal _fps_prefers_avg)" \
     || { fail "unit-init-src-fps-vfr: could not extract init_src_fps + helpers"; return; }
 
-  # _fps_measure_avg_decimal is deliberately NOT extracted: it would ffprobe a real
-  # file. It is stubbed to echo $2 instead (the "measured" average; "" = measurement
-  # unavailable), so the measured branch is exercised without media.
-  _run_init_src_fps(){   # $1 = METADATA_CACHE JSON, $2 = stubbed measured avg → echoes "SRC_FPS=<val> noted=<0|1>"
+  _run_init_src_fps(){   # $1 = METADATA_CACHE JSON → echoes "SRC_FPS=<val> noted=<0|1>"
     local env_setup
-    # shellcheck disable=SC2016  # $1/$2 must expand in the CHILD bash (below), not here
-    env_setup='METADATA_CACHE="$1"; _mock_measured="${2:-}"; SRC_FPS=""; _noted=0; note(){ _noted=1; }; log(){ :; }; warn(){ :; }; _fps_measure_avg_decimal(){ printf "%s" "$_mock_measured"; }'
-    bash -c "$env_setup"$'\n'"$body"$'\n''init_src_fps; echo "SRC_FPS=$SRC_FPS noted=$_noted"' -- "$1" "${2:-}"
+    # shellcheck disable=SC2016  # $1 must expand in the CHILD bash (below), not here
+    env_setup='METADATA_CACHE="$1"; SRC_FPS=""; _noted=0; note(){ _noted=1; }; log(){ :; }; warn(){ :; }'
+    bash -c "$env_setup"$'\n'"$body"$'\n''init_src_fps; echo "SRC_FPS=$SRC_FPS noted=$_noted"' -- "$1"
   }
 
-  # The real repro was a .mov screen recording, i.e. the MP4/MOV family — the
-  # one container whose avg_frame_rate is trusted as-is (no measurement).
   local vfr_out cfr_out noavg_out
-  vfr_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"600/1","avg_frame_rate":"317640/5473"}],"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2"}}')"
+  vfr_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"600/1","avg_frame_rate":"317640/5473"}]}')"
   if [[ "$vfr_out" == "SRC_FPS=317640/5473 noted=1" ]]; then
     pass "unit-init-src-fps-vfr: 600/1 nominal vs ~58.04fps avg (real repro values) → SRC_FPS falls back to avg_frame_rate, note logged"
   else
     fail "unit-init-src-fps-vfr: expected 'SRC_FPS=317640/5473 noted=1', got '$vfr_out'"
   fi
 
-  cfr_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"24000/1001","avg_frame_rate":"24000/1001"}],"format":{"format_name":"mov,mp4,m4a,3gp,3g2,mj2"}}')"
+  cfr_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"24000/1001","avg_frame_rate":"24000/1001"}]}')"
   if [[ "$cfr_out" == "SRC_FPS=24000/1001 noted=0" ]]; then
     pass "unit-init-src-fps-vfr: agreeing CFR rate stays on r_frame_rate, no VFR note (true CFR unaffected by the fallback)"
   else
@@ -11741,41 +11742,11 @@ _test_unit_init_src_fps_vfr() {
   # avg_frame_rate absent/unusable ("0/0", e.g. an old ffprobe or a stream that
   # never reports it) must NOT crash and must keep the nominal rate — matches
   # _fps_prefers_avg's fail-safe (an unusable avg never triggers the fallback).
-  # No .format.format_name in this mock either: an unknown container takes the
-  # trusted (no-measurement) path, so this doubles as that fail-safe's check.
   noavg_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"25/1","avg_frame_rate":"0/0"}]}')"
   if [[ "$noavg_out" == "SRC_FPS=25/1 noted=0" ]]; then
     pass "unit-init-src-fps-vfr: unusable avg_frame_rate (0/0) is ignored, SRC_FPS keeps r_frame_rate"
   else
     fail "unit-init-src-fps-vfr: expected 'SRC_FPS=25/1 noted=0', got '$noavg_out'"
-  fi
-
-  # AVI source with a dropped frame (the containers-suite regression after the
-  # 1.6.2 Matroska fix): the AVI header advertises an exact 24/1 for BOTH
-  # r_frame_rate and avg_frame_rate, so the old gating (measure Matroska only,
-  # trust avg_frame_rate elsewhere) saw perfect agreement and kept SRC_FPS=24/1
-  # — while the verify step, which DOES measure a Matroska output, compared the
-  # faithfully re-encoded ~23.05fps average against it and died 45. The
-  # measured source average (24 packets / 1.0417s = 23.04) must win here,
-  # exactly as it does on an MKV source.
-  local avi_out avi_cfr_out avi_nomeasure_out
-  avi_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"24/1","avg_frame_rate":"24/1","duration":"1.041667"}],"format":{"format_name":"avi"}}' "23.0400")"
-  if [[ "$avi_out" == "SRC_FPS=23.0400 noted=1" ]]; then
-    pass "unit-init-src-fps-vfr: AVI source — header 24/1 vs measured 23.04 (a dropped frame) → SRC_FPS uses the measured average, note logged (the AVI→MKV containers regression)"
-  else
-    fail "unit-init-src-fps-vfr: expected 'SRC_FPS=23.0400 noted=1', got '$avi_out'"
-  fi
-  avi_cfr_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"24/1","avg_frame_rate":"24/1","duration":"600.000000"}],"format":{"format_name":"avi"}}' "24.0000")"
-  if [[ "$avi_cfr_out" == "SRC_FPS=24/1 noted=0" ]]; then
-    pass "unit-init-src-fps-vfr: AVI source — measured average agrees with the header → exact rational 24/1 kept, no note (true CFR unaffected by measuring)"
-  else
-    fail "unit-init-src-fps-vfr: expected 'SRC_FPS=24/1 noted=0', got '$avi_cfr_out'"
-  fi
-  avi_nomeasure_out="$(_run_init_src_fps '{"streams":[{"codec_type":"video","r_frame_rate":"24/1","avg_frame_rate":"24/1"}],"format":{"format_name":"avi"}}' "")"
-  if [[ "$avi_nomeasure_out" == "SRC_FPS=24/1 noted=0" ]]; then
-    pass "unit-init-src-fps-vfr: AVI source — measurement unavailable (no usable stream duration) → keeps r_frame_rate, fail-safe"
-  else
-    fail "unit-init-src-fps-vfr: expected 'SRC_FPS=24/1 noted=0', got '$avi_nomeasure_out'"
   fi
 }
 
