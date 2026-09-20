@@ -13994,13 +13994,14 @@ _test_unit_dv_ffmpeg_wrap_mp4() {
   local body
   body="$(_extract_muxm_fns _dv_ffmpeg_wrap_mp4)" || { fail "unit-dv-ffmpeg-wrap: could not extract _dv_ffmpeg_wrap_mp4"; return; }
   _wrap_args(){   # $1=tag $2=SRC_FPS → recorded ffmpeg argv (the helper redirects the ffmpeg
-                  # command's stdout to its log arg, so the stub records argv to a side file instead)
+                  # command's stdout to its log arg, so the stub records argv to a side file instead;
+                  # the log arg is /dev/null — a relative name would be created in the caller's CWD)
     local _af; _af="$(mktemp)"
     bash -c "FFMPEG_FLAGS=(-hide_banner -loglevel error -y); SRC_FPS='$2'; _AF='$_af'
 _await_tracked_pid(){ wait \"\$1\" 2>/dev/null; return 0; }
 ffmpeg(){ printf '%s' \"\$*\" > \"\$_AF\"; }
 $body
-_dv_ffmpeg_wrap_mp4 IN.hevc OUT.mp4 log.txt '$1' 'lbl'"
+_dv_ffmpeg_wrap_mp4 IN.hevc OUT.mp4 /dev/null '$1' 'lbl'"
     cat "$_af"; rm -f "$_af"
   }
   local _hvc _dvh _dvh_nofps
