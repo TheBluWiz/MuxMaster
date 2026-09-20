@@ -270,14 +270,14 @@ enforce MUT-M5-UNBOUND cli \
   'cli-config-missing-value: --create-config with a trailing --crf (missing value)' \
   'M-M5-UNBOUND: _cc_need_val bounds-checks config-override values → clean-die-11 probe'
 
-# MUT-M6-EOF (M6): drop the `|| _confirm=""` EOF guard on the replace-source prompt. A
-# non-interactive stdin (EOF) then makes `read` fail and crash under set -e instead of a clean
-# die 11 decline.
+# MUT-M6-EOF (M6, extended for the -t 30 bound): drop the `|| _confirm=""` EOF/timeout guard on
+# the replace-source prompt. A non-interactive stdin (EOF) then makes `read` fail and crash under
+# set -e instead of a clean die 11 decline.
 # shellcheck disable=SC2016  # _confirm is literal sed text.
 enforce MUT-M6-EOF cli \
-  's/  read -r _confirm || _confirm="".*/  read -r _confirm/' \
+  's/  read -t 30 -r _confirm || _confirm="".*/  read -t 30 -r _confirm/' \
   'cli-replace-source-eof: REPLACE_SOURCE + EOF stdin → expected die 11' \
-  'M-M6-EOF: read EOF treated as decline → clean-die-11-not-crash probe'
+  'M-M6-EOF: read EOF/timeout treated as decline → clean-die-11-not-crash probe'
 
 # MUT-M7-BRIDGE (M7): make the deprecation bridge's guard always-true (compare the new var
 # to itself), reverting to the unconditional overwrite. With BOTH set in config the legacy value
@@ -571,6 +571,26 @@ enforce MUT-VCC-2 unit \
   's/if (( src_br_bps > max_br_bps )); then/if (( 0 )); then/' \
   'unit-video-copy-compliant copy-compliant: bitrate ceiling exceeded' \
   'M-VCC-2: MAX_COPY_BITRATE ceiling reject caught by the _video_is_copy_compliant unit test'
+
+# MUT-FPS-TAGSKIP: init_src_fps stops treating agreeing Matroska statistics tags as proof that no
+# VFR correction is needed (`if [[ -z "$avg_dec" ]] || _fps_prefers_avg …` → always-true), so every
+# Matroska source is packet-counted again — the full-file read that stalled a 29.5GB remux for
+# minutes right after `Loaded config` with no output. The agreeing-tags scenario runs on a SMALL
+# file, so the size gate can't mask it: a shimmed ffprobe records the count → red.
+# shellcheck disable=SC2016  # the variable refs are literal sed text.
+enforce MUT-FPS-TAGSKIP unit \
+  's/if \[\[ -z "\$avg_dec" \]\] || _fps_prefers_avg "\$dec" "\$avg_dec"; then/if true; then/' \
+  'unit-fps-no-full-read: agreeing tags should skip the count' \
+  'M-FPS-TAGSKIP: agreeing stats tags skip the full-file packet count → no-read-on-CFR-MKV probe'
+
+# MUT-FPS-SIZEGATE: raise _fps_measure_avg_decimal's 2 GiB ceiling out of reach, so a large
+# tag-less / stale-tag Matroska file is read end to end again. The large-file scenarios use a
+# sparse 3 GiB file and a shimmed ffprobe; the count is invoked → red.
+# shellcheck disable=SC2016  # literal sed text.
+enforce MUT-FPS-SIZEGATE unit \
+  's/local _FPS_COUNT_MAX_BYTES=2147483648 /local _FPS_COUNT_MAX_BYTES=2147483648000000 /' \
+  'unit-fps-no-full-read: large tag-less source must not be counted' \
+  'M-FPS-SIZEGATE: size gate stops the packet count on large files → gate-holds probe'
 
 printf '\n%sEnforced: %d passed, %d failed.%s\n' "$BOLD" "$PASS" "$FAIL" "$NC"
 if (( FAIL == 0 )); then
