@@ -1691,9 +1691,8 @@ _test_cli_replace_source_timeout_bound() {
   local out_file="$_dir/out.txt" pid
   (
     cd "$_dir" || exit 1
-    export HOME="$_dir/h"
     exec < <(sleep 20)
-    exec "$_tb_muxm" clip.mkv clip.mkv
+    HOME="$_dir/h" exec "$_tb_muxm" clip.mkv clip.mkv
   ) > "$out_file" 2>&1 &
   pid=$!
 
@@ -8899,10 +8898,17 @@ test_containers() {
   # muxm's OUTPUT_EXT decision sets the muxer, not ffmpeg auto-copy. atv-directplay-hq stays a
   # passthrough profile (archive now forces MKV unconditionally, so it wouldn't exercise this arm).
   # M-AVIFB-1 breaks the fallback default (mkv→mp4) → muxm derives a .mp4, no .mkv → red.
+  # d=3 (not d=1): the real encode below goes through muxm's fps-integrity guard, which for a
+  # Matroska output measures the TRUE average fps as (packet count / tagged video duration)
+  # rather than trusting ffprobe's avg_frame_rate (unpopulated for Matroska). Over a 1s/25-frame
+  # clip, a fixed, small duration-tag offset (e.g. encoder priming) is a large fraction of the
+  # total and skews that average enough to trip the guard's 1% tolerance (measured ~23.05 fps vs
+  # nominal 24 — a false-positive "desync", not a real one). The same fixed offset is negligible
+  # once diluted over 3s+, confirmed empirically (d=1/d=2 still trip it; d=3 does not).
   local avi_src="$TESTDIR/passthrough_fallback_test.avi"
   ffmpeg -hide_banner -loglevel error -y \
-    -f lavfi -i "color=c=blue:s=160x120:r=24:d=1" \
-    -f lavfi -i "sine=frequency=440:duration=1" \
+    -f lavfi -i "color=c=blue:s=160x120:r=24:d=3" \
+    -f lavfi -i "sine=frequency=440:duration=3" \
     -c:v libx264 -preset ultrafast -crf 28 \
     -c:a aac -b:a 64k -ac 2 \
     "$avi_src" 2>/dev/null
@@ -11750,6 +11756,99 @@ _test_unit_init_src_fps_vfr() {
   fi
 }
 
+# Regression guard for the "muxm hangs after `Loaded config`" report: on a Matroska source,
+# init_src_fps ran `ffprobe -count_packets` — which reads the ENTIRE file — before anything was
+# printed, and a 29.5GB remux ran for 6+ minutes. The unit mechanism can't watch a wall clock, so
+# it asserts the cause instead: with a PATH-shimmed `ffprobe` that records any invocation, a large
+# or tag-consistent source must never reach a count, while a small tag-less / tag-disagreeing one
+# still does (so the VFR detection this measurement exists for keeps working). The 3 GiB "large
+# file" is sparse (dd seek), so it costs no space or I/O.
+_test_unit_fps_no_full_read() {
+  local body
+  body="$(_extract_muxm_fns init_src_fps _probe_field _jq_cache _fps_to_decimal _fps_prefers_avg \
+            _fps_dur_to_secs _fps_tag_avg_decimal _file_size_bytes _fps_measure_avg_decimal)" \
+    || { fail "unit-fps-no-full-read: could not extract init_src_fps + helpers"; return; }
+
+  local d; d="$(mktemp -d "$TESTDIR/fps_nofullread.XXXXXX")"
+  mkdir -p "$d/bin"
+  printf '#!/bin/sh\n: > "%s/counted"\necho 120\n' "$d" > "$d/bin/ffprobe"   # 120 packets
+  chmod +x "$d/bin/ffprobe"
+  : > "$d/small.mkv"                                                          # tiny: under the size gate
+  dd if=/dev/zero of="$d/big.mkv" bs=1 count=0 seek=3221225472 2>/dev/null    # sparse 3 GiB: over it
+
+  # _run SRC_ABS METADATA_JSON → "SRC_FPS=<v> counted=<0|1>" (counted = the shim ffprobe ran)
+  _run(){
+    rm -f "$d/counted"
+    # shellcheck disable=SC2016  # $1/$2 must expand in the CHILD bash, not here
+    bash -c 'PATH="'"$d"'/bin:$PATH"; SRC_ABS="$1"; METADATA_CACHE="$2"; SRC_FPS=""; note(){ :; }; log(){ :; }; warn(){ :; }'$'\n'"$body"$'\n''init_src_fps; echo "SRC_FPS=$SRC_FPS counted=$([[ -e "'"$d"'/counted" ]] && echo 1 || echo 0)"' -- "$1" "$2"
+  }
+  local out
+  # mkvmerge-style stats tags that agree with the nominal rate (215328 frames / 2:29:40.972 = 23.976 —
+  # the reported file): the answer is already known, so the file must not be read at all. Run on
+  # the SMALL file on purpose: the size gate would also stop a count on the big one, so only here
+  # can the tag agreement alone be what prevents it (removing the tag check turns this red).
+  local tag_ok='{"format":{"format_name":"matroska,webm"},"streams":[{"codec_type":"video","r_frame_rate":"24000/1001","avg_frame_rate":"24000/1001","tags":{"DURATION":"02:29:40.972000000","NUMBER_OF_FRAMES":"215328"}}]}'
+  out="$(_run "$d/small.mkv" "$tag_ok")"
+  if [[ "$out" == "SRC_FPS=24000/1001 counted=0" ]]; then
+    pass "unit-fps-no-full-read: Matroska source with agreeing stats tags never triggers a packet count (the multi-minute stall)"
+  else
+    fail "unit-fps-no-full-read: agreeing tags should skip the count — expected 'SRC_FPS=24000/1001 counted=0', got '$out'"
+  fi
+
+  # No stats tags on a LARGE file (e.g. ffmpeg-written): the size gate must refuse the count and
+  # fall back to the nominal rate instead of reading the whole file.
+  local no_tags='{"format":{"format_name":"matroska,webm"},"streams":[{"codec_type":"video","r_frame_rate":"24/1","avg_frame_rate":"24/1","tags":{"DURATION":"00:00:05.000000000"}}]}'
+  out="$(_run "$d/big.mkv" "$no_tags")"
+  if [[ "$out" == "SRC_FPS=24/1 counted=0" ]]; then
+    pass "unit-fps-no-full-read: tag-less source over the size gate is not counted; nominal rate kept"
+  else
+    fail "unit-fps-no-full-read: large tag-less source must not be counted — expected 'SRC_FPS=24/1 counted=0', got '$out'"
+  fi
+
+  # Same metadata on a SMALL file: still counted (VFR detection is intact where it is cheap).
+  out="$(_run "$d/small.mkv" "$no_tags")"
+  if [[ "$out" == "SRC_FPS=24/1 counted=1" ]]; then
+    pass "unit-fps-no-full-read: tag-less source under the size gate is still counted (VFR detection preserved)"
+  else
+    fail "unit-fps-no-full-read: small tag-less source should still be counted — expected 'SRC_FPS=24/1 counted=1', got '$out'"
+  fi
+
+  # A STALE frame-count tag (ffmpeg -c copy carries NUMBER_OF_FRAMES over while rewriting
+  # DURATION) yields an absurd average. It must never be believed: on a small file it falls
+  # through to a real count (which agrees with nominal → SRC_FPS unchanged), and on a large file
+  # the gate keeps the nominal rate. Neither may adopt the bogus ~200000 fps.
+  local stale='{"format":{"format_name":"matroska,webm"},"streams":[{"codec_type":"video","r_frame_rate":"24/1","avg_frame_rate":"24/1","tags":{"DURATION":"00:00:05.000000000","NUMBER_OF_FRAMES":"999999"}}]}'
+  out="$(_run "$d/small.mkv" "$stale")"
+  if [[ "$out" == "SRC_FPS=24/1 counted=1" ]]; then
+    pass "unit-fps-no-full-read: stale NUMBER_OF_FRAMES tag is distrusted — verified by a real count, bogus average not adopted"
+  else
+    fail "unit-fps-no-full-read: stale tag (small file) — expected 'SRC_FPS=24/1 counted=1', got '$out'"
+  fi
+  out="$(_run "$d/big.mkv" "$stale")"
+  if [[ "$out" == "SRC_FPS=24/1 counted=0" ]]; then
+    pass "unit-fps-no-full-read: stale tag on a large file → gate keeps the nominal rate (no read, no bogus average)"
+  else
+    fail "unit-fps-no-full-read: stale tag (large file) — expected 'SRC_FPS=24/1 counted=0', got '$out'"
+  fi
+
+  # Pure helpers: tag arithmetic (the reported file) and its rejection of unusable input.
+  tagfn() { bash -c "$body"$'\n''_fps_tag_avg_decimal "$@"' -- "$@"; }
+  [[ "$(tagfn 215328 02:29:40.972000000)" == "23.9760" ]] \
+    && pass "unit-fps-no-full-read: _fps_tag_avg_decimal(215328, 02:29:40.972) = 23.9760" \
+    || fail "unit-fps-no-full-read: _fps_tag_avg_decimal(215328, 02:29:40.972) expected 23.9760, got '$(tagfn 215328 02:29:40.972000000)'"
+  [[ "$(tagfn 120 5.0)" == "24.0000" ]] \
+    && pass "unit-fps-no-full-read: _fps_tag_avg_decimal accepts a plain numeric duration (120/5.0 = 24)" \
+    || fail "unit-fps-no-full-read: _fps_tag_avg_decimal(120, 5.0) expected 24.0000, got '$(tagfn 120 5.0)'"
+  local bad_ok=1 bad
+  for bad in "  5.0" "abc 5.0" "0 5.0" "120 0" "120 bogus" " " ""; do
+    # shellcheck disable=SC2086  # deliberate word-splitting into FRAMES DUR
+    [[ -z "$(tagfn $bad)" ]] || { bad_ok=0; fail "unit-fps-no-full-read: _fps_tag_avg_decimal('$bad') should echo nothing, got '$(tagfn $bad)'"; }
+  done
+  (( bad_ok )) && pass "unit-fps-no-full-read: _fps_tag_avg_decimal rejects missing/non-numeric/zero inputs (echoes nothing)"
+
+  rm -rf "$d"
+}
+
 _test_unit_extract_helper() {
   # Self-test for _extract_muxm_fns: prove the helper works at all by extracting a target
   # plus a real pure-helper dep and
@@ -13177,6 +13276,7 @@ test_unit() {
   _test_unit_sii_dv_guard
   _test_unit_fps_helpers
   _test_unit_init_src_fps_vfr
+  _test_unit_fps_no_full_read
   _test_unit_extract_helper
   _test_unit_score_audio_stream
   _test_unit_rate_to_kbps

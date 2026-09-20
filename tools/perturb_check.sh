@@ -572,6 +572,26 @@ enforce MUT-VCC-2 unit \
   'unit-video-copy-compliant copy-compliant: bitrate ceiling exceeded' \
   'M-VCC-2: MAX_COPY_BITRATE ceiling reject caught by the _video_is_copy_compliant unit test'
 
+# MUT-FPS-TAGSKIP: init_src_fps stops treating agreeing Matroska statistics tags as proof that no
+# VFR correction is needed (`if [[ -z "$avg_dec" ]] || _fps_prefers_avg …` → always-true), so every
+# Matroska source is packet-counted again — the full-file read that stalled a 29.5GB remux for
+# minutes right after `Loaded config` with no output. The agreeing-tags scenario runs on a SMALL
+# file, so the size gate can't mask it: a shimmed ffprobe records the count → red.
+# shellcheck disable=SC2016  # the variable refs are literal sed text.
+enforce MUT-FPS-TAGSKIP unit \
+  's/if \[\[ -z "\$avg_dec" \]\] || _fps_prefers_avg "\$dec" "\$avg_dec"; then/if true; then/' \
+  'unit-fps-no-full-read: agreeing tags should skip the count' \
+  'M-FPS-TAGSKIP: agreeing stats tags skip the full-file packet count → no-read-on-CFR-MKV probe'
+
+# MUT-FPS-SIZEGATE: raise _fps_measure_avg_decimal's 2 GiB ceiling out of reach, so a large
+# tag-less / stale-tag Matroska file is read end to end again. The large-file scenarios use a
+# sparse 3 GiB file and a shimmed ffprobe; the count is invoked → red.
+# shellcheck disable=SC2016  # literal sed text.
+enforce MUT-FPS-SIZEGATE unit \
+  's/local _FPS_COUNT_MAX_BYTES=2147483648 /local _FPS_COUNT_MAX_BYTES=2147483648000000 /' \
+  'unit-fps-no-full-read: large tag-less source must not be counted' \
+  'M-FPS-SIZEGATE: size gate stops the packet count on large files → gate-holds probe'
+
 printf '\n%sEnforced: %d passed, %d failed.%s\n' "$BOLD" "$PASS" "$FAIL" "$NC"
 if (( FAIL == 0 )); then
   printf '%s%sRESULT: PERTURBATION GATE GREEN%s\n' "$BOLD" "$GREEN" "$NC"; exit 0

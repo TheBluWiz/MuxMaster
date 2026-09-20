@@ -122,11 +122,11 @@ fi
 # ===== Section 2: Branding / CLI constants =====================================================
 readonly APP_NAME="MuxMaster"
 readonly CLI_NAME="muxm"
-readonly VERSION="1.6.2"
+readonly VERSION="1.6.3"
 # Release date for the man-page .TH line, co-located with VERSION so a release bump updates
 # both together. _man_emit substitutes it for the __DATE__ token (like __VERSION__) — the date is no
 # longer a hidden literal buried mid-heredoc that the docs-parity guard can't see drifting.
-readonly RELEASE_DATE="2026-09-13"
+readonly RELEASE_DATE="2026-09-20"
 
 # Canonical list of valid profile names (space-separated for compgen/iteration).
 # All profile validation, error messages, completions, and config generators
@@ -8496,31 +8496,12 @@ _fps_integrity_ok(){
     'BEGIN{ d=s-o; if (d<0) d=-d; exit !(s>0 && d/s <= 0.01) }'
 }
 
-# Measure a file's TRUE average video fps directly, bypassing ffprobe's
-# avg_frame_rate field entirely: real packet count (via -count_packets — a
-# demux-only pass, no decoding, so it stays fast even on large files: ~0.1s
-# measured on a 473MB real-world capture) divided by the VIDEO STREAM's own
-# real duration. Needed because some containers never populate a genuine
-# avg_frame_rate at all — Matroska/WebM, in this ffprobe build, just echoes
-# r_frame_rate back verbatim rather than deriving it from real frame
-# count/duration — so _fps_prefers_avg has nothing genuine to compare
-# against on those files; callers gate on the container (format_name
-# containing "matroska") before calling this, since it costs a real extra
-# ffprobe pass and MP4/MOV already gets a trustworthy avg_frame_rate for
-# free.
-# The duration MUST be the video stream's own duration, not the container's
-# overall .format.duration: audio commonly runs a little longer than video
-# (encoder priming/padding), so format.duration silently pulls in the audio
-# track's length and skews the average low. Matroska exposes this per-stream
-# as a "tags.DURATION" string (HH:MM:SS.nnnnnnnnn) rather than a numeric
-# field, so this accepts either form.
-# Args: $1 — media file path
-#       $2 — the VIDEO stream's own duration: a plain decimal seconds value,
-#            or a Matroska "tags.DURATION" string (HH:MM:SS.nnnnnnnnn)
-# Echoes: the measured decimal fps; nothing if it couldn't be determined
-# (caller keeps whatever nominal/avg value it already had).
-_fps_measure_avg_decimal(){
-  local file="$1" dur="$2" secs
+# Convert a video stream's duration to decimal seconds. Accepts a plain decimal seconds value
+# (MP4/MOV expose it as .duration) or a Matroska "tags.DURATION" string (HH:MM:SS.nnnnnnnnn).
+# Echoes nothing on an unparseable or non-positive value.
+# Args: $1 — the VIDEO stream's own duration in either form
+_fps_dur_to_secs(){
+  local dur="${1:-}" secs
   if [[ "$dur" == *:* ]]; then
     [[ "$dur" =~ ^([0-9]+):([0-9]{2}):([0-9]+(\.[0-9]+)?)$ ]] || return 0
     secs="$(LC_ALL=C awk -v h="${BASH_REMATCH[1]}" -v m="${BASH_REMATCH[2]}" -v s="${BASH_REMATCH[3]}" \
@@ -8530,6 +8511,77 @@ _fps_measure_avg_decimal(){
     secs="$dur"
   fi
   LC_ALL=C awk -v d="$secs" 'BEGIN{ exit !(d>0) }' || return 0
+  printf '%s' "$secs"
+}
+
+# Average fps from a Matroska video stream's statistics tags (NUMBER_OF_FRAMES ÷ DURATION) —
+# arithmetic on values ffprobe already returned, so ZERO extra file I/O. mkvmerge writes both tags.
+# UNTRUSTED as a measurement: ffmpeg's Matroska muxer writes only DURATION, and a plain `-c copy`
+# remux carries a stale NUMBER_OF_FRAMES over verbatim while rewriting DURATION (a trimmed copy of
+# a long film would "average" thousands of fps). Use it only to PROVE agreement with the nominal
+# rate; when it disagrees (or is absent), the real count in _fps_measure_avg_decimal decides.
+# Args: $1 — NUMBER_OF_FRAMES tag value   $2 — the video stream's duration (see _fps_dur_to_secs)
+# Echoes: the decimal fps; nothing if either input is missing/unusable.
+_fps_tag_avg_decimal(){
+  local frames="${1:-}" secs
+  [[ "$frames" =~ ^[0-9]+$ ]] || return 0
+  secs="$(_fps_dur_to_secs "${2:-}")"
+  [[ -n "$secs" ]] || return 0
+  LC_ALL=C awk -v f="$frames" -v d="$secs" 'BEGIN{ if (f>0 && d>0) printf "%.4f", f/d }'
+}
+
+# Echo FILE's size in bytes; nothing if it can't be determined. Probes the BSD and GNU `stat`
+# dialects separately — on GNU coreutils `stat -f` means "filesystem status", so a chained
+# `A || B` would append B's answer to A's multi-line output (see _muxm_tier_is_trusted).
+# Args: $1 — file path
+_file_size_bytes(){
+  local _sz
+  _sz="$(stat -f%z "$1" 2>/dev/null)" && [[ "$_sz" =~ ^[0-9]+$ ]] && { printf '%s' "$_sz"; return 0; }
+  _sz="$(stat -c%s "$1" 2>/dev/null)" && [[ "$_sz" =~ ^[0-9]+$ ]] && { printf '%s' "$_sz"; return 0; }
+  return 0
+}
+
+# Measure a file's TRUE average video fps directly, bypassing ffprobe's
+# avg_frame_rate field entirely: real packet count (via -count_packets — a
+# demux-only pass, no decoding) divided by the VIDEO STREAM's own real
+# duration. Needed because some containers never populate a genuine
+# avg_frame_rate at all — Matroska/WebM, in this ffprobe build, just echoes
+# r_frame_rate back verbatim rather than deriving it from real frame
+# count/duration — so _fps_prefers_avg has nothing genuine to compare
+# against on those files; callers gate on the container (format_name
+# containing "matroska") before calling this, since it costs a real extra
+# ffprobe pass and MP4/MOV already gets a trustworthy avg_frame_rate for
+# free.
+# COST: -count_packets reads the ENTIRE file, so it is I/O-bound and scales with file size —
+# it is only "instant" while the file sits in the page cache. A 29.5GB Matroska remux ran for
+# 6+ minutes with no output at all (the "hang after Loaded config" report), before the run had
+# even started encoding. Files over _FPS_COUNT_MAX_BYTES are therefore NOT counted: the function
+# returns nothing and callers keep the container's nominal rate, exactly as they did before this
+# measurement existed. Large real-world media is essentially always CFR, which is the case the
+# nominal rate already gets right; the cheap tag-based agreement check in init_src_fps means even
+# a large file rarely gets this far.
+# The duration MUST be the video stream's own duration, not the container's
+# overall .format.duration: audio commonly runs a little longer than video
+# (encoder priming/padding), so format.duration silently pulls in the audio
+# track's length and skews the average low. Matroska exposes this per-stream
+# as a "tags.DURATION" string (HH:MM:SS.nnnnnnnnn) rather than a numeric
+# field, so this accepts either form.
+# Args: $1 — media file path
+#       $2 — the VIDEO stream's own duration: a plain decimal seconds value,
+#            or a Matroska "tags.DURATION" string (HH:MM:SS.nnnnnnnnn)
+# Echoes: the measured decimal fps; nothing if it couldn't be determined or the file is too
+# large to count cheaply (caller keeps whatever nominal/avg value it already had).
+_fps_measure_avg_decimal(){
+  local file="$1" secs
+  local _FPS_COUNT_MAX_BYTES=2147483648   # 2 GiB — see COST above
+  secs="$(_fps_dur_to_secs "${2:-}")"
+  [[ -n "$secs" ]] || return 0
+  local bytes
+  bytes="$(_file_size_bytes "$file")"
+  if [[ ! "$bytes" =~ ^[0-9]+$ ]] || (( bytes > _FPS_COUNT_MAX_BYTES )); then
+    log "[fps] not counting packets in '${file##*/}' (${bytes:-unknown} bytes > ${_FPS_COUNT_MAX_BYTES}-byte limit, or size unknown): it reads the whole file; keeping the container's nominal frame rate."
+    return 0
+  fi
   local frames
   frames="$(ffprobe -v error -select_streams v:0 -count_packets \
     -show_entries stream=nb_read_packets -of default=nk=1:nw=1 "$file" 2>/dev/null)"
@@ -8573,10 +8625,20 @@ init_src_fps(){
   SRC_FPS="$raw"
   src_format="$(_jq_cache -r '.format.format_name // empty')"
   if [[ "$src_format" == *matroska* ]]; then
-    local src_dur
+    local src_dur src_frames
     src_dur="$(_probe_field duration)"
     [[ -z "$src_dur" ]] && src_dur="$(_probe_field "tags.DURATION")"
-    avg_dec="$(_fps_measure_avg_decimal "$SRC_ABS" "$src_dur")"
+    # Free check first: the stream's own NUMBER_OF_FRAMES ÷ DURATION statistics tags (mkvmerge
+    # writes both). They are only trusted to prove AGREEMENT with the nominal rate — a stale tag
+    # (ffmpeg -c copy carries NUMBER_OF_FRAMES over unchanged) must never be acted on. If they
+    # agree there is nothing to correct and no reason to read the file; if they disagree, or are
+    # absent, only a real packet count is trustworthy (size-gated in _fps_measure_avg_decimal —
+    # reading a multi-GB remux end to end ran for minutes here before anything was printed).
+    src_frames="$(_probe_field "tags.NUMBER_OF_FRAMES")"
+    avg_dec="$(_fps_tag_avg_decimal "$src_frames" "$src_dur")"
+    if [[ -z "$avg_dec" ]] || _fps_prefers_avg "$dec" "$avg_dec"; then
+      avg_dec="$(_fps_measure_avg_decimal "$SRC_ABS" "$src_dur")"
+    fi
     avg="$avg_dec"
   else
     avg="$(_probe_field avg_frame_rate)"
@@ -14745,7 +14807,11 @@ main() {
           # this whole guard exists to avoid. Measure the true average
           # directly instead (_fps_measure_avg_decimal) for those containers;
           # MP4/MOV already gets a trustworthy avg_frame_rate for free, so
-          # skip the extra ffprobe pass there.
+          # skip the extra ffprobe pass there. The count reads the whole
+          # file, so _fps_measure_avg_decimal declines outputs over its size
+          # ceiling (returns nothing → the nominal rate is compared): this
+          # runs after EVERY Matroska encode, and ffmpeg's muxer writes no
+          # NUMBER_OF_FRAMES tag to shortcut it.
           local _out_fps_dec="$v_fps" _v_avg_dec
           if [[ "$v_format" == *matroska* ]]; then
             _v_avg_dec="$(_fps_measure_avg_decimal "$TMP_OUT" "$v_dur_tag")"
